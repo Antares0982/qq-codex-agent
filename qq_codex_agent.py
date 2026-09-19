@@ -12,6 +12,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import time
 import tomllib
 import uuid
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from openai_codex import (
 LOG = logging.getLogger("qq-codex-agent")
 IMAGE_LIMIT = 10 * 1024 * 1024
 OUTPUT_LIMIT = 32 * 1024 * 1024
+THREAD_IDLE = 2 * 60 * 60
 HELP = """直接发送文字或图片，可提问、执行代码或请求生成图片。
 /help 查看用法
 /model 列出可选模型及本会话设置
@@ -132,6 +134,7 @@ class Message:
     text: str
     images: list[str]
     unsupported: bool
+    generation: int = 0
 
 
 def parse_message(event, settings):
@@ -371,6 +374,7 @@ class Agent:
             CREATE TABLE IF NOT EXISTS sessions (key TEXT PRIMARY KEY, thread TEXT, folder TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, status TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS models (key TEXT PRIMARY KEY, model TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS activity (key TEXT PRIMARY KEY, received REAL NOT NULL, message_gen INTEGER NOT NULL, thread_gen INTEGER NOT NULL);
             UPDATE messages SET status='interrupted' WHERE status IN ('queued', 'running');
         """)
         self.queue = asyncio.Queue(settings.queue_limit)
@@ -416,6 +420,19 @@ class Agent:
                 self.controls.add(task)
                 task.add_done_callback(self.controls.discard)
             return
+        now = time.time()
+        row = self.db.execute(
+            "SELECT received, message_gen, thread_gen FROM activity WHERE key=?",
+            (message.key,),
+        ).fetchone()
+        message.generation = row[1] if row else 0
+        if row and now - row[0] > THREAD_IDLE:
+            message.generation += 1
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO activity VALUES (?, ?, ?, ?)",
+                (message.key, now, message.generation, row[2] if row else 0),
+            )
         self.queue.put_nowait(message)
         self.mark(message, "queued")
 
@@ -548,6 +565,9 @@ class Agent:
                         self.db.execute(
                             "DELETE FROM sessions WHERE key=?", (message.key,)
                         )
+                        self.db.execute(
+                            "DELETE FROM activity WHERE key=?", (message.key,)
+                        )
                 await self.safe_send(
                     message,
                     "已重置会话及工作文件。"
@@ -571,11 +591,19 @@ class Agent:
                     await self.safe_send(message, "尚未登录，请管理员完成设备码登录。")
                     self.mark(message, "failed")
                     return
-                await self.safe_send(message, "开始处理。", intermediate=True)
                 row = self.db.execute(
                     "SELECT thread, folder FROM sessions WHERE key=?", (message.key,)
                 ).fetchone()
                 thread_id, folder_name = row if row else (None, uuid.uuid4().hex)
+                row = self.db.execute(
+                    "SELECT thread_gen FROM activity WHERE key=?",
+                    (message.key,),
+                ).fetchone()
+                renewing = thread_id is not None and message.generation > (
+                    row[0] if row else 0
+                )
+                if renewing:
+                    thread_id = None
                 folder = self.settings.workspace_dir / folder_name
                 folder.mkdir(mode=0o700, exist_ok=True)
                 options = {
@@ -598,6 +626,17 @@ class Agent:
                             "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?)",
                             (message.key, thread.id, folder_name),
                         )
+                        self.db.execute(
+                            "UPDATE activity SET thread_gen=? WHERE key=?",
+                            (message.generation, message.key),
+                        )
+                if renewing:
+                    await self.safe_send(
+                        message,
+                        "距上一条消息已超过两小时，已新建一个 thread。",
+                        intermediate=True,
+                    )
+                await self.safe_send(message, "开始处理。", intermediate=True)
                 inputs = [TextInput(f"QQ 用户 {message.sender}:\n{message.text}")]
                 for image in message.images:
                     data = await self.bot.image(image)

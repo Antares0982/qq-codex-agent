@@ -383,6 +383,55 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         turn.interrupt.assert_not_called()
 
+    async def test_thread_idle(self):
+        self.setup_turn([turn_done()])
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO sessions VALUES ('private-1', 'old-thread', 'folder')"
+            )
+            self.agent.db.execute(
+                "INSERT INTO activity VALUES ('private-1', 1000, 0, 0)"
+            )
+        with patch.object(app.time, "time", return_value=1000 + app.THREAD_IDLE + 1):
+            self.agent.receive(event(identifier=2))
+        message = self.agent.queue.get_nowait()
+        await self.agent.execute(message)
+        self.codex.thread_resume.assert_not_awaited()
+        self.codex.thread_start.assert_awaited_once()
+        self.assertEqual(
+            self.agent.db.execute(
+                "SELECT thread, folder FROM sessions WHERE key='private-1'"
+            ).fetchone(),
+            ("test-thread", "folder"),
+        )
+        self.assertEqual(
+            [call.kwargs["text"] for call in self.bot.send.call_args_list],
+            [
+                "距上一条消息已超过两小时，已新建一个 thread。",
+                "开始处理。",
+                "任务完成。",
+            ],
+        )
+
+    async def test_thread_idle_group_silent(self):
+        self.setup_turn([turn_done()])
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO sessions VALUES ('group-10', 'old-thread', 'folder')"
+            )
+            self.agent.db.execute(
+                "INSERT INTO activity VALUES ('group-10', 1000, 0, 0)"
+            )
+        with patch.object(app.time, "time", return_value=1000 + app.THREAD_IDLE + 1):
+            self.agent.receive(event(group=10, identifier=2))
+        await self.agent.execute(self.agent.queue.get_nowait())
+        self.codex.thread_resume.assert_not_awaited()
+        self.codex.thread_start.assert_awaited_once()
+        self.assertEqual(
+            [call.kwargs for call in self.bot.send.call_args_list],
+            [{"text": "任务完成。"}],
+        )
+
     async def test_group_silence(self):
         image = ImageGenerationThreadItem(
             id="image1",
