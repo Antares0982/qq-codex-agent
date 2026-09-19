@@ -1,0 +1,9 @@
+private_users = []
+groups = {}
+napcat_url = "ws://127.0.0.1:3001"
+token_file = "/etc/qq-codex-agent/napcat-token"
+state_dir = "/var/lib/qq-codex-agent"
+workspace_dir = "/var/lib/qq-codex-work"
+agents_file = "/etc/qq-codex-agent/AGENTS.md"
+queue_limit = 8
+task_timeout = 900
