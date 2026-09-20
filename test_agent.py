@@ -43,8 +43,10 @@ def item_done(item):
     )
 
 
-def event(user=1, group=None, mention=True, identifier=1, text="hello"):
+def event(user=1, group=None, mention=True, identifier=1, text="hello", reply=None):
     segments = [{"type": "text", "data": {"text": text}}]
+    if reply is not None:
+        segments.insert(0, {"type": "reply", "data": {"id": reply}})
     if mention:
         segments.append({"type": "at", "data": {"qq": "99"}})
     return {
@@ -71,7 +73,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             root / "work",
             root / "AGENTS.md",
         )
-        self.bot = NS(send=AsyncMock(), image=AsyncMock(return_value=PNG))
+        self.bot = NS(
+            send=AsyncMock(),
+            image=AsyncMock(return_value=PNG),
+            reply_images=AsyncMock(return_value=[]),
+        )
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
         self.agent = app.Agent(self.settings, self.bot, self.codex)
 
@@ -126,6 +132,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.key, app.parse_message(event(), self.settings).key)
         self.agent.receive(event())
         self.agent.receive(event())
+        self.assertEqual(self.agent.queue.qsize(), 1)
+
+    def test_reply_admission(self):
+        message = app.parse_message(event(group=10, text="", reply="42"), self.settings)
+        self.assertEqual(message.reply, "42")
+        self.agent.receive(event(group=10, text="", reply="42"))
         self.assertEqual(self.agent.queue.qsize(), 1)
 
     def test_invalid_config(self):
@@ -383,6 +395,24 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         turn.interrupt.assert_not_called()
 
+    async def test_reply_image(self):
+        self.setup_turn([turn_done()])
+        self.bot.reply_images.return_value = ["quoted-image"]
+        message = app.parse_message(
+            event(group=10, text="解释图片", reply="42"), self.settings
+        )
+        await self.agent.execute(message)
+        self.bot.reply_images.assert_awaited_once_with("42", {"group_id": 10})
+        self.bot.image.assert_awaited_once_with("quoted-image")
+        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertIsInstance(inputs[1], app.LocalImageInput)
+
+    async def test_empty_reply(self):
+        message = app.parse_message(event(group=10, text="", reply="42"), self.settings)
+        await self.agent.execute(message)
+        self.assertIn("没有可读取", self.bot.send.call_args.kwargs["text"])
+        self.assertFalse(hasattr(self.codex, "thread_start"))
+
     async def test_thread_idle(self):
         self.setup_turn([turn_done()])
         with self.agent.db:
@@ -579,6 +609,23 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             await bot.image("id")
         bot.call.return_value = {"base64": base64.b64encode(PNG).decode()}
         self.assertEqual(await bot.image("id"), PNG)
+
+    async def test_reply_images(self):
+        bot = app.OneBot(self.settings)
+        bot.call = AsyncMock(
+            return_value={
+                "message_type": "group",
+                "group_id": 10,
+                "message": [
+                    {"type": "text", "data": {"text": "caption"}},
+                    {"type": "image", "data": {"file": "image-id"}},
+                ],
+            }
+        )
+        self.assertEqual(await bot.reply_images("42", {"group_id": 10}), ["image-id"])
+        bot.call.return_value["group_id"] = 11
+        with self.assertRaises(ValueError):
+            await bot.reply_images("42", {"group_id": 10})
 
     async def test_action_response(self):
         bot = app.OneBot(self.settings)

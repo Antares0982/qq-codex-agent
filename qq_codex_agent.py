@@ -36,6 +36,7 @@ IMAGE_LIMIT = 10 * 1024 * 1024
 OUTPUT_LIMIT = 32 * 1024 * 1024
 THREAD_IDLE = 2 * 60 * 60
 HELP = """直接发送文字或图片，可提问、执行代码或请求生成图片。
+群聊可先发送图片，再回复该图片并 @ bot 提问。
 /help 查看用法
 /model 列出可选模型及本会话设置
 /model <模型ID> 切换本会话模型，下一轮请求生效
@@ -133,6 +134,7 @@ class Message:
     sender: str
     text: str
     images: list[str]
+    reply: str | None
     unsupported: bool
     generation: int = 0
 
@@ -165,7 +167,7 @@ def parse_message(event, settings):
             key, target = f"group-{group}", {"group_id": int(group)}
         else:
             return None
-        text, images, unsupported = [], [], False
+        text, images, reply, unsupported = [], [], None, False
         for segment in segments:
             data = segment["data"]
             match segment["type"]:
@@ -178,7 +180,17 @@ def parse_message(event, settings):
                     if not isinstance(file, str) or not file or len(file) > 4096:
                         return None
                     images.append(file)
-                case "at" | "reply":
+                case "reply":
+                    identifier = data.get("id")
+                    if (
+                        reply is not None
+                        or type(identifier) not in (str, int)
+                        or not str(identifier)
+                        or len(str(identifier)) > 128
+                    ):
+                        return None
+                    reply = str(identifier)
+                case "at":
                     pass
                 case _:
                     unsupported = True
@@ -192,6 +204,7 @@ def parse_message(event, settings):
             sender,
             "".join(text).strip(),
             images,
+            reply,
             unsupported,
         )
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -325,6 +338,34 @@ class OneBot:
         image_suffix(data)
         return data
 
+    async def reply_images(self, identifier, target):
+        result = await self.call("get_msg", {"message_id": identifier})
+        expected = "group" if "group_id" in target else "private"
+        if result.get("message_type") != expected:
+            raise ValueError("Reply belongs to another conversation")
+        if (
+            expected == "group"
+            and result.get("group_id") is not None
+            and qq_id(result["group_id"]) != str(target["group_id"])
+        ):
+            raise ValueError("Reply belongs to another group")
+        segments = result.get("message")
+        if not isinstance(segments, list):
+            raise ValueError("Invalid replied message")
+        images = []
+        for segment in segments:
+            if not isinstance(segment, dict) or not isinstance(
+                segment.get("data"), dict
+            ):
+                raise ValueError("Invalid replied message")
+            if segment.get("type") != "image":
+                continue
+            file = segment["data"].get("file")
+            if not isinstance(file, str) or not file or len(file) > 4096:
+                raise ValueError("Invalid replied image")
+            images.append(file)
+        return images
+
     async def listen(self, receive):
         token = self.settings.token_file.read_text().strip()
         async with aiohttp.ClientSession(trust_env=False) as client:
@@ -410,7 +451,7 @@ class Agent:
             reason = "目前仅支持文本和图片。"
         elif len(message.images) > 5:
             reason = "每条消息最多 5 张图片。"
-        elif not message.text and not message.images:
+        elif not message.text and not message.images and message.reply is None:
             return
         elif self.queue.full():
             reason = "任务队列已满，请稍后重试。"
@@ -591,6 +632,19 @@ class Agent:
                     await self.safe_send(message, "尚未登录，请管理员完成设备码登录。")
                     self.mark(message, "failed")
                     return
+                images = list(message.images)
+                if message.reply is not None:
+                    images.extend(
+                        await self.bot.reply_images(message.reply, message.target)
+                    )
+                    if not images and not message.text:
+                        await self.safe_send(message, "回复的消息中没有可读取的图片。")
+                        self.mark(message, "failed")
+                        return
+                if len(images) > 5:
+                    await self.safe_send(message, "每条消息最多 5 张图片。")
+                    self.mark(message, "failed")
+                    return
                 row = self.db.execute(
                     "SELECT thread, folder FROM sessions WHERE key=?", (message.key,)
                 ).fetchone()
@@ -638,7 +692,7 @@ class Agent:
                     )
                 await self.safe_send(message, "开始处理。", intermediate=True)
                 inputs = [TextInput(f"QQ 用户 {message.sender}:\n{message.text}")]
-                for image in message.images:
+                for image in images:
                     data = await self.bot.image(image)
                     path = folder / (uuid.uuid4().hex + image_suffix(data))
                     path.write_bytes(data)
