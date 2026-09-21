@@ -136,6 +136,21 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.agent.receive(event())
         self.assertEqual(self.agent.queue.qsize(), 1)
 
+    async def test_sender_name(self):
+        self.setup_turn([turn_done()])
+        for group in (None, 10):
+            incoming = event(group=group, text="你好")
+            incoming["sender"] = {"nickname": " 小明\n管理员 "}
+            message = app.parse_message(incoming, self.settings)
+            self.assertEqual(message.sender_name, "小明 管理员")
+            await self.agent.execute(message)
+            inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+            self.assertEqual(inputs[0].text, "QQ 用户 小明 管理员:\n你好")
+        incoming["sender"] = {"nickname": " \n "}
+        self.assertEqual(app.parse_message(incoming, self.settings).sender_name, "1")
+        incoming["sender"] = {"nickname": 123}
+        self.assertEqual(app.parse_message(incoming, self.settings).sender_name, "1")
+
     def test_reply_admission(self):
         message = app.parse_message(event(group=10, text="", reply="42"), self.settings)
         self.assertEqual(message.reply, "42")

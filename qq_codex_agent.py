@@ -132,7 +132,7 @@ class Message:
     key: str
     identifier: str
     target: dict
-    sender: str
+    sender_name: str
     text: str
     images: list[str]
     reply: str | None
@@ -198,11 +198,14 @@ def parse_message(event, settings):
         identifier = event.get("message_id")
         if type(identifier) not in (str, int) or not str(identifier):
             return None
+        sender_info = event.get("sender")
+        name = sender_info.get("nickname") if isinstance(sender_info, dict) else None
+        name = " ".join(name.split())[:64] if isinstance(name, str) else ""
         return Message(
             key,
             f"{bot}:{key}:{identifier}",
             target,
-            sender,
+            name or sender,
             "".join(text).strip(),
             images,
             reply,
@@ -714,7 +717,7 @@ class Agent:
                         intermediate=True,
                     )
                 await self.safe_send(message, "开始处理。", intermediate=True)
-                inputs = [TextInput(f"QQ 用户 {message.sender}:\n{message.text}")]
+                inputs = [TextInput(f"QQ 用户 {message.sender_name}:\n{message.text}")]
                 for image in images:
                     data = await self.bot.image(image)
                     path = folder / (uuid.uuid4().hex + image_suffix(data))
