@@ -455,7 +455,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             [call.kwargs["text"] for call in self.bot.send.call_args_list],
             [
                 "距上一条消息已超过两小时，已新建一个 thread。",
-                "开始处理。",
+                "开始处理……",
                 "任务完成。",
             ],
         )
@@ -531,7 +531,35 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         texts = [
             c.kwargs["text"] for c in self.bot.send.call_args_list if "text" in c.kwargs
         ]
-        self.assertEqual(texts, ["开始处理。", "正在生成图片。", "last"])
+        self.assertEqual(texts, ["开始处理……", "正在生成图片……", "last"])
+
+    async def test_progress_once(self):
+        kinds = (
+            "commandExecution",
+            "imageGeneration",
+            "webSearch",
+        )
+        progress = [
+            NS(method="item/started", payload=NS(item=NS(root=NS(type=kind))))
+            for kind in kinds
+            for _ in range(3)
+        ]
+        self.setup_turn([*progress, turn_done()])
+        expected = [
+            "开始处理……",
+            "正在执行代码……",
+            "正在生成图片……",
+            "正在检索资料……",
+            "任务完成。",
+        ]
+        for identifier in (1, 2):
+            await self.agent.execute(
+                app.parse_message(event(identifier=identifier), self.settings)
+            )
+        self.assertEqual(
+            [call.kwargs["text"] for call in self.bot.send.call_args_list],
+            expected * 2,
+        )
 
     async def test_image_tool(self):
         ready = asyncio.Event()

@@ -716,7 +716,7 @@ class Agent:
                         "距上一条消息已超过两小时，已新建一个 thread。",
                         intermediate=True,
                     )
-                await self.safe_send(message, "开始处理。", intermediate=True)
+                await self.safe_send(message, "开始处理……", intermediate=True)
                 inputs = [TextInput(f"QQ 用户 {message.sender_name}:\n{message.text}")]
                 for image in images:
                     data = await self.bot.image(image)
@@ -734,19 +734,18 @@ class Agent:
                 delivered, final, status = set(), None, None
                 self.image_message = message
                 self.generated = []
-                last_progress = 0.0
+                shown_progress = set()
                 async for event in turn.stream():
                     if event.method == "item/started":
                         item = event.payload.item.root
                         progress = {
-                            "commandExecution": "正在执行代码。",
-                            "imageGeneration": "正在生成图片。",
-                            "webSearch": "正在检索资料。",
+                            "commandExecution": "正在执行代码……",
+                            "imageGeneration": "正在生成图片……",
+                            "webSearch": "正在检索资料……",
                         }.get(item.type)
-                        now = asyncio.get_running_loop().time()
-                        if progress and now - last_progress >= 30:
+                        if progress and progress not in shown_progress:
                             await self.safe_send(message, progress, intermediate=True)
-                            last_progress = now
+                            shown_progress.add(progress)
                     elif event.method == "item/completed":
                         item = event.payload.item.root
                         if item.id in delivered:
