@@ -58,6 +58,10 @@ def qq_id(value):
     return str(int(value))
 
 
+def clean_name(value):
+    return " ".join(value.split())[:64] if isinstance(value, str) else ""
+
+
 @dataclass
 class Settings:
     private_users: set[str]
@@ -134,6 +138,7 @@ class Message:
     target: dict
     sender_name: str
     text: str
+    parts: list[tuple[str, str]]
     images: list[str]
     reply: str | None
     unsupported: bool
@@ -168,7 +173,7 @@ def parse_message(event, settings):
             key, target = f"group-{group}", {"group_id": int(group)}
         else:
             return None
-        text, images, reply, unsupported = [], [], None, False
+        text, parts, images, reply, unsupported = [], [], [], None, False
         for segment in segments:
             data = segment["data"]
             match segment["type"]:
@@ -176,6 +181,7 @@ def parse_message(event, settings):
                     if not isinstance(data.get("text"), str):
                         return None
                     text.append(data["text"])
+                    parts.append(("text", data["text"]))
                 case "image":
                     file = data.get("file")
                     if not isinstance(file, str) or not file or len(file) > 4096:
@@ -192,21 +198,26 @@ def parse_message(event, settings):
                         return None
                     reply = str(identifier)
                 case "at":
-                    pass
+                    if "group_id" in target and str(data.get("qq")) != bot:
+                        qq = (
+                            "all" if data.get("qq") == "all" else qq_id(data.get("qq"))
+                        )
+                        text.append(f"@{qq}")
+                        parts.append(("at", qq))
                 case _:
                     unsupported = True
         identifier = event.get("message_id")
         if type(identifier) not in (str, int) or not str(identifier):
             return None
         sender_info = event.get("sender")
-        name = sender_info.get("nickname") if isinstance(sender_info, dict) else None
-        name = " ".join(name.split())[:64] if isinstance(name, str) else ""
+        name = clean_name(sender_info.get("nickname")) if isinstance(sender_info, dict) else ""
         return Message(
             key,
             f"{bot}:{key}:{identifier}",
             target,
             name or sender,
             "".join(text).strip(),
+            parts,
             images,
             reply,
             unsupported,
@@ -717,7 +728,35 @@ class Agent:
                         intermediate=True,
                     )
                 await self.safe_send(message, "开始处理……", intermediate=True)
-                inputs = [TextInput(f"QQ 用户 {message.sender_name}:\n{message.text}")]
+                content, names = [], {}
+                for kind, value in message.parts:
+                    if kind == "text":
+                        content.append(value)
+                    elif value == "all":
+                        content.append("@全体成员")
+                    else:
+                        if value not in names:
+                            try:
+                                info = await self.bot.call(
+                                    "get_group_member_info",
+                                    {
+                                        "group_id": message.target["group_id"],
+                                        "user_id": int(value),
+                                    },
+                                )
+                                names[value] = clean_name(info.get("nickname"))
+                            except (
+                                AttributeError,
+                                ConnectionError,
+                                RuntimeError,
+                                TimeoutError,
+                                aiohttp.ClientError,
+                            ):
+                                names[value] = ""
+                        content.append("@" + (names[value] or value))
+                inputs = [
+                    TextInput(f"QQ 用户 {message.sender_name}:\n{''.join(content).strip()}")
+                ]
                 for image in images:
                     data = await self.bot.image(image)
                     path = folder / (uuid.uuid4().hex + image_suffix(data))

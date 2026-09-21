@@ -151,6 +151,41 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         incoming["sender"] = {"nickname": 123}
         self.assertEqual(app.parse_message(incoming, self.settings).sender_name, "1")
 
+    async def test_group_mentions(self):
+        self.setup_turn([turn_done()])
+        incoming = event(group=10, text="请问 ")
+        incoming["message"] = [
+            {"type": "text", "data": {"text": "请问 "}},
+            {"type": "at", "data": {"qq": "2"}},
+            {"type": "text", "data": {"text": " 和 "}},
+            {"type": "at", "data": {"qq": 2}},
+            {"type": "text", "data": {"text": " 呢"}},
+            {"type": "at", "data": {"qq": "99"}},
+        ]
+        self.bot.call = AsyncMock(return_value={"nickname": " 小明\n同学 "})
+        message = app.parse_message(incoming, self.settings)
+        await self.agent.execute(message)
+        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertEqual(inputs[0].text, "QQ 用户 1:\n请问 @小明 同学 和 @小明 同学 呢")
+        self.bot.call.assert_awaited_once_with(
+            "get_group_member_info", {"group_id": 10, "user_id": 2}
+        )
+        self.bot.call.side_effect = RuntimeError("lookup failed")
+        incoming["message_id"] = 2
+        await self.agent.execute(app.parse_message(incoming, self.settings))
+        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertEqual(inputs[0].text, "QQ 用户 1:\n请问 @2 和 @2 呢")
+        incoming["message"] = [
+            {"type": "at", "data": {"qq": "99"}},
+            {"type": "at", "data": {"qq": "all"}},
+        ]
+        incoming["message_id"] = 3
+        message = app.parse_message(incoming, self.settings)
+        self.assertEqual(message.text, "@all")
+        await self.agent.execute(message)
+        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertEqual(inputs[0].text, "QQ 用户 1:\n@全体成员")
+
     def test_reply_admission(self):
         message = app.parse_message(event(group=10, text="", reply="42"), self.settings)
         self.assertEqual(message.reply, "42")
