@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -376,7 +378,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         image_calls = [
             call for call in self.bot.send.call_args_list if "image" in call.kwargs
         ]
-        self.assertEqual(len(image_calls), 1)
+        self.assertEqual(image_calls, [])
         self.assertEqual(self.bot.send.call_args.kwargs["text"], "done")
         self.assertEqual(
             self.codex.thread_start.call_args.kwargs["approval_mode"],
@@ -501,10 +503,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         await self.agent.execute(message)
         self.assertEqual(
             [call.kwargs for call in self.bot.send.call_args_list],
-            [
-                {"image": PNG},
-                {"text": "last"},
-            ],
+            [{"text": "last"}],
         )
         self.assertEqual(
             self.agent.db.execute(
@@ -518,6 +517,63 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             c.kwargs["text"] for c in self.bot.send.call_args_list if "text" in c.kwargs
         ]
         self.assertEqual(texts, ["开始处理。", "正在生成图片。", "last"])
+
+    async def test_image_tool(self):
+        ready = asyncio.Event()
+        finish = asyncio.Event()
+        image = ImageGenerationThreadItem(
+            id="image1",
+            type="imageGeneration",
+            status="completed",
+            result=base64.b64encode(PNG).decode(),
+        )
+
+        async def stream():
+            yield item_done(image)
+            ready.set()
+            await finish.wait()
+            yield turn_done()
+
+        turn = NS(stream=stream, interrupt=AsyncMock())
+        thread = NS(id="test-thread", turn=AsyncMock(return_value=turn))
+        self.codex.thread_start = AsyncMock(return_value=thread)
+        self.codex.thread_resume = AsyncMock(return_value=thread)
+        socket_path = self.settings.state_dir / "image.sock"
+        server = await asyncio.start_unix_server(self.agent.send_image, path=socket_path)
+        task = asyncio.create_task(
+            self.agent.execute(app.parse_message(event(group=10), self.settings))
+        )
+        try:
+            await ready.wait()
+            self.bot.send.assert_not_awaited()
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(Path(app.__file__).with_name("image_tool.py")),
+                str(socket_path),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+            )
+            calls = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "send_image", "arguments": {}}},
+                {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "send_image", "arguments": {}}},
+            ]
+            output, _ = await process.communicate(
+                "".join(json.dumps(call) + "\n" for call in calls).encode()
+            )
+            responses = [json.loads(line) for line in output.splitlines()]
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(responses[1]["result"]["tools"][0]["name"], "send_image")
+            self.assertNotIn("isError", responses[2]["result"])
+            self.assertTrue(responses[3]["result"]["isError"])
+            self.bot.send.assert_awaited_once()
+            self.assertEqual(self.bot.send.call_args.kwargs, {"image": PNG})
+        finally:
+            finish.set()
+            await task
+            server.close()
+            await server.wait_closed()
 
     async def test_thread_status(self):
         message = app.parse_message(event(group=10, text="/status"), self.settings)

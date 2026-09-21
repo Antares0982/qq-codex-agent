@@ -12,6 +12,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import sys
 import time
 import tomllib
 import uuid
@@ -423,6 +424,28 @@ class Agent:
         self.job = None
         self.controls = set()
         self.resetting = set()
+        self.generated = []
+        self.image_message = None
+
+    async def send_image(self, reader, writer):
+        try:
+            request = json.loads(await reader.readline())
+            if request != {"action": "send_image"} or self.image_message is None:
+                raise ValueError("No active image turn")
+            if not self.generated:
+                raise ValueError("No generated image available")
+            await self.bot.send(self.image_message, image=self.generated[-1])
+            self.generated.pop()
+            response = {"ok": True}
+        except (ValueError, ConnectionError, RuntimeError, TimeoutError) as error:
+            response = {"error": str(error)}
+        except Exception as error:
+            LOG.warning("Image delivery failed: %s", type(error).__name__)
+            response = {"error": "Image delivery failed"}
+        writer.write((json.dumps(response) + "\n").encode())
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
 
     def receive(self, event):
         message = parse_message(event, self.settings)
@@ -706,6 +729,8 @@ class Agent:
                 )
                 starting_turn = False
                 delivered, final, status = set(), None, None
+                self.image_message = message
+                self.generated = []
                 last_progress = 0.0
                 async for event in turn.stream():
                     if event.method == "item/started":
@@ -739,7 +764,7 @@ class Agent:
                             if not data or len(data) > OUTPUT_LIMIT:
                                 raise ValueError("Invalid generated image")
                             image_suffix(data)
-                            await self.bot.send(message, image=data)
+                            self.generated.append(data)
                     elif event.method == "turn/completed":
                         status = event.payload.turn.status
                         terminal = True
@@ -767,6 +792,8 @@ class Agent:
                 message, "任务失败，未自动重试。请检查登录状态、图片格式或服务日志。"
             )
         finally:
+            self.image_message = None
+            self.generated = []
             if starting_turn:
                 LOG.error("Turn start outcome unknown; runtime must restart")
                 raise SystemExit(1)
@@ -802,6 +829,10 @@ def codex_config(settings):
         'model_reasoning_effort="medium"',
         f'projects.{json.dumps(str(settings.workspace_dir))}.trust_level="trusted"',
         "project_root_markers=[]",
+        f'mcp_servers.qq_image.command={json.dumps(sys.executable)}',
+        f'mcp_servers.qq_image.args={json.dumps([str(Path(__file__).with_name("image_tool.py")), str(settings.state_dir / "image.sock")])}',
+        'mcp_servers.qq_image.required=true',
+        'mcp_servers.qq_image.default_tools_approval_mode="approve"',
     )
     return CodexConfig(
         config_overrides=overrides,
@@ -823,6 +854,9 @@ async def run(settings, login):
             return
         bot = OneBot(settings)
         agent = Agent(settings, bot, codex)
+        socket_path = settings.state_dir / "image.sock"
+        socket_path.unlink(missing_ok=True)
+        server = await asyncio.start_unix_server(agent.send_image, path=socket_path)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -840,6 +874,9 @@ async def run(settings, login):
             for task in [*workers, *agent.controls]:
                 task.cancel()
             await asyncio.gather(*workers, *agent.controls, return_exceptions=True)
+            server.close()
+            await server.wait_closed()
+            socket_path.unlink(missing_ok=True)
             agent.db.close()
 
 

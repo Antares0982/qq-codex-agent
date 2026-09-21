@@ -13,4 +13,4 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["qq_codex_agent"]
+py-modules = ["qq_codex_agent", "image_tool"]
