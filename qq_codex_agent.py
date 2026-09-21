@@ -145,6 +145,41 @@ class Message:
     generation: int = 0
 
 
+def parse_parts(segments, group, bot=None):
+    parts, images, reply, unsupported = [], [], None, False
+    for segment in segments:
+        if not isinstance(segment, dict) or not isinstance(segment.get("data"), dict):
+            raise ValueError("Invalid message segment")
+        data = segment["data"]
+        match segment.get("type"):
+            case "text":
+                if not isinstance(data.get("text"), str):
+                    raise ValueError("Invalid message text")
+                parts.append(("text", data["text"]))
+            case "image":
+                file = data.get("file")
+                if not isinstance(file, str) or not file or len(file) > 4096:
+                    raise ValueError("Invalid message image")
+                images.append(file)
+            case "reply":
+                identifier = data.get("id")
+                if (
+                    reply is not None
+                    or type(identifier) not in (str, int)
+                    or not str(identifier)
+                    or len(str(identifier)) > 128
+                ):
+                    raise ValueError("Invalid reply")
+                reply = str(identifier)
+            case "at":
+                if group and str(data.get("qq")) != bot:
+                    qq = "all" if data.get("qq") == "all" else qq_id(data.get("qq"))
+                    parts.append(("at", qq))
+            case _:
+                unsupported = True
+    return parts, images, reply, unsupported
+
+
 def parse_message(event, settings):
     if not isinstance(event, dict) or event.get("post_type") != "message":
         return None
@@ -173,39 +208,12 @@ def parse_message(event, settings):
             key, target = f"group-{group}", {"group_id": int(group)}
         else:
             return None
-        text, parts, images, reply, unsupported = [], [], [], None, False
-        for segment in segments:
-            data = segment["data"]
-            match segment["type"]:
-                case "text":
-                    if not isinstance(data.get("text"), str):
-                        return None
-                    text.append(data["text"])
-                    parts.append(("text", data["text"]))
-                case "image":
-                    file = data.get("file")
-                    if not isinstance(file, str) or not file or len(file) > 4096:
-                        return None
-                    images.append(file)
-                case "reply":
-                    identifier = data.get("id")
-                    if (
-                        reply is not None
-                        or type(identifier) not in (str, int)
-                        or not str(identifier)
-                        or len(str(identifier)) > 128
-                    ):
-                        return None
-                    reply = str(identifier)
-                case "at":
-                    if "group_id" in target and str(data.get("qq")) != bot:
-                        qq = (
-                            "all" if data.get("qq") == "all" else qq_id(data.get("qq"))
-                        )
-                        text.append(f"@{qq}")
-                        parts.append(("at", qq))
-                case _:
-                    unsupported = True
+        parts, images, reply, unsupported = parse_parts(
+            segments, "group_id" in target, bot
+        )
+        text = "".join(
+            value if kind == "text" else f"@{value}" for kind, value in parts
+        ).strip()
         identifier = event.get("message_id")
         if type(identifier) not in (str, int) or not str(identifier):
             return None
@@ -216,7 +224,7 @@ def parse_message(event, settings):
             f"{bot}:{key}:{identifier}",
             target,
             name or sender,
-            "".join(text).strip(),
+            text,
             parts,
             images,
             reply,
@@ -353,7 +361,7 @@ class OneBot:
         image_suffix(data)
         return data
 
-    async def reply_images(self, identifier, target):
+    async def reply_content(self, identifier, target):
         result = await self.call("get_msg", {"message_id": identifier})
         expected = "group" if "group_id" in target else "private"
         if result.get("message_type") != expected:
@@ -367,19 +375,8 @@ class OneBot:
         segments = result.get("message")
         if not isinstance(segments, list):
             raise ValueError("Invalid replied message")
-        images = []
-        for segment in segments:
-            if not isinstance(segment, dict) or not isinstance(
-                segment.get("data"), dict
-            ):
-                raise ValueError("Invalid replied message")
-            if segment.get("type") != "image":
-                continue
-            file = segment["data"].get("file")
-            if not isinstance(file, str) or not file or len(file) > 4096:
-                raise ValueError("Invalid replied image")
-            images.append(file)
-        return images
+        parts, images, _, _ = parse_parts(segments, expected == "group")
+        return parts, images
 
     async def listen(self, receive):
         token = self.settings.token_file.read_text().strip()
@@ -658,6 +655,32 @@ class Agent:
             LOG.warning("Control failed: %s", type(error).__name__)
             await self.safe_send(message, "操作失败，请查看服务日志中的错误类型。")
 
+    async def render_parts(self, parts, target, names):
+        content = []
+        for kind, value in parts:
+            if kind == "text":
+                content.append(value)
+            elif value == "all":
+                content.append("@全体成员")
+            else:
+                if value not in names:
+                    try:
+                        info = await self.bot.call(
+                            "get_group_member_info",
+                            {"group_id": target["group_id"], "user_id": int(value)},
+                        )
+                        names[value] = clean_name(info.get("nickname"))
+                    except (
+                        AttributeError,
+                        ConnectionError,
+                        RuntimeError,
+                        TimeoutError,
+                        aiohttp.ClientError,
+                    ):
+                        names[value] = ""
+                content.append("@" + (names[value] or value))
+        return "".join(content).strip()
+
     async def execute(self, message):
         turn = None
         terminal = False
@@ -669,13 +692,20 @@ class Agent:
                     await self.safe_send(message, "尚未登录，请管理员完成设备码登录。")
                     self.mark(message, "failed")
                     return
-                images = list(message.images)
+                images, quote_parts, quote_images = list(message.images), [], []
                 if message.reply is not None:
-                    images.extend(
-                        await self.bot.reply_images(message.reply, message.target)
+                    quote_parts, quote_images = await self.bot.reply_content(
+                        message.reply, message.target
                     )
-                    if not images and not message.text:
-                        await self.safe_send(message, "回复的消息中没有可读取的图片。")
+                    images.extend(quote_images)
+                    if (
+                        not images
+                        and not message.text
+                        and not any(value.strip() for _, value in quote_parts)
+                    ):
+                        await self.safe_send(
+                            message, "回复的消息中没有可读取的文本或图片。"
+                        )
                         self.mark(message, "failed")
                         return
                 if len(images) > 5:
@@ -728,35 +758,14 @@ class Agent:
                         intermediate=True,
                     )
                 await self.safe_send(message, "开始处理……", intermediate=True)
-                content, names = [], {}
-                for kind, value in message.parts:
-                    if kind == "text":
-                        content.append(value)
-                    elif value == "all":
-                        content.append("@全体成员")
-                    else:
-                        if value not in names:
-                            try:
-                                info = await self.bot.call(
-                                    "get_group_member_info",
-                                    {
-                                        "group_id": message.target["group_id"],
-                                        "user_id": int(value),
-                                    },
-                                )
-                                names[value] = clean_name(info.get("nickname"))
-                            except (
-                                AttributeError,
-                                ConnectionError,
-                                RuntimeError,
-                                TimeoutError,
-                                aiohttp.ClientError,
-                            ):
-                                names[value] = ""
-                        content.append("@" + (names[value] or value))
-                inputs = [
-                    TextInput(f"QQ 用户 {message.sender_name}:\n{''.join(content).strip()}")
-                ]
+                names = {}
+                content = await self.render_parts(message.parts, message.target, names)
+                if quote_parts and not quote_images:
+                    quote = await self.render_parts(quote_parts, message.target, names)
+                    if quote:
+                        quote = "\n".join(f"> {line}" for line in quote.splitlines())
+                        content = "\n\n".join(part for part in (quote, content) if part)
+                inputs = [TextInput(f"QQ 用户 {message.sender_name}:\n{content}")]
                 for image in images:
                     data = await self.bot.image(image)
                     path = folder / (uuid.uuid4().hex + image_suffix(data))

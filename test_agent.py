@@ -78,7 +78,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.bot = NS(
             send=AsyncMock(),
             image=AsyncMock(return_value=PNG),
-            reply_images=AsyncMock(return_value=[]),
+            reply_content=AsyncMock(return_value=([], [])),
         )
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
         self.agent = app.Agent(self.settings, self.bot, self.codex)
@@ -449,15 +449,48 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_image(self):
         self.setup_turn([turn_done()])
-        self.bot.reply_images.return_value = ["quoted-image"]
+        self.bot.reply_content.return_value = ([("text", "caption")], ["quoted-image"])
         message = app.parse_message(
             event(group=10, text="解释图片", reply="42"), self.settings
         )
         await self.agent.execute(message)
-        self.bot.reply_images.assert_awaited_once_with("42", {"group_id": 10})
+        self.bot.reply_content.assert_awaited_once_with("42", {"group_id": 10})
         self.bot.image.assert_awaited_once_with("quoted-image")
         inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertEqual(inputs[0].text, "QQ 用户 1:\n解释图片")
         self.assertIsInstance(inputs[1], app.LocalImageInput)
+
+    async def test_reply_text(self):
+        self.setup_turn([turn_done()])
+        self.bot.reply_content.return_value = (
+            [("text", "第一行\n"), ("at", "2"), ("text", " 第二行")],
+            [],
+        )
+        self.bot.call = AsyncMock(return_value={"nickname": "小明"})
+        message = app.parse_message(
+            event(group=10, text="你怎么看？", reply="42"), self.settings
+        )
+        await self.agent.execute(message)
+        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertEqual(
+            inputs[0].text,
+            "QQ 用户 1:\n> 第一行\n> @小明 第二行\n\n你怎么看？",
+        )
+        self.bot.call.assert_awaited_once_with(
+            "get_group_member_info", {"group_id": 10, "user_id": 2}
+        )
+        self.bot.reply_content.return_value = ([("text", "只有引用")], [])
+        await self.agent.execute(
+            app.parse_message(event(group=10, text="", reply="42"), self.settings)
+        )
+        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertEqual(inputs[0].text, "QQ 用户 1:\n> 只有引用")
+        self.bot.reply_content.return_value = ([("text", "私聊引用")], [])
+        await self.agent.execute(
+            app.parse_message(event(text="继续", reply="42"), self.settings)
+        )
+        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+        self.assertEqual(inputs[0].text, "QQ 用户 1:\n> 私聊引用\n\n继续")
 
     async def test_empty_reply(self):
         message = app.parse_message(event(group=10, text="", reply="42"), self.settings)
@@ -744,7 +777,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         bot.call.return_value = {"base64": base64.b64encode(PNG).decode()}
         self.assertEqual(await bot.image("id"), PNG)
 
-    async def test_reply_images(self):
+    async def test_reply_content(self):
         bot = app.OneBot(self.settings)
         bot.call = AsyncMock(
             return_value={
@@ -752,14 +785,23 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 "group_id": 10,
                 "message": [
                     {"type": "text", "data": {"text": "caption"}},
+                    {"type": "at", "data": {"qq": "2"}},
                     {"type": "image", "data": {"file": "image-id"}},
                 ],
             }
         )
-        self.assertEqual(await bot.reply_images("42", {"group_id": 10}), ["image-id"])
+        self.assertEqual(
+            await bot.reply_content("42", {"group_id": 10}),
+            ([("text", "caption"), ("at", "2")], ["image-id"]),
+        )
+        bot.call.return_value["message"].pop()
+        self.assertEqual(
+            await bot.reply_content("42", {"group_id": 10}),
+            ([("text", "caption"), ("at", "2")], []),
+        )
         bot.call.return_value["group_id"] = 11
         with self.assertRaises(ValueError):
-            await bot.reply_images("42", {"group_id": 10})
+            await bot.reply_content("42", {"group_id": 10})
 
     async def test_action_response(self):
         bot = app.OneBot(self.settings)
