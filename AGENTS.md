@@ -1,6 +1,6 @@
 # 维护指南
 
-本文件用于维护仓库，不是 QQ bot 的运行时提示词。运行时模板为 `AGENTS.runtime.md`。
+本文件用于维护仓库，不是 QQ bot 的运行时提示词。公共运行时模板为 `AGENTS.runtime.md`，私聊和群聊模板分别为 `AGENTS.private.runtime.md` 和 `AGENTS.group.runtime.md`。
 修改前阅读相关代码；优先小范围修改，运行测试后再提交。不提交凭据、真实白名单、认证缓存或聊天数据。
 只在匹配架构的主机上构建 NixOS 系统。
 
@@ -120,8 +120,8 @@ sudo journalctl -u qq-codex-agent -f -o cat
 
 ## 提示词和目录边界
 
-编辑 `/etc/qq-codex-agent/AGENTS.md` 后重启 agent，再在 QQ `/new`。
-文件只读挂载为专用 `CODEX_HOME/AGENTS.md`，由 Codex 原生加载，可控制语气、语言和工具使用；`agents_file` 是部署配置约定，应用不直接读取此文件。应用在每次新建和恢复 thread 时通过 `developer_instructions` 注入 QQ 文件交付规则和 Pillow Python 路径，不重写 Codex 基础提示词。因此已有自定义 AGENTS.md 也能获得新交付规则，不必覆盖管理员文件。
+编辑 `/etc/qq-codex-agent/AGENTS.md`、`AGENTS.private.md` 或 `AGENTS.group.md` 后重启 agent，再在 QQ `/new`。
+公共文件只读挂载为专用 `CODEX_HOME/AGENTS.md`，由 Codex 原生加载；`agents_file` 是部署配置约定，应用不直接读取此文件。私聊和群聊文件由部署配置的 `private_agents_file`、`group_agents_file` 指定，须只读挂载到服务内，应用按消息类型读取并作为 `developer_instructions` 注入新建和恢复的 thread。应用同时注入 QQ 文件交付规则和 Pillow Python 路径。更新 Nix 部署时须添加这两个文件的安装及挂载；只改本仓库不能使运行中的 Pi 服务加载新模板。
 会话工作目录会被显式标记为可信项目。工作目录下新建的 AGENTS.md 遵循 Codex 自身规则，不能改变应用 allowlist 或宿主挂载。
 
 服务的私有根目录仅挂载所需运行时 Nix closure、只读应用和配置、专用状态与工作目录，以及 DNS/hosts 和必要虚拟文件系统。

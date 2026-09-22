@@ -438,20 +438,45 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.codex.thread_start.call_args.kwargs["approval_mode"],
             app.ApprovalMode.auto_review,
         )
-        self.assertIn(app.IMAGE_INSTRUCTIONS, self.codex.thread_start.call_args.kwargs["developer_instructions"])
+        self.assertIn(
+            app.IMAGE_INSTRUCTIONS,
+            self.codex.thread_start.call_args.kwargs["developer_instructions"],
+        )
         with self.agent.db:
             self.agent.db.execute(
                 "UPDATE models SET model='beta' WHERE key='private-1'"
             )
         await self.agent.execute(message)
         self.codex.thread_resume.assert_awaited_once()
-        self.assertIn(app.IMAGE_INSTRUCTIONS, self.codex.thread_resume.call_args.kwargs["developer_instructions"])
+        self.assertIn(
+            app.IMAGE_INSTRUCTIONS,
+            self.codex.thread_resume.call_args.kwargs["developer_instructions"],
+        )
         self.assertEqual(self.codex.thread_resume.call_args.kwargs["model"], "beta")
         self.assertEqual(thread.turn.call_args.kwargs["model"], "beta")
         self.assertEqual(
             thread.turn.call_args.kwargs["effort"], app.ReasoningEffort.medium
         )
         turn.interrupt.assert_not_called()
+
+    async def test_chat_prompts(self):
+        private = self.settings.agents_file.parent / "private.md"
+        group = self.settings.agents_file.parent / "group.md"
+        private.write_text("当前是私聊")
+        group.write_text("当前是群聊")
+        self.settings.private_agents_file = private
+        self.settings.group_agents_file = group
+        self.setup_turn([turn_done()])
+        for incoming, expected, excluded in (
+            (event(), "当前是私聊", "当前是群聊"),
+            (event(group=10), "当前是群聊", "当前是私聊"),
+        ):
+            await self.agent.execute(app.parse_message(incoming, self.settings))
+            instructions = self.codex.thread_start.call_args.kwargs[
+                "developer_instructions"
+            ]
+            self.assertIn(expected, instructions)
+            self.assertNotIn(excluded, instructions)
 
     async def test_reply_image(self):
         self.setup_turn([turn_done()])
@@ -656,7 +681,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.codex.thread_start = AsyncMock(return_value=thread)
         self.codex.thread_resume = AsyncMock(return_value=thread)
         socket_path = self.settings.state_dir / "image.sock"
-        server = await asyncio.start_unix_server(self.agent.send_image, path=socket_path)
+        server = await asyncio.start_unix_server(
+            self.agent.send_image, path=socket_path
+        )
         task = asyncio.create_task(
             self.agent.execute(app.parse_message(event(group=10), self.settings))
         )
@@ -672,17 +699,35 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 stdout=asyncio.subprocess.PIPE,
             )
             calls = [
-                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-03-26"},
+                },
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "send_image", "arguments": {}}},
-                {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "send_image", "arguments": {}}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "send_image", "arguments": {}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {"name": "send_image", "arguments": {}},
+                },
             ]
             output, _ = await process.communicate(
                 "".join(json.dumps(call) + "\n" for call in calls).encode()
             )
             responses = [json.loads(line) for line in output.splitlines()]
             self.assertEqual(process.returncode, 0)
-            self.assertEqual({tool["name"] for tool in responses[1]["result"]["tools"]}, {"send_image", "list_images"})
+            self.assertEqual(
+                {tool["name"] for tool in responses[1]["result"]["tools"]},
+                {"send_image", "list_images"},
+            )
             self.assertNotIn("isError", responses[2]["result"])
             self.assertTrue(responses[3]["result"]["structuredContent"]["already_sent"])
             self.bot.send.assert_awaited_once()

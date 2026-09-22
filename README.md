@@ -11,4 +11,4 @@
 - 支持 `/help`、`/model`、`/status`、`/new`、`/stop`，推理强度固定为 `medium`。
 - 通过 NixOS flake 部署，使用 agenix 管理白名单，Pi 无需单独 clone 本仓库。
 
-开发、部署、登录及排障方法见 [AGENTS.md](AGENTS.md)。运行时提示词模板见 [AGENTS.runtime.md](AGENTS.runtime.md)。
+开发、部署、登录及排障方法见 [AGENTS.md](AGENTS.md)。公共运行时模板见 [AGENTS.runtime.md](AGENTS.runtime.md)，私聊和群聊模板分别见 [AGENTS.private.runtime.md](AGENTS.private.runtime.md) 与 [AGENTS.group.runtime.md](AGENTS.group.runtime.md)。

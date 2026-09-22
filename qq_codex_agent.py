@@ -78,6 +78,8 @@ class Settings:
     state_dir: Path
     workspace_dir: Path
     agents_file: Path
+    private_agents_file: Path | None = None
+    group_agents_file: Path | None = None
     queue_limit: int = 8
     task_timeout: int = 900
     model: str | None = None
@@ -122,6 +124,11 @@ class Settings:
             raw[key] = Path(raw[key])
             if not raw[key].is_absolute():
                 raise ValueError(f"{key} must be absolute")
+        for key in ("private_agents_file", "group_agents_file"):
+            if key in raw:
+                raw[key] = Path(raw[key])
+                if not raw[key].is_absolute():
+                    raise ValueError(f"{key} must be absolute")
         settings = cls(**raw)
         url = urlsplit(settings.napcat_url)
         if (
@@ -234,7 +241,11 @@ def parse_message(event, settings):
         if type(identifier) not in (str, int) or not str(identifier):
             return None
         sender_info = event.get("sender")
-        name = clean_name(sender_info.get("nickname")) if isinstance(sender_info, dict) else ""
+        name = (
+            clean_name(sender_info.get("nickname"))
+            if isinstance(sender_info, dict)
+            else ""
+        )
         return Message(
             key,
             f"{bot}:{key}:{identifier}",
@@ -316,7 +327,9 @@ class OneBot:
                     "data": {"file": "base64://" + base64.b64encode(image).decode()},
                 }
             ]
-            receipt = await self.call("send_msg", {**message.target, "message": segments})
+            receipt = await self.call(
+                "send_msg", {**message.target, "message": segments}
+            )
         if text:
             for offset in range(0, len(text), 1500):
                 await self.call(
@@ -488,19 +501,29 @@ class Agent:
                     (context.folder.name,),
                 ).fetchone()
                 if not row:
-                    raise ValueError("尚无生成图片。请先生成，或用 path 指定已保存的工作区图片。")
+                    raise ValueError(
+                        "尚无生成图片。请先生成，或用 path 指定已保存的工作区图片。"
+                    )
                 path = row[0]
             path, data = read_image(context.folder, path)
             digest = hashlib.sha256(data).hexdigest()
             identity = (context.folder.name, path, digest)
             previous = self.db.execute(
-                "SELECT turn, status FROM image_deliveries WHERE folder=? AND path=? AND digest=?", identity
+                "SELECT turn, status FROM image_deliveries WHERE folder=? AND path=? AND digest=?",
+                identity,
             ).fetchone()
             if previous and not resend:
                 if previous[1] == "unknown":
-                    raise ValueError("此图片上次发送结果未知，不会自动重试；仅用户明确要求补发时使用 resend=true。")
+                    raise ValueError(
+                        "此图片上次发送结果未知，不会自动重试；仅用户明确要求补发时使用 resend=true。"
+                    )
                 if previous[0] == context.token:
-                    return {"ok": True, "path": path, "already_sent": True, "message": "此图片本轮已发送成功，未重复发送。"}
+                    return {
+                        "ok": True,
+                        "path": path,
+                        "already_sent": True,
+                        "message": "此图片本轮已发送成功，未重复发送。",
+                    }
             # Persist uncertainty before handing bytes to NapCat, including cancellation/restart.
             with self.db:
                 self.db.execute(
@@ -511,14 +534,21 @@ class Agent:
                 receipt = await self.bot.send(context.message, image=data)
             except Exception as error:
                 LOG.warning("Image delivery failed: %s", type(error).__name__)
-                raise ValueError("未取得 QQ 发送成功回执，发送结果未知；不要自动重试或声称已发送。") from error
+                raise ValueError(
+                    "未取得 QQ 发送成功回执，发送结果未知；不要自动重试或声称已发送。"
+                ) from error
             with self.db:
                 self.db.execute(
-                    "UPDATE image_deliveries SET status='sent' WHERE folder=? AND path=? AND digest=?", identity
+                    "UPDATE image_deliveries SET status='sent' WHERE folder=? AND path=? AND digest=?",
+                    identity,
                 )
             return {
-                "ok": True, "path": path, "message": "图片已发送到当前 QQ 会话。",
-                "message_id": receipt.get("message_id") if isinstance(receipt, dict) else None,
+                "ok": True,
+                "path": path,
+                "message": "图片已发送到当前 QQ 会话。",
+                "message_id": receipt.get("message_id")
+                if isinstance(receipt, dict)
+                else None,
             }
 
     async def send_image(self, reader, writer):
@@ -530,12 +560,21 @@ class Agent:
             try:
                 request = json.loads(await asyncio.wait_for(reader.readline(), 5))
                 if context is None or self.image_context is not context:
-                    raise ValueError("当前没有可用的 QQ 任务；请在处理用户消息时调用图片工具。")
-                if not isinstance(request, dict) or request.pop("session", None) != context.folder.name:
-                    raise ValueError("图片工具不属于当前 QQ 会话，请在当前会话重新调用。")
+                    raise ValueError(
+                        "当前没有可用的 QQ 任务；请在处理用户消息时调用图片工具。"
+                    )
+                if (
+                    not isinstance(request, dict)
+                    or request.pop("session", None) != context.folder.name
+                ):
+                    raise ValueError(
+                        "图片工具不属于当前 QQ 会话，请在当前会话重新调用。"
+                    )
                 if request == {"action": "list_images"}:
                     response = self.list_images(context)
-                elif isinstance(request, dict) and request.get("action") == "send_image":
+                elif (
+                    isinstance(request, dict) and request.get("action") == "send_image"
+                ):
                     response = await self.deliver_image(context, request)
                 else:
                     raise ValueError("未知图片工具请求。")
@@ -731,7 +770,9 @@ class Agent:
                     with self.db:
                         if row:
                             for table in ("generated_images", "image_deliveries"):
-                                self.db.execute(f"DELETE FROM {table} WHERE folder=?", (row[0],))
+                                self.db.execute(
+                                    f"DELETE FROM {table} WHERE folder=?", (row[0],)
+                                )
                         self.db.execute(
                             "DELETE FROM sessions WHERE key=?", (message.key,)
                         )
@@ -827,17 +868,31 @@ class Agent:
                     "cwd": str(folder),
                     "sandbox": Sandbox.workspace_write,
                     "approval_mode": ApprovalMode.auto_review,
-                    "developer_instructions": IMAGE_INSTRUCTIONS + f"\n图片加工可使用已安装 Pillow 的 Python：{sys.executable}",
+                    "developer_instructions": IMAGE_INSTRUCTIONS
+                    + f"\n图片加工可使用已安装 Pillow 的 Python：{sys.executable}",
                     "config": {
                         "projects": {str(folder): {"trust_level": "trusted"}},
-                        "mcp_servers": {"qq_image": {
-                            "command": sys.executable,
-                            "args": [str(Path(__file__).with_name("image_tool.py")), str(self.settings.state_dir / "image.sock"), folder.name],
-                            "required": True,
-                            "default_tools_approval_mode": "approve",
-                        }},
+                        "mcp_servers": {
+                            "qq_image": {
+                                "command": sys.executable,
+                                "args": [
+                                    str(Path(__file__).with_name("image_tool.py")),
+                                    str(self.settings.state_dir / "image.sock"),
+                                    folder.name,
+                                ],
+                                "required": True,
+                                "default_tools_approval_mode": "approve",
+                            }
+                        },
                     },
                 }
+                agents_file = (
+                    self.settings.group_agents_file
+                    if "group_id" in message.target
+                    else self.settings.private_agents_file
+                )
+                if agents_file:
+                    options["developer_instructions"] += "\n" + agents_file.read_text()
                 model = self.selected_model(message.key)
                 if model:
                     options["model"] = model
@@ -897,9 +952,11 @@ class Agent:
                             shown_progress.add(progress)
                             # A slow QQ progress acknowledgement must not hold up
                             # saving generated frames that the model is about to list.
-                            notices.append(asyncio.create_task(
-                                self.safe_send(message, progress, intermediate=True)
-                            ))
+                            notices.append(
+                                asyncio.create_task(
+                                    self.safe_send(message, progress, intermediate=True)
+                                )
+                            )
                     elif event.method == "item/completed":
                         item = event.payload.item.root
                         if item.id in delivered:
@@ -998,9 +1055,9 @@ def codex_config(settings):
         'model_reasoning_effort="medium"',
         f'projects.{json.dumps(str(settings.workspace_dir))}.trust_level="trusted"',
         "project_root_markers=[]",
-        f'mcp_servers.qq_image.command={json.dumps(sys.executable)}',
-        f'mcp_servers.qq_image.args={json.dumps([str(Path(__file__).with_name("image_tool.py")), str(settings.state_dir / "image.sock")])}',
-        'mcp_servers.qq_image.required=true',
+        f"mcp_servers.qq_image.command={json.dumps(sys.executable)}",
+        f"mcp_servers.qq_image.args={json.dumps([str(Path(__file__).with_name('image_tool.py')), str(settings.state_dir / 'image.sock')])}",
+        "mcp_servers.qq_image.required=true",
         'mcp_servers.qq_image.default_tools_approval_mode="approve"',
     )
     return CodexConfig(
