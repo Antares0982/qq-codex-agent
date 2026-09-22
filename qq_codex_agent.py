@@ -69,6 +69,14 @@ def clean_name(value):
     return " ".join(value.split())[:64] if isinstance(value, str) else ""
 
 
+def display_name(info, group=False):
+    if not isinstance(info, dict):
+        return ""
+    return (clean_name(info.get("card")) if group else "") or clean_name(
+        info.get("nickname")
+    )
+
+
 @dataclass
 class Settings:
     private_users: set[str]
@@ -156,6 +164,7 @@ class Message:
     images: list[str]
     reply: str | None
     unsupported: bool
+    bot_id: str
     generation: int = 0
 
 
@@ -240,12 +249,7 @@ def parse_message(event, settings):
         identifier = event.get("message_id")
         if type(identifier) not in (str, int) or not str(identifier):
             return None
-        sender_info = event.get("sender")
-        name = (
-            clean_name(sender_info.get("nickname"))
-            if isinstance(sender_info, dict)
-            else ""
-        )
+        name = display_name(event.get("sender"), "group_id" in target)
         return Message(
             key,
             f"{bot}:{key}:{identifier}",
@@ -256,6 +260,7 @@ def parse_message(event, settings):
             images,
             reply,
             unsupported,
+            bot,
         )
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -791,6 +796,22 @@ class Agent:
             LOG.warning("Control failed: %s", type(error).__name__)
             await self.safe_send(message, "操作失败，请查看服务日志中的错误类型。")
 
+    async def group_name(self, target, user):
+        try:
+            info = await self.bot.call(
+                "get_group_member_info",
+                {"group_id": target["group_id"], "user_id": int(user)},
+            )
+            return display_name(info, group=True) or user
+        except (
+            AttributeError,
+            ConnectionError,
+            RuntimeError,
+            TimeoutError,
+            aiohttp.ClientError,
+        ):
+            return user
+
     async def render_parts(self, parts, target, names):
         content = []
         for kind, value in parts:
@@ -800,21 +821,8 @@ class Agent:
                 content.append("@全体成员")
             else:
                 if value not in names:
-                    try:
-                        info = await self.bot.call(
-                            "get_group_member_info",
-                            {"group_id": target["group_id"], "user_id": int(value)},
-                        )
-                        names[value] = clean_name(info.get("nickname"))
-                    except (
-                        AttributeError,
-                        ConnectionError,
-                        RuntimeError,
-                        TimeoutError,
-                        aiohttp.ClientError,
-                    ):
-                        names[value] = ""
-                content.append("@" + (names[value] or value))
+                    names[value] = await self.group_name(target, value)
+                content.append("@" + names[value])
         return "".join(content).strip()
 
     async def execute(self, message):
@@ -892,7 +900,11 @@ class Agent:
                     else self.settings.private_agents_file
                 )
                 if agents_file:
-                    options["developer_instructions"] += "\n" + agents_file.read_text()
+                    instructions = agents_file.read_text()
+                    if "group_id" in message.target and "{nickname}" in instructions:
+                        nickname = await self.group_name(message.target, message.bot_id)
+                        instructions = instructions.replace("{nickname}", nickname)
+                    options["developer_instructions"] += "\n" + instructions
                 model = self.selected_model(message.key)
                 if model:
                     options["model"] = model

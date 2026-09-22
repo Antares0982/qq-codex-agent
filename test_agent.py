@@ -154,6 +154,18 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.parse_message(incoming, self.settings).sender_name, "1")
         incoming["sender"] = {"nickname": 123}
         self.assertEqual(app.parse_message(incoming, self.settings).sender_name, "1")
+        for group, expected in ((None, "QQ昵称"), (10, "群里 小明")):
+            incoming = event(group=group)
+            incoming["sender"] = {"card": " 群里\n小明 ", "nickname": "QQ昵称"}
+            message = app.parse_message(incoming, self.settings)
+            await self.agent.execute(message)
+            inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
+            self.assertEqual(inputs[0].text, f"QQ 用户 {expected}:\nhello")
+        for card in (None, "", " \n ", 123):
+            incoming["sender"]["card"] = card
+            self.assertEqual(
+                app.parse_message(incoming, self.settings).sender_name, "QQ昵称"
+            )
 
     async def test_group_mentions(self):
         self.setup_turn([turn_done()])
@@ -166,7 +178,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             {"type": "text", "data": {"text": " 呢"}},
             {"type": "at", "data": {"qq": "99"}},
         ]
-        self.bot.call = AsyncMock(return_value={"nickname": " 小明\n同学 "})
+        self.bot.call = AsyncMock(
+            return_value={"card": " 小明\n同学 ", "nickname": "QQ昵称"}
+        )
         message = app.parse_message(incoming, self.settings)
         await self.agent.execute(message)
         inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
@@ -462,13 +476,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_prompts(self):
         private = self.settings.agents_file.parent / "private.md"
         group = self.settings.agents_file.parent / "group.md"
-        private.write_text("当前是私聊")
+        private.write_text("当前是私聊 {nickname}")
         group.write_text("当前是群聊")
         self.settings.private_agents_file = private
         self.settings.group_agents_file = group
+        self.bot.call = AsyncMock()
         self.setup_turn([turn_done()])
         for incoming, expected, excluded in (
-            (event(), "当前是私聊", "当前是群聊"),
+            (event(), "当前是私聊 {nickname}", "当前是群聊"),
             (event(group=10), "当前是群聊", "当前是私聊"),
         ):
             await self.agent.execute(app.parse_message(incoming, self.settings))
@@ -477,6 +492,41 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ]
             self.assertIn(expected, instructions)
             self.assertNotIn(excluded, instructions)
+        self.bot.call.assert_not_awaited()
+
+    async def test_bot_nickname(self):
+        group = self.settings.agents_file.parent / "group.md"
+        group.write_text("你的昵称：{nickname}，再说一次：{nickname}。{other}")
+        self.settings.group_agents_file = group
+        self.setup_turn([turn_done()])
+        self.bot.call = AsyncMock()
+        for index, (info, expected) in enumerate(
+            (
+                ({"card": " 群里\n助手 ", "nickname": "QQ助手"}, "群里 助手"),
+                ({"card": "另一个群", "nickname": "QQ助手"}, "另一个群"),
+                ({"card": " \n ", "nickname": "QQ助手"}, "QQ助手"),
+                ({}, "99"),
+                (TimeoutError(), "99"),
+            )
+        ):
+            self.bot.call.reset_mock()
+            self.bot.call.side_effect = info if isinstance(info, Exception) else None
+            self.bot.call.return_value = info
+            group_id = 11 if index == 1 else 10
+            await self.agent.execute(
+                app.parse_message(event(group=group_id), self.settings)
+            )
+            method = self.codex.thread_start if index < 2 else self.codex.thread_resume
+            self.assertIn(
+                f"你的昵称：{expected}，再说一次：{expected}。{{other}}",
+                method.call_args.kwargs["developer_instructions"],
+            )
+            self.bot.call.assert_awaited_once_with(
+                "get_group_member_info", {"group_id": group_id, "user_id": 99}
+            )
+        self.assertEqual(
+            group.read_text(), "你的昵称：{nickname}，再说一次：{nickname}。{other}"
+        )
 
     async def test_reply_image(self):
         self.setup_turn([turn_done()])
@@ -497,7 +547,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             [("text", "第一行\n"), ("at", "2"), ("text", " 第二行")],
             [],
         )
-        self.bot.call = AsyncMock(return_value={"nickname": "小明"})
+        self.bot.call = AsyncMock(return_value={"card": "小明", "nickname": "QQ昵称"})
         message = app.parse_message(
             event(group=10, text="你怎么看？", reply="42"), self.settings
         )
