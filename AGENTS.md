@@ -2,7 +2,7 @@
 
 本文件用于维护仓库，不是 QQ bot 的运行时提示词。运行时模板为 `AGENTS.runtime.md`。
 修改前阅读相关代码；优先小范围修改，运行测试后再提交。不提交凭据、真实白名单、认证缓存或聊天数据。
-GitHub 推送由用户操作，不调用 gh CLI。只在匹配架构的主机上构建 NixOS 系统。
+只在匹配架构的主机上构建 NixOS 系统。
 
 ## 行为
 
@@ -17,7 +17,8 @@ GitHub 推送由用户操作，不调用 gh CLI。只在匹配架构的主机上
 - 模型选择按会话持久保存，同群共享，重启及 `/new` 后保留。仅列出支持 `medium` 的非隐藏模型，每轮推理强度固定为 `medium`。
 - 默认全局串行执行，最多等待 8 个任务，每次最多 5 张图片、每张 10 MiB，每任务最长 15 分钟。
 - 重复消息不重跑；进程崩溃时未完成任务不自动重试。网络断开时发送失败会记录日志，不自动重发不确定的结果。
-- 仅支持文本和图片。生成图片从 Codex 结构化事件中提取 base64，仅在 agent 调用 `qq_image.send_image` 后通过 NapCat 回传。
+- 仅支持文本和图片。生成图片从 Codex 结构化事件提取 base64，由应用解码并原子写入会话工作区 `artifacts/`，不会自动发送。`qq_image.list_images` 返回最近 100 张原图的生成 ID、顺序及相对路径；`qq_image.send_image(path=...)` 发送工作区中的 PNG/JPEG/GIF/WebP（最大 32 MiB），省略路径发送最新原图。拒绝跨工作区路径、符号链接及特殊文件。
+- 图片文件和原图索引跨轮及重启后保留，`/new` 一并清理。可用随应用安装的 Pillow 加工多帧并发送最终 GIF；中间帧无须发送。成功发送不删除源文件，同轮重复调用去重；发送结果未知时不自动重试，仅在用户明确要求时使用 `resend=true`。
 - 回复图片时将图片作为输入；回复无图片的文本时，将文字以 Markdown 引用置于当前消息前。群聊回复仍需 @ bot；引用图片沿用现有数量、大小和格式限制。
 - 群聊不发送开始处理、工具进度等中间通知，只发送图片及最后的文字回复；失败时保留一次终态提示，slash command 保留直接回复。私聊仍显示进度。
 
@@ -33,7 +34,7 @@ uv run --frozen python check_runtime.py --sandbox
 ```
 
 `check_runtime.py` 使用临时、未登录的 Codex 状态目录，只验证启动和认证状态接口，不读取个人登录缓存，也不请求模型。
-`--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap。
+`--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。
 测试模拟 OneBot、模型事件和图片响应。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
 
 ## NixOS 部署
@@ -120,7 +121,7 @@ sudo journalctl -u qq-codex-agent -f -o cat
 ## 提示词和目录边界
 
 编辑 `/etc/qq-codex-agent/AGENTS.md` 后重启 agent，再在 QQ `/new`。
-文件只读挂载为专用 `CODEX_HOME/AGENTS.md`，由 Codex 原生加载，可控制语气、语言和工具使用；app 不重写 Codex 基础提示词。
+文件只读挂载为专用 `CODEX_HOME/AGENTS.md`，由 Codex 原生加载，可控制语气、语言和工具使用；`agents_file` 是部署配置约定，应用不直接读取此文件。应用在每次新建和恢复 thread 时通过 `developer_instructions` 注入 QQ 文件交付规则和 Pillow Python 路径，不重写 Codex 基础提示词。因此已有自定义 AGENTS.md 也能获得新交付规则，不必覆盖管理员文件。
 会话工作目录会被显式标记为可信项目。工作目录下新建的 AGENTS.md 遵循 Codex 自身规则，不能改变应用 allowlist 或宿主挂载。
 
 服务的私有根目录仅挂载所需运行时 Nix closure、只读应用和配置、专用状态与工作目录，以及 DNS/hosts 和必要虚拟文件系统。
@@ -147,7 +148,7 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 
 1. 所有名单为空时均不产生模型调用；空私聊名单只禁用私聊，空群配置禁用所有群。
 2. 验证私聊和各群权限独立、`users=["all"]` 仅开放指定群且仍需 @；所有 slash command 受相同限制。同群两人可续聊，私聊及不同群上下文独立。
-3. 发送图片要求描述，再请求生成图片并继续编辑；图片必须实际回传 QQ。
+3. 发送图片要求描述，再请求生成图片并继续编辑；图片必须实际回传 QQ。生成多帧后使用 list_images 获取路径，通过 Pillow 拼接 GIF，只发送最终 GIF；下一轮及重启后可补发原图，/new 后文件和索引清理。
 4. 请求在当前目录计算并保存结果，验证代码运行；设置 AGENTS.md 中可观察的语言规则，验证 `/new` 后生效。
 5. 请求读取 `/home/antares`、`/home/napcat`、`/run/agenix` 以及状态目录，确认拒绝或不可见；不得用真实秘密内容作为测试输入。
 6. 请求修改受保护配置，验证不能执行；自动审批拒绝后不应出现自建审批菜单或自动切换 full-access。
@@ -160,6 +161,7 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 
 在 Pi 查看 `sudo journalctl -u qq-codex-agent -n 100 --no-pager`。
 启动前检查失败会阻止服务运行，优先查看 traceback；不要通过删除沙箱检查或放宽目录权限绕过错误。
+`codex-linux-sandbox` 在 runtime 0.154.0 中是 Codex 启动时创建的辅助入口，不是独立的 Python 包。检查日志中的 `could not create PATH aliases`，以及 `CODEX_HOME/tmp/arg0` 是否可由服务用户创建子目录和入口。Nix 模块若将该目录额外挂为只读，会妨碍入口创建；需在部署仓库修正该挂载，同时保留认证目录的 managed deny-read。不能通过开放整个状态目录或关闭沙箱修复。启动自检现在也执行 app-server 的沙箱命令，可提前暴露 CLI 检查未覆盖的问题。此仓库不修改外部 Nix 模块，需在实际 Pi 部署验证。
 遇到 `Unknown allowlist fields`，核对加密文件格式和实际运行的源码版本；重启服务不会更新 flake 锁定的旧代码。
 登录失败检查登录 unit 日志和本地代理；不要输出或分享 token、设备码及认证文件。
 推送源码后必须更新 Nix input、同步锁文件并在 Pi 切换系统；只更新应用仓库不会更新运行中的服务。

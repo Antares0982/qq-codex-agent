@@ -1,12 +1,14 @@
 import asyncio
 import base64
 import json
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
+from PIL import Image
 
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
@@ -21,7 +23,9 @@ from openai_codex.generated.v2_all import (
 
 import qq_codex_agent as app
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"sample"
+_png = io.BytesIO()
+Image.new("RGB", (2, 2), "red").save(_png, format="PNG")
+PNG = _png.getvalue()
 
 
 def turn_done(status=TurnStatus.completed):
@@ -434,12 +438,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.codex.thread_start.call_args.kwargs["approval_mode"],
             app.ApprovalMode.auto_review,
         )
+        self.assertIn(app.IMAGE_INSTRUCTIONS, self.codex.thread_start.call_args.kwargs["developer_instructions"])
         with self.agent.db:
             self.agent.db.execute(
                 "UPDATE models SET model='beta' WHERE key='private-1'"
             )
         await self.agent.execute(message)
         self.codex.thread_resume.assert_awaited_once()
+        self.assertIn(app.IMAGE_INSTRUCTIONS, self.codex.thread_resume.call_args.kwargs["developer_instructions"])
         self.assertEqual(self.codex.thread_resume.call_args.kwargs["model"], "beta")
         self.assertEqual(thread.turn.call_args.kwargs["model"], "beta")
         self.assertEqual(
@@ -661,6 +667,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 sys.executable,
                 str(Path(app.__file__).with_name("image_tool.py")),
                 str(socket_path),
+                self.agent.image_context.folder.name,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
             )
@@ -675,9 +682,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             )
             responses = [json.loads(line) for line in output.splitlines()]
             self.assertEqual(process.returncode, 0)
-            self.assertEqual(responses[1]["result"]["tools"][0]["name"], "send_image")
+            self.assertEqual({tool["name"] for tool in responses[1]["result"]["tools"]}, {"send_image", "list_images"})
             self.assertNotIn("isError", responses[2]["result"])
-            self.assertTrue(responses[3]["result"]["isError"])
+            self.assertTrue(responses[3]["result"]["structuredContent"]["already_sent"])
             self.bot.send.assert_awaited_once()
             self.assertEqual(self.bot.send.call_args.kwargs, {"image": PNG})
         finally:
