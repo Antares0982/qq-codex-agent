@@ -2,12 +2,14 @@ import argparse
 import asyncio
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from codex_cli_bin import bundled_codex_path
 from openai_codex import AsyncCodex
 from qq_codex_agent import Settings, codex_config
+from check_sandbox import check_app_server_sandbox
 
 
 def check_permissions(root, settings):
@@ -61,6 +63,16 @@ def check_permissions(root, settings):
         str(canary),
     ]
     subprocess.run(command, cwd=settings.workspace_dir, env=env, check=True, timeout=30)
+    # Reuse the same mount restrictions for the app-server path, without a model call.
+    runtime_command = command[: command.index("--") + 1] + [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--app-server-probe",
+        str(root),
+    ]
+    subprocess.run(
+        runtime_command, cwd=settings.workspace_dir, env=env, check=True, timeout=30
+    )
     print("Managed deny-read and nested workspace sandbox passed.")
 
 
@@ -89,4 +101,21 @@ async def main(sandbox=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sandbox", action="store_true")
-    asyncio.run(main(parser.parse_args().sandbox))
+    parser.add_argument("--app-server-probe", type=Path, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.app_server_probe:
+        root = args.app_server_probe
+        settings = Settings(
+            set(),
+            {},
+            "ws://127.0.0.1:3001",
+            root / "token",
+            root / "state",
+            root / "work",
+            root / "AGENTS.md",
+        )
+        check_app_server_sandbox(
+            settings, settings.workspace_dir, [settings.state_dir / "canary"]
+        )
+    else:
+        asyncio.run(main(args.sandbox))

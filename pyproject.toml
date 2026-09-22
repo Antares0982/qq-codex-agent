@@ -3,7 +3,11 @@ name = "qq-codex-agent"
 version = "0.1.0"
 description = "Personal QQ agent backed by the local Codex runtime"
 requires-python = ">=3.13"
-dependencies = ["openai-codex==0.154.0", "aiohttp>=3.12,<4"]
+dependencies = [
+    "openai-codex==0.154.0",
+    "aiohttp>=3.12,<4",
+    "pillow>=11,<13",
+]
 
 [project.scripts]
 qq-codex-agent = "qq_codex_agent:main"
@@ -13,4 +17,4 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["qq_codex_agent", "image_tool"]
+py-modules = ["qq_codex_agent", "image_tool", "image_assets"]

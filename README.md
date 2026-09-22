@@ -7,6 +7,7 @@
 - 私聊与各群独立授权，默认拒绝访问；群内支持指定用户或全员使用，须 @ bot。
 - 私聊独立会话，同群共享上下文和模型；消息间隔超过两小时自动新建 thread，私聊提示、群聊静默。
 - 群聊仅在 agent 调用发送工具时发送生成图片，另发送最终文字；指令保留直接回复。
+- 生成原图自动保存在会话工作区；`qq_image.list_images` 查询路径，使用 Pillow 加工多帧后通过 `qq_image.send_image(path=...)` 发送最终 GIF。图片跨轮保留，`/new` 清理。
 - 支持 `/help`、`/model`、`/status`、`/new`、`/stop`，推理强度固定为 `medium`。
 - 通过 NixOS flake 部署，使用 agenix 管理白名单，Pi 无需单独 clone 本仓库。
 
