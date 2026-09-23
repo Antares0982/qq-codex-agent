@@ -12,7 +12,6 @@ from qq_codex_agent import Settings, codex_config
 
 
 def check_app_server_sandbox(settings, directory, denied_paths):
-    """Exercise the app-server launcher too; CLI sandbox success is insufficient."""
     with CodexClient(config=codex_config(settings)) as client:
         client.initialize()
         result = client.request(
@@ -40,6 +39,21 @@ def check_app_server_sandbox(settings, directory, denied_paths):
             raise RuntimeError(f"App-server sandbox self-check failed: {result.stderr}")
 
 
+def check_thread_start(settings, directory):
+    with CodexClient(config=codex_config(settings)) as client:
+        client.initialize()
+        client.thread_start(
+            {
+                "cwd": str(directory),
+                "sandbox": "workspace-write",
+                "approvalPolicy": "on-request",
+                "approvalsReviewer": "auto_review",
+                "ephemeral": True,
+                "config": {"projects": {str(directory): {"trust_level": "trusted"}}},
+            }
+        )
+
+
 def main():
     settings = Settings.load("/etc/qq-codex-agent/config.toml")
     settings.check_prompts(required=True)
@@ -62,6 +76,8 @@ def main():
     with (
         tempfile.TemporaryDirectory(dir=work) as directory,
         tempfile.NamedTemporaryFile(dir=state) as canary,
+        tempfile.NamedTemporaryFile(dir=state / "codex") as codex_canary,
+        tempfile.NamedTemporaryFile(dir=state / "codex/tmp") as tmp_canary,
     ):
         result = subprocess.run(
             [
@@ -94,10 +110,18 @@ def main():
         if result.returncode:
             print(result.stderr.decode(errors="replace"), file=sys.stderr)
             raise RuntimeError("Codex sandbox self-check failed")
+        check_thread_start(settings, directory)
         check_app_server_sandbox(
             settings,
             directory,
-            [canary.name, state / "codex/auth.json", settings.token_file],
+            [
+                canary.name,
+                codex_canary.name,
+                tmp_canary.name,
+                state / "codex/auth.json",
+                settings.token_file,
+                "/etc/qq-codex-agent/allowlist.toml",
+            ],
         )
     print("Filesystem and Codex sandbox checks passed")
 

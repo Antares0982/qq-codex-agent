@@ -43,6 +43,7 @@ let
   };
   codexConfig = (pkgs.formats.toml { }).generate "qq-codex-codex-config.toml" (
     lib.recursiveUpdate {
+      features.shell_snapshot = false;
       sandbox_workspace_write = {
         network_access = true;
         writable_roots = [
@@ -65,6 +66,18 @@ let
     }
     // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
   );
+  denySiblings =
+    parent: name:
+    let
+      size = builtins.stringLength name;
+      prefix = length: builtins.substring 0 length name;
+      patterns =
+        lib.concatMap (
+          i: lib.optional (i > 0) (prefix i) ++ [ "${prefix i}[!${builtins.substring i 1 name}]*" ]
+        ) (lib.range 0 (size - 1))
+        ++ [ "${name}?*" ];
+    in
+    map (pattern: "${parent}/${pattern}") patterns;
   requirements = (pkgs.formats.toml { }).generate "qq-codex-requirements.toml" {
     allowed_approval_policies = [ "on-request" ];
     allowed_approvals_reviewers = [ "auto_review" ];
@@ -73,12 +86,15 @@ let
       "read-only"
     ];
     allow_login_shell = false;
-    permissions.filesystem.deny_read = [
-      state
-      "/etc/qq-codex-agent/napcat-token"
-      "/etc/qq-codex-agent/allowlist.toml"
-    ]
-    ++ cfg.extraDeniedPaths;
+    permissions.filesystem.deny_read =
+      denySiblings state "codex"
+      ++ denySiblings "${state}/codex" "tmp"
+      ++ denySiblings "${state}/codex/tmp" "arg0"
+      ++ [
+        "/etc/qq-codex-agent/napcat-token"
+        "/etc/qq-codex-agent/allowlist.toml"
+      ]
+      ++ cfg.extraDeniedPaths;
   };
   closure = pkgs.closureInfo {
     rootPaths = [

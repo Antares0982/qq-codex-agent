@@ -37,6 +37,10 @@ let
     builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-agent/config.toml" path) mounts
   );
   configFile = builtins.head (pkgs.lib.splitString ":" configMount);
+  requirementsMount = builtins.head (
+    builtins.filter (path: pkgs.lib.hasSuffix ":/etc/codex/requirements.toml" path) mounts
+  );
+  requirementsFile = builtins.head (pkgs.lib.splitString ":" requirementsMount);
 in
 assert builtins.all (
   name:
@@ -53,7 +57,7 @@ assert !(builtins.elem "/var/lib/qq-codex-agent/codex/tmp/arg0" mounts);
 assert builtins.elem "/run/test-token:/etc/qq-codex-agent/napcat-token" mounts;
 assert !(builtins.any (rule: pkgs.lib.hasPrefix "C " rule) config.systemd.tmpfiles.rules);
 pkgs.runCommand "qq-codex-deployment-check" { nativeBuildInputs = [ pkgs.python313 ]; } ''
-  python - ${configFile} <<'PY'
+  python - ${configFile} ${requirementsFile} <<'PY'
   import sys
   import tomllib
   from pathlib import Path
@@ -65,6 +69,25 @@ pkgs.runCommand "qq-codex-deployment-check" { nativeBuildInputs = [ pkgs.python3
       ("group_agents_file", "AGENTS.group.md"),
   ):
       assert config[key] == f"/etc/qq-codex-agent/{name}"
+  requirements = tomllib.loads(Path(sys.argv[2]).read_text())
+  patterns = requirements["permissions"]["filesystem"]["deny_read"]
+  parent = Path("/var/lib/qq-codex-agent")
+  for component in ("codex", "tmp", "arg0"):
+      for name in ("auth.json", ".secret", component + "extra") + tuple(
+          component[:i] + suffix
+          for i in range(len(component))
+          for suffix in ("", "X", ".")
+          if component[:i] + suffix not in ("", ".")
+      ):
+          for path in (parent / name, parent / name / "nested/secret"):
+              assert any(
+                  ancestor.full_match(pattern)
+                  for ancestor in (path, *path.parents)
+                  for pattern in patterns
+              ), path
+      parent /= component
+  for path in (parent, parent / "codex-arg0-test/codex-execve-wrapper"):
+      assert not any(path.full_match(pattern) for pattern in patterns), path
   PY
   touch "$out"
 ''
