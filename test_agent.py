@@ -80,6 +80,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             root / "AGENTS.md",
         )
         self.bot = NS(
+            call=AsyncMock(return_value={}),
             send=AsyncMock(),
             image=AsyncMock(return_value=PNG),
             reply_content=AsyncMock(return_value=([], [])),
@@ -468,7 +469,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             inputs[0].text,
             "QQ 用户 1（ID: 1）:\n请问 @小明 同学（ID: 2） 和 @小明 同学（ID: 2） 呢",
         )
-        self.bot.call.assert_awaited_once_with(
+        self.bot.call.assert_any_await(
             "get_group_member_info", {"group_id": 10, "user_id": 2}
         )
         self.bot.call.side_effect = RuntimeError("lookup failed")
@@ -805,7 +806,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             ]
             self.assertIn(expected, instructions)
             self.assertNotIn(excluded, instructions)
-        self.bot.call.assert_not_awaited()
+        self.assertTrue(
+            all(c.args[0] == "set_msg_emoji_like" for c in self.bot.call.call_args_list)
+        )
 
     async def test_bot_nickname(self):
         group = self.settings.agents_file.parent / "group.md"
@@ -834,7 +837,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 f"你的昵称：{expected}，再说一次：{expected}。{{other}}",
                 method.call_args.kwargs["developer_instructions"],
             )
-            self.bot.call.assert_awaited_once_with(
+            self.bot.call.assert_any_await(
                 "get_group_member_info", {"group_id": group_id, "user_id": 99}
             )
         self.assertEqual(
@@ -870,7 +873,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             inputs[0].text,
             "QQ 用户 1（ID: 1）:\n> 第一行\n> @小明（ID: 2） 第二行\n\n你怎么看？",
         )
-        self.bot.call.assert_awaited_once_with(
+        self.bot.call.assert_any_await(
             "get_group_member_info", {"group_id": 10, "user_id": 2}
         )
         self.bot.reply_content.return_value = ([("text", "只有引用")], [])
@@ -994,6 +997,113 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             c.kwargs["text"] for c in self.bot.send.call_args_list if "text" in c.kwargs
         ]
         self.assertEqual(texts, ["开始处理……", "正在生成图片……", "last"])
+
+    async def test_group_reminders(self):
+        self.assertEqual(
+            app.GROUP_REMINDERS,
+            ((30, "thinking_30s.png"), (300, "thinking_too_long.png")),
+        )
+        images = [
+            (Path(app.__file__).with_name("pics") / name).read_bytes()
+            for _, name in app.GROUP_REMINDERS
+        ]
+        for data in images:
+            self.assertLess(len(data), 120_000)
+            with Image.open(io.BytesIO(data)) as picture:
+                picture.verify()
+        for group, end, expected in (
+            (10, "completed", []),
+            (10, "failed", []),
+            (10, "error", []),
+            (10, "cancel", []),
+            (10, "after_first", images[:1]),
+            (10, "slow", images),
+            (None, "slow", []),
+        ):
+            with self.subTest(group=group, end=end):
+                self.bot.send.reset_mock()
+                _, turn = self.setup_turn([])
+
+                async def stream():
+                    await asyncio.sleep(
+                        0.06 if end == "slow" else 0.02 if end == "after_first" else 0
+                    )
+                    if end == "error":
+                        raise RuntimeError("stream failed")
+                    if end == "cancel":
+                        raise asyncio.CancelledError
+                    yield turn_done(
+                        TurnStatus.failed if end == "failed" else TurnStatus.completed
+                    )
+
+                turn.stream = stream
+                with patch.object(
+                    app,
+                    "GROUP_REMINDERS",
+                    ((0.01, "thinking_30s.png"), (0.03, "thinking_too_long.png")),
+                ):
+                    message = app.parse_message(event(group=group), self.settings)
+                    if end == "cancel":
+                        with self.assertRaises(asyncio.CancelledError):
+                            await self.agent.execute(message)
+                    else:
+                        await self.agent.execute(message)
+                    await asyncio.sleep(0.04)
+                self.assertEqual(
+                    [
+                        c.kwargs["image"]
+                        for c in self.bot.send.call_args_list
+                        if "image" in c.kwargs
+                    ],
+                    expected,
+                )
+                if end == "failed":
+                    self.assertEqual(
+                        self.bot.send.call_args.kwargs["text"], "哎呀！宕机了……"
+                    )
+
+    async def test_group_reaction(self):
+        for group, outcome in ((None, "ok"), (10, "ok"), (10, "failed"), (10, "slow")):
+            with self.subTest(group=group, outcome=outcome):
+                self.bot.call.reset_mock()
+                cancelled = asyncio.Event()
+
+                async def call(action, params):
+                    if outcome == "failed":
+                        raise RuntimeError("unsupported")
+                    if outcome == "slow":
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            cancelled.set()
+
+                self.bot.call.side_effect = call
+                self.setup_turn([turn_done()])
+                message = app.parse_message(
+                    event(group=group, identifier=-42), self.settings
+                )
+                await asyncio.wait_for(self.agent.execute(message), 2)
+                if group:
+                    self.bot.call.assert_awaited_once_with(
+                        "set_msg_emoji_like",
+                        {"message_id": "-42", "emoji_id": "124", "set": True},
+                    )
+                else:
+                    self.bot.call.assert_not_awaited()
+                self.assertEqual(self.bot.send.call_args.kwargs["text"], "任务完成。")
+                if outcome == "slow":
+                    self.assertTrue(cancelled.is_set())
+
+    async def test_reminder_failure(self):
+        message = app.parse_message(event(group=10), self.settings)
+        self.bot.send.side_effect = [ConnectionError("offline"), None]
+        with patch.object(
+            app,
+            "GROUP_REMINDERS",
+            ((0, "thinking_30s.png"), (0, "thinking_too_long.png")),
+        ):
+            await self.agent.remind_group(message, asyncio.get_running_loop().time())
+        self.assertEqual(self.bot.send.await_count, 2)
 
     async def test_progress_once(self):
         kinds = (
