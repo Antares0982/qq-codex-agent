@@ -40,7 +40,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         self.folder.mkdir()
         self.message = app.parse_message(event(), self.settings)
         self.context = app.ImageTurn(self.message, self.folder)
-        self.agent.image_context = self.context
+        self.agent.image_contexts[self.message.key] = self.context
 
     def tearDown(self):
         self.agent.db.close()
@@ -84,7 +84,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         self.agent.db.close()
         self.agent = app.Agent(self.settings, self.bot, self.codex)
         self.context = app.ImageTurn(self.message, self.folder)
-        self.agent.image_context = self.context
+        self.agent.image_contexts[self.message.key] = self.context
         with self.assertRaisesRegex(ValueError, "结果未知"):
             await self.agent.deliver_image(self.context, {"action": "send_image"})
         self.bot.send.assert_awaited_once()
@@ -97,16 +97,21 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
     async def test_later_turn_can_resend_original(self):
         path = self.save()
         await self.agent.deliver_image(self.context, {"action": "send_image"})
-        self.agent.image_context = app.ImageTurn(self.message, self.folder)
+        self.agent.image_contexts[self.message.key] = app.ImageTurn(
+            self.message, self.folder
+        )
         result = await self.agent.deliver_image(
-            self.agent.image_context, {"action": "send_image", "path": path}
+            self.agent.image_contexts.get(self.message.key),
+            {"action": "send_image", "path": path},
         )
         self.assertTrue(result["ok"])
         self.assertEqual(self.bot.send.await_count, 2)
 
     async def test_stale_turn_cannot_send(self):
         self.save()
-        self.agent.image_context = app.ImageTurn(self.message, self.folder)
+        self.agent.image_contexts[self.message.key] = app.ImageTurn(
+            self.message, self.folder
+        )
         with self.assertRaisesRegex(ValueError, "本轮已结束"):
             await self.agent.deliver_image(self.context, {"action": "send_image"})
         self.bot.send.assert_not_awaited()
@@ -116,7 +121,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         other = self.settings.workspace_dir / "other"
         other.mkdir()
         context = app.ImageTurn(self.message, other)
-        self.agent.image_context = context
+        self.agent.image_contexts[self.message.key] = context
         self.assertEqual(self.agent.list_images(context)["images"], [])
         for request in (
             {"action": "send_image"},
@@ -214,13 +219,19 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
                         result=base64.b64encode(PNG).decode(),
                     )
                 )
-            images = self.agent.list_images(self.agent.image_context)["images"]
+            images = self.agent.list_images(
+                self.agent.image_contexts.get(self.message.key)
+            )["images"]
             self.assertEqual(
                 [image["generation_id"] for image in images], ["frame1", "frame2"]
             )
             for image in images:
                 self.assertEqual(
-                    (self.agent.image_context.folder / image["path"]).read_bytes(), PNG
+                    (
+                        self.agent.image_contexts.get(self.message.key).folder
+                        / image["path"]
+                    ).read_bytes(),
+                    PNG,
                 )
             self.assertFalse(
                 any("image" in call.kwargs for call in self.bot.send.call_args_list)
@@ -234,7 +245,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await self.agent.execute(self.message)
-        self.assertIsNone(self.agent.image_context)
+        self.assertIsNone(self.agent.image_contexts.get(self.message.key))
         self.assertEqual(
             self.agent.db.execute("SELECT COUNT(*) FROM generated_images").fetchone()[
                 0
@@ -261,7 +272,9 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         self.save()
 
         async def readline():
-            self.agent.image_context = app.ImageTurn(self.message, self.folder)
+            self.agent.image_contexts[self.message.key] = app.ImageTurn(
+                self.message, self.folder
+            )
             return b'{"action":"send_image"}\n'
 
         writer = NS(
@@ -357,7 +370,12 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(progress.wait(), 1)
             yield item_done(image)
             self.assertEqual(
-                len(self.agent.list_images(self.agent.image_context)["images"]), 1
+                len(
+                    self.agent.list_images(
+                        self.agent.image_contexts.get(self.message.key)
+                    )["images"]
+                ),
+                1,
             )
             release.set()
             yield turn_done()

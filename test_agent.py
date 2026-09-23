@@ -172,7 +172,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     def member_context(self, user=1, group=10):
         message = app.parse_message(event(user=user, group=group), self.settings)
         context = app.ImageTurn(message, self.settings.workspace_dir / "members")
-        self.agent.image_context = context
+        self.agent.image_contexts[context.message.key] = context
         return context
 
     def save_profile(self, context, profile):
@@ -251,7 +251,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(encoded)[0]["profile"]["兴趣"], payload)
         self.save_profile(context, {})
         self.assertEqual(context.profiles, [])
-        self.agent.image_context = None
+        self.agent.image_contexts.clear()
         with self.assertRaises(ValueError):
             self.save_profile(context, {})
         private = self.member_context(group=None)
@@ -317,7 +317,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     async def test_member_recall(self):
         self.save_profile(self.member_context(), {"兴趣": "NixOS"})
         self.save_profile(self.member_context(user=2), {"兴趣": "摄影"})
-        self.agent.image_context = None
+        self.agent.image_contexts.clear()
         self.setup_turn([turn_done()])
         message = app.parse_message(event(group=10, reply="42"), self.settings)
         self.bot.reply_content.return_value = ([("at", "2")], [])
@@ -329,7 +329,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         args = options["config"]["mcp_servers"]["qq_member"]["args"]
         context = self.member_context()
         self.save_profile(context, {"兴趣": "代码"})
-        self.agent.image_context = None
+        self.agent.image_contexts.clear()
         message.parts.append(("at", "2"))
         await self.agent.execute(message)
         options = self.codex.thread_resume.call_args.kwargs
@@ -531,12 +531,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_queue_limits(self):
         self.settings.queue_limit = 1
-        self.agent.queue = asyncio.Queue(1)
         self.agent.receive(event(identifier=1))
         self.agent.receive(event(identifier=2))
         await asyncio.gather(*self.agent.controls)
         self.assertEqual(self.agent.queue.qsize(), 1)
         self.assertIn("已满", self.bot.send.call_args.kwargs["text"])
+        self.agent.receive(event(group=10, identifier=3))
+        self.assertEqual(self.agent.queue.qsize(), 2)
 
     def test_external_allowlist(self):
         root = Path(self.temp.name)
@@ -1056,7 +1057,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 sys.executable,
                 str(Path(app.__file__).with_name("image_tool.py")),
                 str(socket_path),
-                self.agent.image_context.folder.name,
+                self.agent.image_contexts["group-10"].folder.name,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
             )
@@ -1252,6 +1253,239 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 [call.kwargs for call in self.bot.send.call_args_list],
                 [{"text": "已停止本会话任务并清空队列。"}],
+            )
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_parallel_steering(self):
+        turns, queues, entered = {}, {}, {}
+        for key in ("group-10", "private-1"):
+            queues[key] = asyncio.Queue()
+            entered[key] = asyncio.Event()
+
+            async def stream(key=key):
+                entered[key].set()
+                while True:
+                    item = await queues[key].get()
+                    yield item
+                    if item.method == "turn/completed":
+                        return
+
+            turns[key] = NS(stream=stream, steer=AsyncMock(), interrupt=AsyncMock())
+        threads = iter(
+            NS(id=key, turn=AsyncMock(return_value=turns[key])) for key in turns
+        )
+        self.codex.thread_start = AsyncMock(side_effect=lambda **kwargs: next(threads))
+        self.agent.receive(event(group=10))
+        self.agent.receive(event())
+        worker = asyncio.create_task(self.agent.work())
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(e.wait() for e in entered.values())), 2
+            )
+            self.agent.receive(event(group=10, identifier=2, text="first"))
+            self.agent.receive(event(user=2, group=10, identifier=3, text="second"))
+            self.agent.receive(event(identifier=2, text="private update", reply="42"))
+            self.bot.reply_content.return_value = ([("text", "quoted")], ["photo"])
+            for _ in range(100):
+                if (
+                    turns["group-10"].steer.await_count == 2
+                    and turns["private-1"].steer.await_count == 1
+                ):
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(turns["group-10"].steer.await_count, 2)
+            self.assertEqual(turns["private-1"].steer.await_count, 1)
+            texts = [
+                call.args[0][0].text for call in turns["group-10"].steer.call_args_list
+            ]
+            self.assertEqual(
+                texts, ["QQ 用户 1（ID: 1）:\nfirst", "QQ 用户 2（ID: 2）:\nsecond"]
+            )
+            self.assertEqual(len(turns["private-1"].steer.call_args.args[0]), 2)
+            self.assertFalse(self.agent.image_contexts["group-10"].profile_writable)
+            self.assertEqual(len(self.agent.jobs), 2)
+            self.codex.thread_start.assert_awaited()
+            self.assertEqual(self.codex.thread_start.await_count, 2)
+            for context in self.agent.image_contexts.values():
+                (context.folder / "out.png").write_bytes(PNG)
+                output = []
+                writer = NS(
+                    write=lambda data, output=output: output.append(json.loads(data)),
+                    drain=AsyncMock(),
+                    close=lambda: None,
+                    wait_closed=AsyncMock(),
+                )
+                reader = NS(
+                    readline=AsyncMock(
+                        return_value=json.dumps(
+                            {
+                                "session": context.folder.name,
+                                "action": "send_image",
+                                "path": "out.png",
+                            }
+                        ).encode()
+                    )
+                )
+                await self.agent.send_image(reader, writer)
+                self.assertTrue(output[0]["ok"])
+                self.assertEqual(
+                    self.bot.send.call_args.args[0].key, context.message.key
+                )
+            await self.agent.control(
+                app.parse_message(event(group=10, text="/new"), self.settings)
+            )
+            turns["group-10"].interrupt.assert_awaited_once()
+            turns["private-1"].interrupt.assert_not_awaited()
+            self.assertIn("private-1", self.agent.image_contexts)
+            self.assertNotIn("group-10", self.agent.jobs)
+            queues["private-1"].put_nowait(turn_done())
+            await asyncio.wait_for(asyncio.gather(*self.agent.jobs.values()), 2)
+            statuses = dict(self.agent.db.execute("SELECT id, status FROM messages"))
+            self.assertEqual(statuses["99:group-10:3"], "interrupted")
+            self.assertEqual(statuses["99:private-1:2"], "completed")
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_steering_completion_race(self):
+        entered, finish = asyncio.Event(), asyncio.Event()
+        thread, turn = self.setup_turn([])
+
+        async def stream():
+            entered.set()
+            await finish.wait()
+            yield turn_done()
+
+        async def steer(inputs):
+            finish.set()
+            raise app.JsonRpcError(-32600, "no active turn to steer")
+
+        turn.stream = stream
+        turn.steer = AsyncMock(side_effect=steer)
+        self.agent.receive(event())
+        worker = asyncio.create_task(self.agent.work())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.agent.receive(event(identifier=2, text="late"))
+            await asyncio.wait_for(finish.wait(), 2)
+            await asyncio.wait_for(asyncio.gather(*self.agent.jobs.values()), 2)
+            self.assertEqual(thread.turn.await_count, 2)
+            self.assertEqual(thread.turn.call_args.args[0][0].text, "QQ 用户 1:\nlate")
+            turn.steer.assert_awaited_once()
+            self.assertEqual(
+                self.agent.db.execute(
+                    "SELECT status FROM messages WHERE id='99:private-1:2'"
+                ).fetchone()[0],
+                "completed",
+            )
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_steering_unknown_result(self):
+        entered, finish = asyncio.Event(), asyncio.Event()
+        thread, turn = self.setup_turn([])
+
+        async def stream():
+            entered.set()
+            await finish.wait()
+            yield turn_done()
+
+        async def steer(inputs):
+            finish.set()
+            raise TimeoutError()
+
+        turn.stream = stream
+        turn.steer = AsyncMock(side_effect=steer)
+        self.agent.receive(event())
+        worker = asyncio.create_task(self.agent.work())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.agent.receive(event(identifier=2))
+            await asyncio.wait_for(finish.wait(), 2)
+            await asyncio.wait_for(asyncio.gather(*self.agent.jobs.values()), 2)
+            thread.turn.assert_awaited_once()
+            turn.steer.assert_awaited_once()
+            self.assertEqual(
+                self.agent.db.execute(
+                    "SELECT status FROM messages WHERE id='99:private-1:2'"
+                ).fetchone()[0],
+                "failed",
+            )
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_steering_startup_stop(self):
+        starting, release, entered, downloading = (asyncio.Event() for _ in range(4))
+        thread, turn = self.setup_turn([])
+
+        async def start(*args, **kwargs):
+            starting.set()
+            await release.wait()
+            return turn
+
+        async def stream():
+            entered.set()
+            await asyncio.Future()
+            yield turn_done()
+
+        async def image(file):
+            downloading.set()
+            await asyncio.Future()
+
+        thread.turn.side_effect = start
+        turn.stream = stream
+        turn.steer = AsyncMock()
+        self.bot.image.side_effect = image
+        self.agent.receive(event(group=10))
+        worker = asyncio.create_task(self.agent.work())
+        try:
+            await asyncio.wait_for(starting.wait(), 2)
+            self.agent.receive(event(group=10, identifier=2, text="during startup"))
+            release.set()
+            await asyncio.wait_for(entered.wait(), 2)
+            incoming = event(group=10, identifier=3)
+            incoming["message"].append({"type": "image", "data": {"file": "slow"}})
+            self.agent.receive(incoming)
+            self.agent.receive(event(group=10, identifier=4))
+            await asyncio.wait_for(downloading.wait(), 2)
+            turn.steer.assert_awaited_once()
+            await self.agent.control(
+                app.parse_message(event(group=10, text="/stop"), self.settings)
+            )
+            self.assertFalse(self.agent.jobs)
+            self.assertFalse(self.agent.pending)
+            self.assertEqual(
+                [
+                    row[0]
+                    for row in self.agent.db.execute(
+                        "SELECT status FROM messages ORDER BY id"
+                    )
+                ],
+                ["interrupted", "interrupted", "canceled", "canceled"],
+            )
+            turn.interrupt.assert_awaited_once()
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_stop_before_start(self):
+        worker = asyncio.create_task(self.agent.work())
+        self.agent.receive(event(group=10))
+        self.agent.receive(event(group=10, identifier=2, text="/stop"))
+        try:
+            await asyncio.gather(*self.agent.controls)
+            self.assertFalse(self.agent.jobs)
+            self.assertFalse(self.agent.pending)
+            self.codex.account.assert_not_awaited()
+            self.assertEqual(
+                self.agent.db.execute(
+                    "SELECT status FROM messages WHERE id='99:group-10:1'"
+                ).fetchone()[0],
+                "canceled",
             )
         finally:
             worker.cancel()
