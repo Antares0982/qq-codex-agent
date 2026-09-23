@@ -226,6 +226,24 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises((ValueError, TypeError)):
                 app.Settings.load(path)
 
+    def test_prompt_validation(self):
+        with self.assertRaises(FileNotFoundError):
+            self.settings.check_prompts()
+        self.settings.agents_file.write_text("公共提示词")
+        self.settings.check_prompts()
+        with self.assertRaisesRegex(ValueError, "private_agents_file"):
+            self.settings.check_prompts(required=True)
+        for key in ("private_agents_file", "group_agents_file"):
+            path = Path(self.temp.name) / key
+            setattr(self.settings, key, path)
+            with self.assertRaises(FileNotFoundError):
+                self.settings.check_prompts()
+            path.write_text(" \n")
+            with self.assertRaisesRegex(ValueError, "Empty prompt"):
+                self.settings.check_prompts()
+            path.write_text("聊天提示词")
+        self.settings.check_prompts(required=True)
+
     async def test_queue_limits(self):
         self.settings.queue_limit = 1
         self.agent.queue = asyncio.Queue(1)

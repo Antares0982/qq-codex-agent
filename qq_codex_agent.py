@@ -92,6 +92,16 @@ class Settings:
     task_timeout: int = 900
     model: str | None = None
 
+    def check_prompts(self, required=False):
+        for key in ("agents_file", "private_agents_file", "group_agents_file"):
+            path = getattr(self, key)
+            if path is None:
+                if required:
+                    raise ValueError(f"Missing {key}")
+                continue
+            if not path.read_text().strip():
+                raise ValueError(f"Empty prompt: {path}")
+
     @classmethod
     def load(cls, path):
         raw = tomllib.loads(Path(path).read_text())
@@ -1081,6 +1091,8 @@ def codex_config(settings):
 async def run(settings, login):
     os.umask(0o077)
     os.environ.pop("NAPCAT_WS_TOKEN", None)
+    if not login:
+        settings.check_prompts()
     async with AsyncCodex(config=codex_config(settings)) as codex:
         if login:
             handle = await codex.login_chatgpt_device_code()

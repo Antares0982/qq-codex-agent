@@ -38,9 +38,12 @@ uv run --frozen python check_runtime.py --sandbox
 `--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。
 测试模拟 OneBot、模型事件和图片响应。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
 
+Nix 部署检查及两仓库迁移步骤见 [nix/README.md](nix/README.md)。
+
 ## NixOS 部署
 
-服务模块位于 Nix 仓库 `rpi/qq-codex-agent.nix`，打包逻辑在 `rpi/qq-codex-package.nix`。
+服务模块和打包逻辑由本仓库的 `nix/module.nix`、`nix/package.nix` 维护。
+Nix 仓库的 `rpi/qq-codex-agent.nix` 只负责 agenix、代理、NapCat 启动顺序和宿主访问授权；`systemMap.nix` 从同一个源码 input 导入模块及包。
 树莓派 flake 将本仓库作为 `qq-codex-agent` 源码 input（`flake = false`），
 用现有 uv2nix 根据 `uv.lock` 构建应用、Python 依赖及配套 Codex runtime。
 服务与登录程序直接运行 Nix store 中的包，Pi 无需 clone 本仓库或创建虚拟环境。
@@ -84,7 +87,7 @@ users = ["all"]
 sudo nixos-rebuild switch --flake ./hosts/rpi5#rpi5
 ```
 
-第一次切换时会创建专用用户和目录，并在 AGENTS.md 不存在时复制默认模板。
+第一次切换时创建专用用户和目录。三份默认提示词直接从应用包只读挂载，随应用升级和回滚，不再复制到宿主 `/etc`。
 认证复用 tri-lug relay 的 `qqRelayEnv`：启动准备服务从中提取 `NAPCAT_WS_TOKEN`，
 写入仅服务用户可读的 `/run/qq-codex-auth/token`，再只读挂载到 agent 内。
 无需手工创建 token 文件，RabbitMQ 凭据不会传入 agent。
@@ -92,7 +95,7 @@ sudo nixos-rebuild switch --flake ./hosts/rpi5#rpi5
 独立运行时，`token_file` 仍须存在，但可以为空；非空时只放 token 本身。
 NapCat 的 forward WebSocket 使用 `ws://127.0.0.1:3001`，必须支持多客户端，不能停掉现有 relay。
 应用与依赖均由 Nix 管理，运行用户不可修改。应用的完整运行依赖加入私有根目录的只读挂载，
-不开放整个宿主 Nix store。已有 AGENTS.md 和登录状态会保留。
+默认不开放整个宿主 Nix store。当前 Pi 的宿主配置额外授权完整 store 和 Nix daemon，以支持 Nix 工具；该授权由 dotfile 维护。已有提示词副本不删除，但默认不再使用；登录状态保留。
 
 服务和登录 unit 均设置 `http_proxy`、`https_proxy` 为 `http://127.0.0.1:1081`，
 `no_proxy=127.0.0.1,localhost,::1`。这是环境变量代理，不是强制流量代理；本机 NapCat 连接直连。
@@ -121,12 +124,12 @@ sudo journalctl -u qq-codex-agent -f -o cat
 
 ## 提示词和目录边界
 
-编辑 `/etc/qq-codex-agent/AGENTS.md`、`AGENTS.private.md` 或 `AGENTS.group.md` 后重启 agent，再在 QQ `/new`。
-公共文件只读挂载为专用 `CODEX_HOME/AGENTS.md`，由 Codex 原生加载；`agents_file` 是部署配置约定，应用不直接读取此文件。私聊和群聊文件由部署配置的 `private_agents_file`、`group_agents_file` 指定，须只读挂载到服务内，应用按消息类型读取并作为 `developer_instructions` 注入新建和恢复的 thread。应用同时注入 QQ 文件交付规则和 Pillow Python 路径。更新 Nix 部署时须添加这两个文件的安装及挂载；只改本仓库不能使运行中的 Pi 服务加载新模板。
+默认修改本仓库的三份 `AGENTS*.runtime.md`，随应用重新部署。需要本机定制时，在 Nix 配置中设置 `services.qq-codex-agent.agentsFile`、`privateAgentsFile`、`groupAgentsFile` 为自定义文件的绝对路径；不要让秘密内容进入 Nix store。外部文件修改后重启 agent，公共提示词更新后在 QQ `/new`。首次迁移前比较 Pi 上原有三份 `/etc/qq-codex-agent/AGENTS*.md`，将需要保留的手工修改显式配置为覆盖文件；迁移不删除旧文件。
+公共文件只读挂载为专用 `CODEX_HOME/AGENTS.md`，由 Codex 原生加载；`agents_file` 用于部署路径和启动校验，应用不将其内容注入 thread。私聊和群聊文件由部署配置的 `private_agents_file`、`group_agents_file` 指定，须只读挂载到服务内，应用按消息类型读取并作为 `developer_instructions` 注入新建和恢复的 thread。应用同时注入 QQ 文件交付规则和 Pillow Python 路径。配置路径与挂载由应用仓库的同一个 Nix 模块生成；启动自检验证三份文件可读且非空。增加部署资源时在本仓库同步修改包、模块及检查，无需修改 dotfile。
 会话工作目录会被显式标记为可信项目。工作目录下新建的 AGENTS.md 遵循 Codex 自身规则，不能改变应用 allowlist 或宿主挂载。
 
 服务的私有根目录仅挂载所需运行时 Nix closure、只读应用和配置、专用状态与工作目录，以及 DNS/hosts 和必要虚拟文件系统。
-不挂载宿主完整 `/nix/store`、`/home`、`/etc`、`/run` 或 `/var`。
+默认不挂载宿主完整 `/nix/store`、`/home`、`/etc`、`/run` 或 `/var`；当前 Pi 对 store 和 Nix daemon 的额外授权见上文。
 工作区为 `/var/lib/qq-codex-work`，不同会话使用不同子目录；这提供会话组织，不是授权用户之间的强多租户隔离。
 状态与认证位于 `/var/lib/qq-codex-agent`。不可修改的 Codex managed requirements 禁止工具读取该目录和 NapCat token；外层文件系统仍约束自动审批后的访问范围。
 所有授权用户都能够操作专用工作区内的数据，因此只加入你信任的 QQ 号。
@@ -162,7 +165,7 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 
 在 Pi 查看 `sudo journalctl -u qq-codex-agent -n 100 --no-pager`。
 启动前检查失败会阻止服务运行，优先查看 traceback；不要通过删除沙箱检查或放宽目录权限绕过错误。
-`codex-linux-sandbox` 在 runtime 0.154.0 中是 Codex 启动时创建的辅助入口，不是独立的 Python 包。检查日志中的 `could not create PATH aliases`，以及 `CODEX_HOME/tmp/arg0` 是否可由服务用户创建子目录和入口。Nix 模块若将该目录额外挂为只读，会妨碍入口创建；需在部署仓库修正该挂载，同时保留认证目录的 managed deny-read。不能通过开放整个状态目录或关闭沙箱修复。启动自检现在也执行 app-server 的沙箱命令，可提前暴露 CLI 检查未覆盖的问题。此仓库不修改外部 Nix 模块，需在实际 Pi 部署验证。
+`codex-linux-sandbox` 在 runtime 0.154.0 中是 Codex 启动时创建的辅助入口，不是独立的 Python 包。检查日志中的 `could not create PATH aliases`，以及 `CODEX_HOME/tmp/arg0` 是否可由服务用户创建子目录和入口。Nix 模块保持该目录可写，同时保留认证目录的 managed deny-read；不要为它添加只读挂载。不能通过开放整个状态目录或关闭沙箱修复。启动自检现在也执行 app-server 的沙箱命令，可提前暴露 CLI 检查未覆盖的问题。服务模块现在随本仓库维护，仍需在实际 Pi 部署验证。
 遇到 `Unknown allowlist fields`，核对加密文件格式和实际运行的源码版本；重启服务不会更新 flake 锁定的旧代码。
 登录失败检查登录 unit 日志和本地代理；不要输出或分享 token、设备码及认证文件。
 推送源码后必须更新 Nix input、同步锁文件并在 Pi 切换系统；只更新应用仓库不会更新运行中的服务。

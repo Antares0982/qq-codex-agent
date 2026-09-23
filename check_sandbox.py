@@ -41,6 +41,8 @@ def check_app_server_sandbox(settings, directory, denied_paths):
 
 
 def main():
+    settings = Settings.load("/etc/qq-codex-agent/config.toml")
+    settings.check_prompts(required=True)
     state = Path("/var/lib/qq-codex-agent")
     work = Path("/var/lib/qq-codex-work")
     for path in (
@@ -92,7 +94,6 @@ def main():
         if result.returncode:
             print(result.stderr.decode(errors="replace"), file=sys.stderr)
             raise RuntimeError("Codex sandbox self-check failed")
-        settings = Settings.load("/etc/qq-codex-agent/config.toml")
         check_app_server_sandbox(
             settings,
             directory,
