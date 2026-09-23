@@ -3,6 +3,36 @@ import socket
 import sys
 
 
+MEMBER_FIELDS = ("称呼", "表达风格", "兴趣", "互动偏好", "不确定印象")
+MEMBER_TOOLS = [
+    {
+        "name": "list_profiles",
+        "description": "读取当前群本轮召回范围内的互动画像；仅用于改善交流，不主动公开他人画像。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "replace_profile",
+        "description": "完整替换当前发送者在当前群的互动画像。保留仍有效的字段，总内容最多 500 字符；空对象删除画像。仅成功返回才表示已保存。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "object",
+                    "properties": {name: {"type": "string"} for name in MEMBER_FIELDS},
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["profile"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+
 TOOLS = [
     {
         "name": "list_images",
@@ -35,14 +65,22 @@ TOOLS = [
 ]
 
 
-def call(path, session, action, arguments):
+def call(path, session, action, arguments, token=None):
     with socket.socket(socket.AF_UNIX) as client:
         # The host waits up to 30 seconds for NapCat's acknowledgement.
         client.settimeout(40)
         client.connect(path)
         client.sendall(
             (
-                json.dumps({"action": action, "session": session, **arguments}) + "\n"
+                json.dumps(
+                    {
+                        "action": action,
+                        "session": session,
+                        **arguments,
+                        **({"token": token} if token is not None else {}),
+                    }
+                )
+                + "\n"
             ).encode()
         )
         with client.makefile("r") as stream:
@@ -63,6 +101,9 @@ def call(path, session, action, arguments):
 def main():
     path = sys.argv[1]
     session = sys.argv[2] if len(sys.argv) > 2 else None
+    members = len(sys.argv) == 5 and sys.argv[3] == "--members"
+    token = sys.argv[4] if members else None
+    tools = MEMBER_TOOLS if members else TOOLS
     for line in sys.stdin:
         request = {}
         try:
@@ -74,29 +115,44 @@ def main():
                 result = {
                     "protocolVersion": request["params"]["protocolVersion"],
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "qq-image", "version": "2"},
+                    "serverInfo": {
+                        "name": "qq-member" if members else "qq-image",
+                        "version": "2",
+                    },
                 }
             elif method == "tools/list":
-                result = {"tools": TOOLS}
+                result = {"tools": tools}
             elif method == "tools/call":
                 params = request["params"]
                 name = params.get("name")
                 arguments = params.get("arguments", {})
-                allowed = {"path", "resend"} if name == "send_image" else set()
+                allowed = (
+                    ({"profile"} if name == "replace_profile" else set())
+                    if members
+                    else ({"path", "resend"} if name == "send_image" else set())
+                )
                 if (
-                    name not in {tool["name"] for tool in TOOLS}
+                    name not in {tool["name"] for tool in tools}
                     or not isinstance(arguments, dict)
                     or arguments.keys() - allowed
                 ):
                     raise ValueError("Unknown tool or invalid arguments")
                 try:
-                    result = call(path, session, name, arguments)
+                    result = call(
+                        path,
+                        session,
+                        name,
+                        arguments,
+                        **({"token": token} if members else {}),
+                    )
                 except (OSError, ValueError):
                     result = {
                         "content": [
                             {
                                 "type": "text",
-                                "text": "图片工具连接失败或响应超时；发送结果可能未知，不要自动重试或声称已发送。",
+                                "text": "画像工具连接失败或响应超时；保存结果未知，不要声称已保存。"
+                                if members
+                                else "图片工具连接失败或响应超时；发送结果可能未知，不要自动重试或声称已发送。",
                             }
                         ],
                         "isError": True,
