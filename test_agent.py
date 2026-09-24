@@ -271,7 +271,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         with self.agent.db:
             self.agent.db.execute("DROP TABLE member_profiles")
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('group-10', 'old-thread', 'folder')"
+                "INSERT INTO sessions (key, thread, folder) VALUES ('group-10', 'old-thread', 'folder')"
             )
         self.agent.db.close()
         self.agent = app.Agent(self.settings, self.bot, self.codex)
@@ -715,7 +715,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     async def test_reset_scope(self):
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('group-10', 'old-thread', 'missing-folder')"
+                "INSERT INTO sessions (key, thread, folder) VALUES ('group-10', 'old-thread', 'missing-folder')"
             )
         self.agent.receive(event(group=10, identifier=1))
         self.agent.receive(event(group=11, identifier=2))
@@ -723,7 +723,12 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         await self.agent.control(command)
         self.assertEqual(self.agent.queue.qsize(), 1)
         self.assertEqual(self.agent.queue.get_nowait().key, "group-11")
-        self.assertIsNone(self.agent.db.execute("SELECT key FROM sessions").fetchone())
+        self.assertEqual(
+            self.agent.db.execute(
+                "SELECT key, thread, folder, renew FROM sessions"
+            ).fetchone(),
+            ("group-10", "old-thread", "missing-folder", 1),
+        )
 
     def setup_turn(self, events):
         async def stream():
@@ -907,7 +912,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.setup_turn([turn_done()])
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('private-1', 'old-thread', 'folder')"
+                "INSERT INTO sessions (key, thread, folder) VALUES ('private-1', 'old-thread', 'folder')"
             )
             self.agent.db.execute(
                 "INSERT INTO activity VALUES ('private-1', 1000, 0, 0)"
@@ -937,7 +942,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.setup_turn([turn_done()])
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('group-10', 'old-thread', 'folder')"
+                "INSERT INTO sessions (key, thread, folder) VALUES ('group-10', 'old-thread', 'folder')"
             )
             self.agent.db.execute(
                 "INSERT INTO activity VALUES ('group-10', 1000, 0, 0)"
@@ -1227,7 +1232,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("用户消息：0 条", self.bot.send.call_args.kwargs["text"])
             with self.agent.db:
                 self.agent.db.execute(
-                    "INSERT INTO sessions VALUES ('group-10', 'thread1', 'folder')"
+                    "INSERT INTO sessions (key, thread, folder) VALUES ('group-10', 'thread1', 'folder')"
                 )
             items = [
                 ThreadItem.model_validate(
@@ -1304,7 +1309,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         original.write_bytes(PNG)
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('private-1', 'old', 'history')"
+                "INSERT INTO sessions (key, thread, folder) VALUES ('private-1', 'old', 'history')"
             )
         items = [
             {
@@ -1336,21 +1341,108 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(size, 2 * ((len(PNG) + 2) // 3 * 4) + 4)
         self.assertIn("original.png", text)
         self.assertNotIn("YWJj", text)
-        with patch.object(app, "HISTORY_IMAGE_LIMIT", 1):
-            await self.agent.execute(
-                app.parse_message(event(text="继续"), self.settings)
-            )
-        self.codex.thread_resume.assert_not_awaited()
-        self.codex.thread_start.assert_awaited_once()
-        inputs = thread.turn.call_args.args[0]
-        self.assertIn("保留这个画风", inputs[0].text)
-        self.assertIn("original.png", inputs[0].text)
-        self.assertIn("继续", inputs[1].text)
-        self.assertEqual(original.read_bytes(), PNG)
-        released = [
-            c.args[1]["threadId"] for c in self.codex._client.request.call_args_list
+        for cause in ("images", "idle", "new"):
+            with self.subTest(cause=cause):
+                self.codex.thread_start.reset_mock()
+                self.codex._client.request.reset_mock()
+                with self.agent.db:
+                    self.agent.db.execute("UPDATE sessions SET thread='old', renew=0")
+                message = app.parse_message(event(text="继续"), self.settings)
+                if cause == "new":
+                    command = app.parse_message(event(text="/new"), self.settings)
+                    await self.agent.control(command)
+                    await self.agent.control(command)
+                    self.agent.db.close()
+                    self.agent = app.Agent(self.settings, self.bot, self.codex)
+                    self.codex._client.request.reset_mock()
+                elif cause == "idle":
+                    message.generation = 1
+                limit = 1 if cause == "images" else app.HISTORY_IMAGE_LIMIT
+                with patch.object(app, "HISTORY_IMAGE_LIMIT", limit):
+                    await self.agent.execute(message)
+                self.codex.thread_resume.assert_not_awaited()
+                self.codex.thread_start.assert_awaited_once()
+                inputs = thread.turn.call_args.args[0]
+                self.assertIn("保留这个画风", inputs[0].text)
+                self.assertIn("original.png", inputs[0].text)
+                self.assertNotIn("YWJj", inputs[0].text)
+                self.assertIn("继续", inputs[1].text)
+                self.assertEqual(original.read_bytes(), PNG)
+                self.assertEqual(
+                    self.agent.db.execute(
+                        "SELECT folder, renew FROM sessions"
+                    ).fetchone(),
+                    ("history", 0),
+                )
+                released = [
+                    c.args[1]["threadId"]
+                    for c in self.codex._client.request.call_args_list
+                ]
+                self.assertEqual(released, ["old", "test-thread"])
+        items[0]["content"][0]["text"] = "x" * app.HISTORY_TEXT_LIMIT
+        self.read_history.return_value.thread.turns = [
+            NS(items=[ThreadItem.model_validate(i) for i in items])
         ]
-        self.assertEqual(released, ["old", "test-thread"])
+        _, transcript = app.history_context(
+            self.read_history.return_value.thread, folder
+        )
+        self.assertEqual(len(transcript), app.HISTORY_TEXT_LIMIT)
+        self.assertTrue(transcript.endswith("助手：已保存"))
+
+    async def test_rotation_retry(self):
+        self.setup_turn([turn_done()])
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO sessions VALUES ('private-1', 'old', 'folder', 1)"
+            )
+        message = app.parse_message(event(), self.settings)
+        self.read_history.side_effect = RuntimeError("history unavailable")
+        await self.agent.execute(message)
+        self.codex.thread_start.assert_not_awaited()
+        self.assertEqual(
+            self.agent.db.execute("SELECT thread, renew FROM sessions").fetchone(),
+            ("old", 1),
+        )
+        self.read_history.side_effect = None
+        await self.agent.execute(message)
+        self.codex.thread_start.assert_awaited_once()
+
+    async def test_workspace_persistence(self):
+        self.setup_turn([turn_done()])
+        with self.agent.db:
+            self.agent.db.execute("DROP TABLE sessions")
+            self.agent.db.execute(
+                "CREATE TABLE sessions (key TEXT PRIMARY KEY, thread TEXT, folder TEXT NOT NULL)"
+            )
+            self.agent.db.execute(
+                "INSERT INTO sessions VALUES ('private-1', 'old', 'existing')"
+            )
+        self.agent.db.close()
+        self.agent = app.Agent(self.settings, self.bot, self.codex)
+        self.assertEqual(
+            self.agent.db.execute("SELECT folder, renew FROM sessions").fetchone(),
+            ("existing", 0),
+        )
+        for group in (None, 10, 11):
+            message = app.parse_message(event(group=group), self.settings)
+            await self.agent.execute(message)
+            folder = self.agent.db.execute(
+                "SELECT folder FROM sessions WHERE key=?", (message.key,)
+            ).fetchone()[0]
+            await self.agent.control(
+                app.parse_message(event(group=group, text="/new"), self.settings)
+            )
+            await self.agent.execute(message)
+            self.assertEqual(
+                self.codex.thread_start.call_args.kwargs["cwd"],
+                str(self.settings.workspace_dir / folder),
+            )
+        self.assertEqual(
+            self.agent.db.execute(
+                "SELECT count(DISTINCT folder) FROM sessions"
+            ).fetchone()[0],
+            3,
+        )
 
     async def test_steering_deadline(self):
         message = app.parse_message(event(), self.settings)
@@ -1716,7 +1808,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.agent.receive(event())
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('private-1', 'thread-old', 'folder')"
+                "INSERT INTO sessions (key, thread, folder) VALUES ('private-1', 'thread-old', 'folder')"
             )
         self.agent.db.close()
         self.agent = app.Agent(self.settings, self.bot, self.codex)

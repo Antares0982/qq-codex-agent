@@ -256,20 +256,89 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             2,
         )
 
-    async def test_new_removes_files_and_image_metadata(self):
+    async def test_new_preserves_images(self):
         self.save()
         await self.agent.deliver_image(self.context, {"action": "send_image"})
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?)",
+                "INSERT INTO sessions (key, thread, folder) VALUES (?, ?, ?)",
                 (self.message.key, "thread", self.folder.name),
             )
         await self.agent.control(app.parse_message(event(text="/new"), self.settings))
-        self.assertFalse(self.folder.exists())
+        self.assertTrue(self.folder.exists())
         for table in ("generated_images", "image_deliveries"):
             self.assertEqual(
-                self.agent.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0
+                self.agent.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 1
             )
+
+    async def test_file_cleanup(self):
+        path = self.save()
+        await self.agent.deliver_image(self.context, {"action": "send_image"})
+        missing = self.save(item="missing")
+        (self.folder / missing).unlink()
+        self.agent.image_contexts.clear()
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO sessions (key, thread, folder) VALUES (?, ?, ?)",
+                (self.message.key, "thread", self.folder.name),
+            )
+        cutoff = 2_000_000_000 - app.FILE_RETENTION
+        for name, times in {
+            path: (cutoff - 1, cutoff - 1),
+            "accessed": (cutoff + 1, cutoff - 1),
+            "modified": (cutoff - 1, cutoff + 1),
+            "boundary": (cutoff, cutoff),
+        }.items():
+            file = self.folder / name
+            file.write_bytes(PNG)
+            os.utime(file, times)
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        protected = outside / "protected"
+        protected.write_bytes(PNG)
+        os.utime(protected, (cutoff - 1, cutoff - 1))
+        (self.folder / "link").symlink_to(outside, target_is_directory=True)
+        (self.folder / "file-link").symlink_to(protected)
+        (self.settings.workspace_dir / "outside-link").symlink_to(outside)
+        os.mkfifo(self.folder / "pipe")
+        with patch.object(app.time, "time", return_value=2_000_000_000):
+            for busy in (self.agent.jobs, self.agent.resetting):
+                if isinstance(busy, dict):
+                    busy[self.message.key] = object()
+                else:
+                    busy.add(self.message.key)
+                self.agent.clean_files()
+                self.assertTrue((self.folder / path).exists())
+                busy.clear()
+            self.agent.clean_files()
+        self.assertFalse((self.folder / path).exists())
+        for name in ("accessed", "modified", "boundary", "link", "file-link", "pipe"):
+            self.assertTrue((self.folder / name).exists())
+        self.assertTrue(protected.exists())
+        self.assertTrue(self.folder.exists())
+        self.assertEqual(self.agent.list_images(self.context)["images"], [])
+        self.assertEqual(
+            self.agent.db.execute("SELECT COUNT(*) FROM image_deliveries").fetchone()[
+                0
+            ],
+            0,
+        )
+        self.assertEqual(
+            self.agent.db.execute("SELECT folder FROM sessions").fetchone()[0],
+            self.folder.name,
+        )
+
+    async def test_cleanup_schedule(self):
+        with (
+            patch.object(self.agent, "clean_files") as clean,
+            patch.object(app.asyncio, "sleep", new_callable=AsyncMock) as sleep,
+        ):
+            sleep.side_effect = [None, asyncio.CancelledError]
+            with self.assertRaises(asyncio.CancelledError):
+                await self.agent.cleanup_files()
+            self.assertEqual(clean.call_count, 2)
+            self.assertEqual(sleep.await_count, 2)
+            sleep.assert_awaited_with(24 * 60 * 60)
 
     async def test_rpc_binds_context_before_reading_request(self):
         self.save()
