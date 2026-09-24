@@ -107,6 +107,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             event(user=99),
             event(group=12),
             event(group=10, mention=False),
+            event(user=3, text="/compact"),
+            event(group=10, mention=False, text="/compact"),
             {"post_type": "notice"},
             event(user=True),
         ):
@@ -908,50 +910,19 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("没有可读取", self.bot.send.call_args.kwargs["text"])
         self.assertFalse(hasattr(self.codex, "thread_start"))
 
-    async def test_thread_idle(self):
+    async def test_idle_group_silence(self):
         self.setup_turn([turn_done()])
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions (key, thread, folder) VALUES ('private-1', 'old-thread', 'folder')"
+                "INSERT INTO sessions VALUES ('group-10', 'test-thread', 'folder', 0)"
             )
-            self.agent.db.execute(
-                "INSERT INTO activity VALUES ('private-1', 1000, 0, 0)"
-            )
-        with patch.object(app.time, "time", return_value=1000 + app.THREAD_IDLE + 1):
-            self.agent.receive(event(identifier=2))
-        message = self.agent.queue.get_nowait()
+        self.store_usage(60000)
+        self.agent.compact = AsyncMock(return_value=False)
+        message = app.parse_message(event(group=10), self.settings)
+        message.generation = 1
         await self.agent.execute(message)
-        self.codex.thread_resume.assert_not_awaited()
-        self.codex.thread_start.assert_awaited_once()
-        self.assertEqual(
-            self.agent.db.execute(
-                "SELECT thread, folder FROM sessions WHERE key='private-1'"
-            ).fetchone(),
-            ("test-thread", "folder"),
-        )
-        self.assertEqual(
-            [call.kwargs["text"] for call in self.bot.send.call_args_list],
-            [
-                "距上一条消息已超过两小时，已新建一个 thread。",
-                "开始处理……",
-                "任务完成。",
-            ],
-        )
-
-    async def test_thread_idle_group_silent(self):
-        self.setup_turn([turn_done()])
-        with self.agent.db:
-            self.agent.db.execute(
-                "INSERT INTO sessions (key, thread, folder) VALUES ('group-10', 'old-thread', 'folder')"
-            )
-            self.agent.db.execute(
-                "INSERT INTO activity VALUES ('group-10', 1000, 0, 0)"
-            )
-        with patch.object(app.time, "time", return_value=1000 + app.THREAD_IDLE + 1):
-            self.agent.receive(event(group=10, identifier=2))
-        await self.agent.execute(self.agent.queue.get_nowait())
-        self.codex.thread_resume.assert_not_awaited()
-        self.codex.thread_start.assert_awaited_once()
+        self.agent.compact.assert_awaited_once()
+        self.codex.thread_start.assert_not_awaited()
         self.assertEqual(
             [call.kwargs for call in self.bot.send.call_args_list],
             [{"text": "任务完成。"}],
@@ -1301,7 +1272,24 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("设备码", self.bot.send.call_args.kwargs["text"])
         self.bot.image.assert_not_called()
 
-    async def test_history_rotation(self):
+    def compact_event(self, method, thread="test-thread", turn="compact1", **kwargs):
+        payload = NS(thread_id=thread, turn_id=turn, **kwargs)
+        if method in {"turn/started", "turn/completed"}:
+            payload.turn = NS(id=turn, status=TurnStatus.completed, error=None)
+        return NS(method=method, payload=payload)
+
+    def store_usage(self, tokens, thread="test-thread"):
+        self.agent.observe_codex(
+            self.compact_event(
+                "thread/tokenUsage/updated",
+                thread=thread,
+                token_usage=NS(
+                    last=NS(total_tokens=tokens), total=NS(total_tokens=999999)
+                ),
+            )
+        )
+
+    async def test_blank_reset(self):
         thread, _ = self.setup_turn([turn_done()])
         folder = self.settings.workspace_dir / "history"
         folder.mkdir()
@@ -1309,103 +1297,241 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         original.write_bytes(PNG)
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions (key, thread, folder) VALUES ('private-1', 'old', 'history')"
+                "INSERT INTO sessions VALUES ('private-1', 'old', 'history', 0)"
             )
-        items = [
-            {
-                "type": "userMessage",
-                "id": "u",
-                "content": [
-                    {"type": "text", "text": "保留这个画风"},
-                    {"type": "localImage", "path": str(original)},
-                ],
-            },
-            {"type": "imageView", "id": "v", "path": str(original)},
-            {
-                "type": "imageGeneration",
-                "id": "g",
-                "status": "completed",
-                "result": "YWJj",
-            },
-            {
-                "type": "agentMessage",
-                "id": "a",
-                "text": "已保存",
-                "phase": "final_answer",
-            },
-        ]
-        self.read_history.return_value.thread.turns = [
-            NS(items=[ThreadItem.model_validate(i) for i in items])
-        ]
-        size, text = app.history_context(self.read_history.return_value.thread, folder)
-        self.assertEqual(size, 2 * ((len(PNG) + 2) // 3 * 4) + 4)
-        self.assertIn("original.png", text)
-        self.assertNotIn("YWJj", text)
-        for cause in ("images", "idle", "new"):
-            with self.subTest(cause=cause):
-                self.codex.thread_start.reset_mock()
-                self.codex._client.request.reset_mock()
-                with self.agent.db:
-                    self.agent.db.execute("UPDATE sessions SET thread='old', renew=0")
-                message = app.parse_message(event(text="继续"), self.settings)
-                if cause == "new":
-                    command = app.parse_message(event(text="/new"), self.settings)
-                    await self.agent.control(command)
-                    await self.agent.control(command)
-                    self.agent.db.close()
-                    self.agent = app.Agent(self.settings, self.bot, self.codex)
-                    self.codex._client.request.reset_mock()
-                elif cause == "idle":
-                    message.generation = 1
-                limit = 1 if cause == "images" else app.HISTORY_IMAGE_LIMIT
-                with patch.object(app, "HISTORY_IMAGE_LIMIT", limit):
-                    await self.agent.execute(message)
-                self.codex.thread_resume.assert_not_awaited()
-                self.codex.thread_start.assert_awaited_once()
-                inputs = thread.turn.call_args.args[0]
-                self.assertIn("保留这个画风", inputs[0].text)
-                self.assertIn("original.png", inputs[0].text)
-                self.assertNotIn("YWJj", inputs[0].text)
-                self.assertIn("继续", inputs[1].text)
-                self.assertEqual(original.read_bytes(), PNG)
-                self.assertEqual(
-                    self.agent.db.execute(
-                        "SELECT folder, renew FROM sessions"
-                    ).fetchone(),
-                    ("history", 0),
-                )
-                released = [
-                    c.args[1]["threadId"]
-                    for c in self.codex._client.request.call_args_list
-                ]
-                self.assertEqual(released, ["old", "test-thread"])
-        items[0]["content"][0]["text"] = "x" * app.HISTORY_TEXT_LIMIT
-        self.read_history.return_value.thread.turns = [
-            NS(items=[ThreadItem.model_validate(i) for i in items])
-        ]
-        _, transcript = app.history_context(
-            self.read_history.return_value.thread, folder
+        await self.agent.control(app.parse_message(event(text="/new"), self.settings))
+        self.agent.db.close()
+        self.agent = app.Agent(self.settings, self.bot, self.codex)
+        self.read_history.side_effect = RuntimeError("must not read old history")
+        await self.agent.execute(app.parse_message(event(text="继续"), self.settings))
+        self.codex.thread_start.assert_awaited_once()
+        self.codex.thread_resume.assert_not_awaited()
+        self.read_history.assert_not_awaited()
+        self.assertEqual(len(thread.turn.call_args.args[0]), 1)
+        self.assertEqual(thread.turn.call_args.args[0][0].text, "QQ 用户 1:\n继续")
+        self.assertEqual(original.read_bytes(), PNG)
+        self.assertEqual(
+            self.agent.db.execute("SELECT folder, renew FROM sessions").fetchone(),
+            ("history", 0),
         )
-        self.assertEqual(len(transcript), app.HISTORY_TEXT_LIMIT)
-        self.assertTrue(transcript.endswith("助手：已保存"))
 
-    async def test_rotation_retry(self):
-        self.setup_turn([turn_done()])
+    async def test_compact_boundaries(self):
+        thread, _ = self.setup_turn([turn_done()])
+
+        async def compact():
+            self.agent.observe_codex(self.compact_event("turn/started"))
+            self.agent.observe_codex(self.compact_event("turn/completed"))
+
+        thread.compact = AsyncMock(side_effect=compact)
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('private-1', 'old', 'folder', 1)"
+                "INSERT INTO sessions VALUES ('private-1', 'test-thread', 'folder', 0)"
             )
-        message = app.parse_message(event(), self.settings)
-        self.read_history.side_effect = RuntimeError("history unavailable")
-        await self.agent.execute(message)
-        self.codex.thread_start.assert_not_awaited()
+        for tokens, gap, expected in (
+            (50000, 7201, False),
+            (50001, 7200, False),
+            (50001, 7201, True),
+        ):
+            with self.subTest(tokens=tokens, gap=gap):
+                with self.agent.db:
+                    self.agent.db.execute(
+                        "INSERT OR REPLACE INTO activity VALUES ('private-1', 1000, 0, 0)"
+                    )
+                    self.agent.db.execute("DELETE FROM messages")
+                self.store_usage(tokens)
+                thread.compact.reset_mock()
+                with patch.object(app.time, "time", return_value=1000 + gap):
+                    self.agent.receive(event())
+                await self.agent.execute(self.agent.queue.get_nowait())
+                self.assertEqual(thread.compact.await_count, int(expected))
+                self.codex.thread_start.assert_not_awaited()
+                self.read_history.assert_not_awaited()
         self.assertEqual(
-            self.agent.db.execute("SELECT thread, renew FROM sessions").fetchone(),
-            ("old", 1),
+            self.codex.thread_resume.call_args.kwargs["config"][
+                "model_auto_compact_token_limit"
+            ],
+            100000,
         )
-        self.read_history.side_effect = None
-        await self.agent.execute(message)
-        self.codex.thread_start.assert_awaited_once()
+        config = app.codex_config(self.settings)
+        self.assertIn("model_auto_compact_token_limit=100000", config.config_overrides)
+        self.assertIn(
+            'model_auto_compact_token_limit_scope="total"', config.config_overrides
+        )
+
+    async def test_compact_queue(self):
+        thread, _ = self.setup_turn([turn_done()])
+        entered = asyncio.Event()
+
+        async def compact():
+            self.agent.observe_codex(self.compact_event("turn/started"))
+            entered.set()
+
+        thread.compact = AsyncMock(side_effect=compact)
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO sessions VALUES ('private-1', 'test-thread', 'folder', 0)"
+            )
+            self.agent.db.execute("INSERT INTO activity VALUES ('private-1', 0, 0, 0)")
+        self.store_usage(60000)
+        self.agent.receive(event())
+        worker = asyncio.create_task(self.agent.work())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            thread.turn.assert_not_awaited()
+            self.agent.receive(event(identifier=2, text="追加"))
+            await self.agent.queue.join()
+            self.assertEqual(len(self.agent.pending["private-1"]), 1)
+            self.agent.observe_codex(
+                self.compact_event("turn/completed", thread="other")
+            )
+            await asyncio.sleep(0)
+            thread.turn.assert_not_awaited()
+            self.agent.observe_codex(self.compact_event("error", will_retry=False))
+            self.agent.observe_codex(self.compact_event("turn/completed"))
+            for _ in range(100):
+                if not self.agent.jobs:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertFalse(self.agent.jobs)
+            self.assertEqual(thread.turn.await_count, 2)
+            thread.compact.assert_awaited_once()
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_compact_cancel(self):
+        thread, _ = self.setup_turn([])
+        entered = asyncio.Event()
+
+        async def compact():
+            self.agent.observe_codex(self.compact_event("turn/started"))
+            entered.set()
+
+        async def interrupt(*args):
+            self.agent.observe_codex(self.compact_event("turn/completed"))
+
+        thread.compact = AsyncMock(side_effect=compact)
+        self.codex._client.turn_interrupt = AsyncMock(side_effect=interrupt)
+        task = asyncio.create_task(self.agent.compact(thread))
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.codex._client.turn_interrupt.assert_awaited_once_with(
+            "test-thread", "compact1"
+        )
+        self.assertFalse(self.agent.compactions)
+
+    async def test_compact_failures(self):
+        thread, _ = self.setup_turn([])
+        thread.compact = AsyncMock(side_effect=app.JsonRpcError(-32600, "rejected"))
+        self.assertFalse(await self.agent.compact(thread))
+        thread.compact.side_effect = RuntimeError("transport closed")
+        with self.assertRaises(SystemExit):
+            await self.agent.compact(thread)
+        self.assertFalse(self.agent.compactions)
+
+    async def test_usage_restore(self):
+        from openai_codex._message_router import MessageRouter
+
+        router = MessageRouter()
+        self.codex._client._sync = NS(_router=router)
+        item = self.compact_event(
+            "thread/tokenUsage/updated", token_usage=NS(last=NS(total_tokens=51000))
+        )
+        with self.agent.watch_codex():
+            waiter = asyncio.create_task(self.agent.context_tokens("test-thread"))
+            await asyncio.sleep(0)
+            await asyncio.to_thread(router.route_notification, item)
+            self.assertEqual(await waiter, 51000)
+            item.payload.token_usage.last.total_tokens = 20000
+            await asyncio.to_thread(router.route_notification, item)
+            await asyncio.sleep(0)
+            self.assertEqual(await self.agent.context_tokens("test-thread"), 20000)
+        self.assertFalse(self.agent.usage_ready)
+        with (
+            patch.object(app.asyncio, "wait_for", side_effect=TimeoutError),
+            patch.object(app.asyncio.Event, "wait", new=lambda self: None),
+        ):
+            self.assertIsNone(await self.agent.context_tokens("missing"))
+        self.assertFalse(self.agent.usage_ready)
+
+    async def test_compact_command(self):
+        thread, _ = self.setup_turn([])
+        await self.agent.execute(
+            app.parse_message(event(text="/compact"), self.settings)
+        )
+        self.codex.thread_start.assert_not_awaited()
+        self.assertIn("暂无", self.bot.send.call_args.kwargs["text"])
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO sessions VALUES ('private-1', 'test-thread', 'folder', 0)"
+            )
+
+        async def compact():
+            self.agent.observe_codex(self.compact_event("turn/started"))
+            self.store_usage(20000)
+            self.agent.observe_codex(self.compact_event("turn/completed"))
+
+        thread.compact = AsyncMock(side_effect=compact)
+        self.agent.receive(event(text="/compact", identifier=2))
+        self.agent.receive(event(text="/compact", identifier=3))
+        await asyncio.gather(*self.agent.controls)
+        self.assertEqual(self.agent.queue.qsize(), 1)
+        await self.agent.execute(self.agent.queue.get_nowait())
+        thread.compact.assert_awaited_once()
+        thread.turn.assert_not_awaited()
+        self.assertEqual(self.bot.send.call_args.kwargs["text"], "上下文压缩完成。")
+        self.agent.jobs["private-1"] = object()
+        await self.agent.control(
+            app.parse_message(event(text="/compact"), self.settings)
+        )
+        self.assertIn("结束后", self.bot.send.call_args.kwargs["text"])
+        self.agent.jobs.clear()
+        self.assertEqual(await self.agent.context_tokens("test-thread"), 20000)
+        self.agent.db.close()
+        self.agent = app.Agent(self.settings, self.bot, self.codex)
+        self.assertEqual(await self.agent.context_tokens("test-thread"), 20000)
+
+    async def test_codex_observer(self):
+        from openai_codex._message_router import MessageRouter
+        from openai_codex.generated.v2_all import TurnStartedNotification
+        from openai_codex.models import Notification
+
+        router = MessageRouter()
+        self.codex._client._sync = NS(_router=router)
+        route = router.route_notification
+        events = [
+            Notification(
+                "turn/started",
+                TurnStartedNotification(
+                    thread_id="test-thread",
+                    turn=Turn(id="compact1", items=[], status=TurnStatus.in_progress),
+                ),
+            ),
+            Notification(
+                "turn/completed",
+                TurnCompletedNotification(
+                    thread_id="test-thread",
+                    turn=Turn(id="compact1", items=[], status=TurnStatus.completed),
+                ),
+            ),
+        ]
+        thread = NS(id="test-thread")
+
+        async def compact():
+            for item in events:
+                await asyncio.to_thread(router.route_notification, item)
+
+        thread.compact = compact
+        with self.agent.watch_codex():
+            self.assertTrue(await asyncio.wait_for(self.agent.compact(thread), 2))
+            subscription = router.subscribe_turn("turn1")
+            normal = turn_done()
+            await asyncio.to_thread(router.route_notification, normal)
+            self.assertIs(subscription.next(), normal)
+            subscription.close()
+        self.assertEqual(router.route_notification, route)
 
     async def test_workspace_persistence(self):
         self.setup_turn([turn_done()])
