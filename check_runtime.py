@@ -8,8 +8,10 @@ from pathlib import Path
 
 from codex_cli_bin import bundled_codex_path
 from openai_codex import AsyncCodex
-from qq_codex_agent import Settings, codex_config
+from openai_codex.generated.v2_all import ThreadUnsubscribeResponse
+
 from check_sandbox import check_app_server_sandbox
+from qq_codex_agent import Settings, codex_config
 
 
 def check_permissions(root, settings):
@@ -93,6 +95,13 @@ async def main(sandbox=False):
         async with AsyncCodex(config=codex_config(settings)) as codex:
             account = await codex.account()
             assert account.account is None
+            thread = await codex.thread_start(cwd=str(settings.workspace_dir))
+            result = await codex._client.request(
+                "thread/unsubscribe",
+                {"threadId": thread.id},
+                response_model=ThreadUnsubscribeResponse,
+            )
+            assert result.status.value == "unsubscribed"
             print("Pinned runtime initialized; isolated account is logged out.")
         if sandbox:
             check_permissions(root, settings)

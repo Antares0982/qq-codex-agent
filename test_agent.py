@@ -1,14 +1,13 @@
 import asyncio
 import base64
-import json
 import io
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, MagicMock, patch
-from PIL import Image
 
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
@@ -18,8 +17,10 @@ from openai_codex.generated.v2_all import (
     ThreadItem,
     Turn,
     TurnCompletedNotification,
+    TurnError,
     TurnStatus,
 )
+from PIL import Image
 
 import qq_codex_agent as app
 
@@ -86,6 +87,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             reply_content=AsyncMock(return_value=([], [])),
         )
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
+        self.codex._client = NS(
+            request=AsyncMock(return_value={"status": "unsubscribed"})
+        )
+        self.history = patch.object(app.AsyncThread, "read", new_callable=AsyncMock)
+        self.read_history = self.history.start()
+        self.read_history.return_value = NS(thread=NS(turns=[]))
+        self.addCleanup(self.history.stop)
         self.agent = app.Agent(self.settings, self.bot, self.codex)
 
     async def asyncTearDown(self):
@@ -1112,7 +1120,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             "webSearch",
         )
         progress = [
-            NS(method="item/started", payload=NS(item=NS(root=NS(type=kind))))
+            NS(method="item/started", payload=NS(item=NS(root=NS(type=kind, id=kind))))
             for kind in kinds
             for _ in range(3)
         ]
@@ -1287,6 +1295,109 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         await self.agent.execute(app.parse_message(event(), self.settings))
         self.assertIn("设备码", self.bot.send.call_args.kwargs["text"])
         self.bot.image.assert_not_called()
+
+    async def test_history_rotation(self):
+        thread, _ = self.setup_turn([turn_done()])
+        folder = self.settings.workspace_dir / "history"
+        folder.mkdir()
+        original = folder / "original.png"
+        original.write_bytes(PNG)
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO sessions VALUES ('private-1', 'old', 'history')"
+            )
+        items = [
+            {
+                "type": "userMessage",
+                "id": "u",
+                "content": [
+                    {"type": "text", "text": "保留这个画风"},
+                    {"type": "localImage", "path": str(original)},
+                ],
+            },
+            {"type": "imageView", "id": "v", "path": str(original)},
+            {
+                "type": "imageGeneration",
+                "id": "g",
+                "status": "completed",
+                "result": "YWJj",
+            },
+            {
+                "type": "agentMessage",
+                "id": "a",
+                "text": "已保存",
+                "phase": "final_answer",
+            },
+        ]
+        self.read_history.return_value.thread.turns = [
+            NS(items=[ThreadItem.model_validate(i) for i in items])
+        ]
+        size, text = app.history_context(self.read_history.return_value.thread, folder)
+        self.assertEqual(size, 2 * ((len(PNG) + 2) // 3 * 4) + 4)
+        self.assertIn("original.png", text)
+        self.assertNotIn("YWJj", text)
+        with patch.object(app, "HISTORY_IMAGE_LIMIT", 1):
+            await self.agent.execute(
+                app.parse_message(event(text="继续"), self.settings)
+            )
+        self.codex.thread_resume.assert_not_awaited()
+        self.codex.thread_start.assert_awaited_once()
+        inputs = thread.turn.call_args.args[0]
+        self.assertIn("保留这个画风", inputs[0].text)
+        self.assertIn("original.png", inputs[0].text)
+        self.assertIn("继续", inputs[1].text)
+        self.assertEqual(original.read_bytes(), PNG)
+        released = [
+            c.args[1]["threadId"] for c in self.codex._client.request.call_args_list
+        ]
+        self.assertEqual(released, ["old", "test-thread"])
+
+    async def test_steering_deadline(self):
+        message = app.parse_message(event(), self.settings)
+        context = app.ImageTurn(message, self.settings.workspace_dir)
+        finished = asyncio.Event()
+        self.agent.pending[message.key] = app.deque([message])
+        self.agent.wake[message.key] = asyncio.Event()
+        turn = NS(steer=AsyncMock(side_effect=lambda inputs: finished.set()))
+        async with asyncio.timeout(0.01) as deadline:
+            before = deadline.when()
+            await self.agent.steer_messages(turn, context, finished, [], deadline)
+            self.assertGreater(deadline.when(), before + 800)
+            await asyncio.sleep(0.02)
+        turn.steer.assert_awaited_once()
+
+        finished.clear()
+        self.agent.pending[message.key].append(message)
+        turn.steer.side_effect = app.JsonRpcError(-32600, "no active turn")
+        async with asyncio.timeout(1) as deadline:
+            before = deadline.when()
+            await self.agent.steer_messages(turn, context, finished, [], deadline)
+            self.assertEqual(deadline.when(), before)
+
+    async def test_error_logging(self):
+        failed = turn_done(TurnStatus.failed)
+        failed.payload.turn.error = TurnError(
+            message="HTTP 400 Bad Request", codex_error_info=None
+        )
+        self.setup_turn([failed])
+        with self.assertLogs(app.LOG, level="INFO") as logs:
+            self.agent.receive(event(text="测试消息"))
+            await self.agent.execute(self.agent.queue.get_nowait())
+        output = "\n".join(logs.output)
+        self.assertIn("测试消息", output)
+        self.assertIn("HTTP 400 Bad Request", output)
+        self.assertIn("thread=test-thread", output)
+        self.codex._client.request.assert_awaited_once()
+
+    def test_log_redaction(self):
+        output = app.log_text(
+            'Bearer secret access_token=abc api_key="xyz" sk-hidden data:image/png;base64,YWJj\nforged'
+        )
+        for secret in ["secret", "abc", "xyz", "sk-hidden", "YWJj"]:
+            self.assertNotIn(secret, output)
+        self.assertNotIn("\n", output)
+        self.assertIn("TimeoutError", app.log_text(TimeoutError()))
+        self.assertNotIn("hidden", app.log_text("{'password': 'hidden value'}"))
 
     async def test_image_validation(self):
         bot = app.OneBot(self.settings)
@@ -1624,7 +1735,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         _, turn = self.setup_turn([turn_done(TurnStatus.failed)])
         await self.agent.execute(app.parse_message(event(), self.settings))
         turn.interrupt.assert_not_called()
-        self.assertIn("额度", self.bot.send.call_args.kwargs["text"])
+        self.assertIn("服务日志", self.bot.send.call_args.kwargs["text"])
 
 
 if __name__ == "__main__":

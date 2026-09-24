@@ -7,6 +7,7 @@
 - 私聊与各群独立授权，默认拒绝访问；群内支持指定用户或全员使用，须 @ bot。
 - 各私聊、各群独立并发，处理中继续发送的消息通过 steering 追加到当前任务，在工具调用结束等可接收输入的位置处理。
 - 私聊独立会话，同群共享上下文和模型；消息间隔超过两小时自动新建 thread，私聊提示、群聊静默。
+- 图片历史达到 8 MiB 后，下一轮携带近期文字和图片路径换 thread，保留原图及完整旧历史；成功追加消息后重置 15 分钟期限。空闲 thread 取消订阅后由 Codex 延迟回收。
 - 群聊仅在 agent 调用发送工具时发送生成图片，另发送最终文字；记录互动画像时提示“📝正在给{nickname}记进小本本……”，使用群名片，缺失时回退到昵称或 QQ 号；指令保留直接回复。
 - 生成原图自动保存在会话工作区；`qq_image.list_images` 查询路径，使用 Pillow 加工多帧后通过 `qq_image.send_image(path=...)` 发送最终 GIF。图片跨轮保留，`/new` 清理。
 - 支持 `/help`、`/model`、`/status`、`/new`、`/stop`，推理强度固定为 `medium`。
@@ -17,3 +18,5 @@
 两仓库接入、提示词覆盖及部署检查见 [nix/README.md](nix/README.md)。
 
 开发、部署、登录及排障方法见 [AGENTS.md](AGENTS.md)。公共运行时模板见 [AGENTS.runtime.md](AGENTS.runtime.md)，私聊和群聊模板分别见 [AGENTS.private.runtime.md](AGENTS.private.runtime.md) 与 [AGENTS.group.runtime.md](AGENTS.group.runtime.md)。
+
+消息收发、任务进度及真实错误可直接查看 `sudo journalctl -u qq-codex-agent -f -o cat`。日志包含聊天正文，避免公开分享；图片二进制不记录，常见凭据字段脱敏。

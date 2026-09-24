@@ -11,8 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
-from PIL import Image
 from openai_codex.generated.v2_all import ImageGenerationThreadItem
+from PIL import Image
 
 import image_assets
 import image_tool
@@ -35,6 +35,9 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.bot = NS(send=AsyncMock(return_value={"message_id": 123}))
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
+        self.codex._client = NS(
+            request=AsyncMock(return_value={"status": "unsubscribed"})
+        )
         self.agent = app.Agent(self.settings, self.bot, self.codex)
         self.folder = self.settings.workspace_dir / "session"
         self.folder.mkdir()
