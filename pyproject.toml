@@ -4,10 +4,18 @@ version = "0.1.0"
 description = "Personal QQ agent backed by the local Codex runtime"
 requires-python = ">=3.13"
 dependencies = [
-    "openai-codex==0.154.0",
+    "openai-codex==0.157.0",
     "aiohttp>=3.12,<4",
     "pillow>=11,<13",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2"]
+
+[tool.pytest.ini_options]
+testpaths = ["test_agent.py", "test_images.py"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [project.scripts]
 qq-codex-agent = "qq_codex_agent:main"

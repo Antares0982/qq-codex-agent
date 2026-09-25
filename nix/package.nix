@@ -19,6 +19,7 @@ let
         ]
       );
   env = pythonSet.mkVirtualEnv "qq-codex-agent-env" workspace.deps.default;
+  testEnv = pythonSet.mkVirtualEnv "qq-codex-agent-tests" workspace.deps.all;
 in
 pkgs.runCommand "qq-codex-agent" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
   mkdir -p "$out/bin" "$out/share/qq-codex-agent"
@@ -33,5 +34,5 @@ pkgs.runCommand "qq-codex-agent" { nativeBuildInputs = [ pkgs.makeWrapper ]; } '
     test -s "$prompt"
   done
   "$out/bin/qq-codex-agent" --help >/dev/null
-  ${env}/bin/python -m unittest discover -s ${source}
+  ${testEnv}/bin/python -m pytest -v -p no:cacheprovider ${source}
 ''

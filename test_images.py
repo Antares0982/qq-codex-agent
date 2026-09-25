@@ -5,12 +5,11 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from openai_codex.generated.v2_all import ImageGenerationThreadItem
 from PIL import Image
 
@@ -20,10 +19,10 @@ import qq_codex_agent as app
 from test_agent import PNG, event, item_done, turn_done
 
 
-class ImageTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        root = Path(self.temp.name)
+class TestImages:
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path):
+        self.root = root = tmp_path
         self.settings = app.Settings(
             {"1"},
             {"10": {"1"}},
@@ -45,9 +44,10 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         self.context = app.ImageTurn(self.message, self.folder)
         self.agent.image_contexts[self.message.key] = self.context
 
-    def tearDown(self):
-        self.agent.db.close()
-        self.temp.cleanup()
+        try:
+            yield
+        finally:
+            self.agent.db.close()
 
     def save(self, data=PNG, item="frame"):
         path = image_assets.save_image(self.folder, data)
@@ -61,12 +61,10 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_send_keeps_file_and_receipt(self):
         path = self.save()
         result = await self.agent.deliver_image(self.context, {"action": "send_image"})
-        self.assertEqual(result["message_id"], 123)
-        self.assertEqual((self.folder / path).read_bytes(), PNG)
+        assert result["message_id"] == 123
+        assert (self.folder / path).read_bytes() == PNG
         self.bot.send.assert_awaited_once_with(self.message, image=PNG)
-        self.assertEqual(
-            self.agent.list_images(self.context)["images"][0]["path"], path
-        )
+        assert self.agent.list_images(self.context)["images"][0]["path"] == path
 
     async def test_concurrent_send_is_deduplicated(self):
         self.save()
@@ -76,26 +74,26 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
                 for _ in range(2)
             )
         )
-        self.assertTrue(first["ok"] and second["already_sent"])
+        assert first["ok"] and second["already_sent"]
         self.bot.send.assert_awaited_once()
 
     async def test_unknown_delivery_survives_restart(self):
         self.save()
         self.bot.send.side_effect = TimeoutError()
-        with self.assertRaisesRegex(ValueError, "结果未知"):
+        with pytest.raises(ValueError, match="结果未知"):
             await self.agent.deliver_image(self.context, {"action": "send_image"})
         self.agent.db.close()
         self.agent = app.Agent(self.settings, self.bot, self.codex)
         self.context = app.ImageTurn(self.message, self.folder)
         self.agent.image_contexts[self.message.key] = self.context
-        with self.assertRaisesRegex(ValueError, "结果未知"):
+        with pytest.raises(ValueError, match="结果未知"):
             await self.agent.deliver_image(self.context, {"action": "send_image"})
         self.bot.send.assert_awaited_once()
         self.bot.send.side_effect = None
         result = await self.agent.deliver_image(
             self.context, {"action": "send_image", "resend": True}
         )
-        self.assertTrue(result["ok"])
+        assert result["ok"]
 
     async def test_later_turn_can_resend_original(self):
         path = self.save()
@@ -107,15 +105,15 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             self.agent.image_contexts.get(self.message.key),
             {"action": "send_image", "path": path},
         )
-        self.assertTrue(result["ok"])
-        self.assertEqual(self.bot.send.await_count, 2)
+        assert result["ok"]
+        assert self.bot.send.await_count == 2
 
     async def test_stale_turn_cannot_send(self):
         self.save()
         self.agent.image_contexts[self.message.key] = app.ImageTurn(
             self.message, self.folder
         )
-        with self.assertRaisesRegex(ValueError, "本轮已结束"):
+        with pytest.raises(ValueError, match="本轮已结束"):
             await self.agent.deliver_image(self.context, {"action": "send_image"})
         self.bot.send.assert_not_awaited()
 
@@ -125,16 +123,38 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         other.mkdir()
         context = app.ImageTurn(self.message, other)
         self.agent.image_contexts[self.message.key] = context
-        self.assertEqual(self.agent.list_images(context)["images"], [])
+        assert self.agent.list_images(context)["images"] == []
         for request in (
             {"action": "send_image"},
             {"action": "send_image", "path": str(self.folder / path)},
         ):
-            with self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 await self.agent.deliver_image(context, request)
         self.bot.send.assert_not_awaited()
 
     async def test_path_validation(self):
+        valid = self.save()
+        result = await self.agent.deliver_image(
+            self.context, {"action": "send_image", "path": str(self.folder / valid)}
+        )
+        assert result["ok"]
+
+    @pytest.mark.parametrize(
+        "value",
+        (
+            "../state/token",
+            "{state}/token",
+            "link.png",
+            "linked/{filename}",
+            "fake.png",
+            "pipe.png",
+            "artifacts",
+            "missing.png",
+            None,
+            1,
+        ),
+    )
+    async def test_invalid_path(self, value):
         valid = self.save()
         (self.folder / "link.png").symlink_to(self.folder / valid)
         (self.folder / "linked").symlink_to(
@@ -142,42 +162,30 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         )
         (self.folder / "fake.png").write_text("<svg/>")
         os.mkfifo(self.folder / "pipe.png")
-        for value in (
-            "../state/token",
-            str(self.settings.state_dir / "token"),
-            "link.png",
-            "linked/" + Path(valid).name,
-            "fake.png",
-            "pipe.png",
-            "artifacts",
-            "missing.png",
-            None,
-            1,
-        ):
-            with self.subTest(path=value), self.assertRaises(ValueError):
-                await self.agent.deliver_image(
-                    self.context, {"action": "send_image", "path": value}
-                )
+        if isinstance(value, str):
+            value = value.format(
+                state=self.settings.state_dir, filename=Path(valid).name
+            )
+        with pytest.raises(ValueError):
+            await self.agent.deliver_image(
+                self.context, {"action": "send_image", "path": value}
+            )
         self.bot.send.assert_not_awaited()
-        result = await self.agent.deliver_image(
-            self.context, {"action": "send_image", "path": str(self.folder / valid)}
-        )
-        self.assertTrue(result["ok"])
 
     def test_artifact_directory_symlink_is_rejected(self):
         (self.folder / "artifacts").symlink_to(
             self.settings.state_dir, target_is_directory=True
         )
-        with self.assertRaises(OSError):
+        with pytest.raises(OSError):
             image_assets.save_image(self.folder, PNG)
-        self.assertEqual(list(self.settings.state_dir.glob("*.png")), [])
+        assert list(self.settings.state_dir.glob("*.png")) == []
 
     def test_truncated_and_oversize_images_are_rejected(self):
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             image_assets.save_image(self.folder, PNG[:15])
         path = self.save()
         with patch.object(image_assets, "OUTPUT_LIMIT", len(PNG) - 1):
-            with self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 image_assets.read_image(self.folder, path)
 
     async def test_frames_are_usable_for_real_gif_processing(self):
@@ -186,9 +194,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         Image.new("RGB", (2, 2), "blue").save(stream, format="PNG")
         second = self.save(stream.getvalue(), item="second")
         images = self.agent.list_images(self.context)["images"]
-        self.assertEqual(
-            [image["generation_id"] for image in images], ["first", "second"]
-        )
+        assert [image["generation_id"] for image in images] == ["first", "second"]
         subprocess.run(
             [
                 sys.executable,
@@ -205,11 +211,11 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         result = await self.agent.deliver_image(
             self.context, {"action": "send_image", "path": "animation.gif"}
         )
-        self.assertTrue(result["ok"])
+        assert result["ok"]
         data = self.bot.send.call_args.kwargs["image"]
-        self.assertEqual(data, (self.folder / "animation.gif").read_bytes())
+        assert data == (self.folder / "animation.gif").read_bytes()
         with Image.open(io.BytesIO(data)) as gif:
-            self.assertEqual(gif.n_frames, 2)
+            assert gif.n_frames == 2
 
     async def test_generation_is_saved_without_shell_or_automatic_delivery(self):
         async def stream():
@@ -225,19 +231,14 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             images = self.agent.list_images(
                 self.agent.image_contexts.get(self.message.key)
             )["images"]
-            self.assertEqual(
-                [image["generation_id"] for image in images], ["frame1", "frame2"]
-            )
+            assert [image["generation_id"] for image in images] == ["frame1", "frame2"]
             for image in images:
-                self.assertEqual(
-                    (
-                        self.agent.image_contexts.get(self.message.key).folder
-                        / image["path"]
-                    ).read_bytes(),
-                    PNG,
-                )
-            self.assertFalse(
-                any("image" in call.kwargs for call in self.bot.send.call_args_list)
+                assert (
+                    self.agent.image_contexts.get(self.message.key).folder
+                    / image["path"]
+                ).read_bytes() == PNG
+            assert not any(
+                ("image" in call.kwargs for call in self.bot.send.call_args_list)
             )
             yield turn_done()
 
@@ -248,12 +249,10 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await self.agent.execute(self.message)
-        self.assertIsNone(self.agent.image_contexts.get(self.message.key))
-        self.assertEqual(
-            self.agent.db.execute("SELECT COUNT(*) FROM generated_images").fetchone()[
-                0
-            ],
-            2,
+        assert self.agent.image_contexts.get(self.message.key) is None
+        assert (
+            self.agent.db.execute("SELECT COUNT(*) FROM generated_images").fetchone()[0]
+            == 2
         )
 
     async def test_new_preserves_images(self):
@@ -265,10 +264,11 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
                 (self.message.key, "thread", self.folder.name),
             )
         await self.agent.control(app.parse_message(event(text="/new"), self.settings))
-        self.assertTrue(self.folder.exists())
+        assert self.folder.exists()
         for table in ("generated_images", "image_deliveries"):
-            self.assertEqual(
-                self.agent.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 1
+            assert (
+                self.agent.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                == 1
             )
 
     async def test_file_cleanup(self):
@@ -292,7 +292,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             file = self.folder / name
             file.write_bytes(PNG)
             os.utime(file, times)
-        outside = Path(self.temp.name) / "outside"
+        outside = self.root / "outside"
         outside.mkdir()
         protected = outside / "protected"
         protected.write_bytes(PNG)
@@ -308,24 +308,22 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     busy.add(self.message.key)
                 self.agent.clean_files()
-                self.assertTrue((self.folder / path).exists())
+                assert (self.folder / path).exists()
                 busy.clear()
             self.agent.clean_files()
-        self.assertFalse((self.folder / path).exists())
+        assert not (self.folder / path).exists()
         for name in ("accessed", "modified", "boundary", "link", "file-link", "pipe"):
-            self.assertTrue((self.folder / name).exists())
-        self.assertTrue(protected.exists())
-        self.assertTrue(self.folder.exists())
-        self.assertEqual(self.agent.list_images(self.context)["images"], [])
-        self.assertEqual(
-            self.agent.db.execute("SELECT COUNT(*) FROM image_deliveries").fetchone()[
-                0
-            ],
-            0,
+            assert (self.folder / name).exists()
+        assert protected.exists()
+        assert self.folder.exists()
+        assert self.agent.list_images(self.context)["images"] == []
+        assert (
+            self.agent.db.execute("SELECT COUNT(*) FROM image_deliveries").fetchone()[0]
+            == 0
         )
-        self.assertEqual(
-            self.agent.db.execute("SELECT folder FROM sessions").fetchone()[0],
-            self.folder.name,
+        assert (
+            self.agent.db.execute("SELECT folder FROM sessions").fetchone()[0]
+            == self.folder.name
         )
 
     async def test_cleanup_schedule(self):
@@ -334,10 +332,10 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             patch.object(app.asyncio, "sleep", new_callable=AsyncMock) as sleep,
         ):
             sleep.side_effect = [None, asyncio.CancelledError]
-            with self.assertRaises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
                 await self.agent.cleanup_files()
-            self.assertEqual(clean.call_count, 2)
-            self.assertEqual(sleep.await_count, 2)
+            assert clean.call_count == 2
+            assert sleep.await_count == 2
             sleep.assert_awaited_with(24 * 60 * 60)
 
     async def test_rpc_binds_context_before_reading_request(self):
@@ -357,7 +355,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         )
         output = []
         await self.agent.send_image(NS(readline=readline), writer)
-        self.assertIn("error", output[0])
+        assert "error" in output[0]
         self.bot.send.assert_not_awaited()
 
     async def test_rpc_rejects_other_session_and_returns_current_paths(self):
@@ -379,9 +377,9 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             )
             await self.agent.send_image(reader, writer)
             if session == "other":
-                self.assertIn("error", output[0])
+                assert "error" in output[0]
             else:
-                self.assertEqual(output[0]["images"][0]["path"], path)
+                assert output[0]["images"][0]["path"] == path
 
     async def test_generating_during_send_does_not_remove_new_frame(self):
         first = self.save(item="first")
@@ -392,14 +390,11 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
 
         self.bot.send.side_effect = send
         result = await self.agent.deliver_image(self.context, {"action": "send_image"})
-        self.assertEqual(result["path"], first)
-        self.assertEqual(
-            [
-                image["generation_id"]
-                for image in self.agent.list_images(self.context)["images"]
-            ],
-            ["first", "second"],
-        )
+        assert result["path"] == first
+        assert [
+            image["generation_id"]
+            for image in self.agent.list_images(self.context)["images"]
+        ] == ["first", "second"]
 
     async def test_canceled_delivery_remains_unknown(self):
         self.save()
@@ -415,9 +410,9 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         )
         await started.wait()
         task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
             await task
-        with self.assertRaisesRegex(ValueError, "结果未知"):
+        with pytest.raises(ValueError, match="结果未知"):
             await self.agent.deliver_image(self.context, {"action": "send_image"})
 
     async def test_slow_progress_does_not_delay_image_files(self):
@@ -441,13 +436,13 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             yield NS(method="item/started", payload=NS(item=NS(root=image)))
             await asyncio.wait_for(progress.wait(), 1)
             yield item_done(image)
-            self.assertEqual(
+            assert (
                 len(
                     self.agent.list_images(
                         self.agent.image_contexts.get(self.message.key)
                     )["images"]
-                ),
-                1,
+                )
+                == 1
             )
             release.set()
             yield turn_done()
@@ -459,7 +454,7 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await asyncio.wait_for(self.agent.execute(self.message), 2)
-        self.assertTrue(release.is_set())
+        assert release.is_set()
 
     def test_stdio_tools_and_path_arguments(self):
         requests = [
@@ -491,18 +486,14 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         ):
             image_tool.main()
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(
-            {tool["name"] for tool in responses[0]["result"]["tools"]},
-            {"list_images", "send_image"},
+        assert {tool["name"] for tool in responses[0]["result"]["tools"]} == {
+            "list_images",
+            "send_image",
+        }
+        assert call.call_args_list[0].args == (
+            "socket",
+            "session",
+            "send_image",
+            {"path": "animation.gif"},
         )
-        self.assertEqual(
-            call.call_args_list[0].args,
-            ("socket", "session", "send_image", {"path": "animation.gif"}),
-        )
-        self.assertEqual(
-            call.call_args_list[1].args, ("socket", "session", "list_images", {})
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert call.call_args_list[1].args == ("socket", "session", "list_images", {})

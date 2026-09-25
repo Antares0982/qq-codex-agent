@@ -37,7 +37,7 @@
 
 ```sh
 uv sync --frozen
-uv run --frozen python -m unittest -v
+uv run --frozen pytest -v
 uv run --frozen python check_runtime.py
 uv run --frozen python check_runtime.py --sandbox
 ```
