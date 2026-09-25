@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
@@ -15,7 +16,10 @@ from PIL import Image
 
 import image_assets
 import image_tool
-import qq_codex_agent as app
+from qq_agent import cleanup
+from qq_agent.agent import Agent
+from qq_agent.config import Settings
+from qq_agent.messages import ImageTurn, parse_message
 from test_agent import PNG, event, item_done, turn_done
 
 
@@ -23,7 +27,7 @@ class TestImages:
     @pytest.fixture(autouse=True)
     def setup(self, tmp_path):
         self.root = root = tmp_path
-        self.settings = app.Settings(
+        self.settings = Settings(
             {"1"},
             {"10": {"1"}},
             "ws://127.0.0.1:3001",
@@ -37,12 +41,12 @@ class TestImages:
         self.codex._client = NS(
             request=AsyncMock(return_value={"status": "unsubscribed"})
         )
-        self.agent = app.Agent(self.settings, self.bot, self.codex)
+        self.agent = Agent(self.settings, self.bot, self.codex)
         self.folder = self.settings.workspace_dir / "session"
         self.folder.mkdir()
-        self.message = app.parse_message(event(), self.settings)
-        self.context = app.ImageTurn(self.message, self.folder)
-        self.agent.image_contexts[self.message.key] = self.context
+        self.message = parse_message(event(), self.settings)
+        self.context = ImageTurn(self.message, self.folder)
+        self.agent.turns.contexts[self.message.key] = self.context
 
         try:
             yield
@@ -60,17 +64,24 @@ class TestImages:
 
     async def test_default_send_keeps_file_and_receipt(self):
         path = self.save()
-        result = await self.agent.deliver_image(self.context, {"action": "send_image"})
+        result = await self.agent.turns.images.deliver_image(
+            self.context, {"action": "send_image"}
+        )
         assert result["message_id"] == 123
         assert (self.folder / path).read_bytes() == PNG
         self.bot.send.assert_awaited_once_with(self.message, image=PNG)
-        assert self.agent.list_images(self.context)["images"][0]["path"] == path
+        assert (
+            self.agent.turns.images.list_images(self.context)["images"][0]["path"]
+            == path
+        )
 
     async def test_concurrent_send_is_deduplicated(self):
         self.save()
         first, second = await asyncio.gather(
             *(
-                self.agent.deliver_image(self.context, {"action": "send_image"})
+                self.agent.turns.images.deliver_image(
+                    self.context, {"action": "send_image"}
+                )
                 for _ in range(2)
             )
         )
@@ -81,28 +92,34 @@ class TestImages:
         self.save()
         self.bot.send.side_effect = TimeoutError()
         with pytest.raises(ValueError, match="结果未知"):
-            await self.agent.deliver_image(self.context, {"action": "send_image"})
+            await self.agent.turns.images.deliver_image(
+                self.context, {"action": "send_image"}
+            )
         self.agent.db.close()
-        self.agent = app.Agent(self.settings, self.bot, self.codex)
-        self.context = app.ImageTurn(self.message, self.folder)
-        self.agent.image_contexts[self.message.key] = self.context
+        self.agent = Agent(self.settings, self.bot, self.codex)
+        self.context = ImageTurn(self.message, self.folder)
+        self.agent.turns.contexts[self.message.key] = self.context
         with pytest.raises(ValueError, match="结果未知"):
-            await self.agent.deliver_image(self.context, {"action": "send_image"})
+            await self.agent.turns.images.deliver_image(
+                self.context, {"action": "send_image"}
+            )
         self.bot.send.assert_awaited_once()
         self.bot.send.side_effect = None
-        result = await self.agent.deliver_image(
+        result = await self.agent.turns.images.deliver_image(
             self.context, {"action": "send_image", "resend": True}
         )
         assert result["ok"]
 
     async def test_later_turn_can_resend_original(self):
         path = self.save()
-        await self.agent.deliver_image(self.context, {"action": "send_image"})
-        self.agent.image_contexts[self.message.key] = app.ImageTurn(
+        await self.agent.turns.images.deliver_image(
+            self.context, {"action": "send_image"}
+        )
+        self.agent.turns.contexts[self.message.key] = ImageTurn(
             self.message, self.folder
         )
-        result = await self.agent.deliver_image(
-            self.agent.image_contexts.get(self.message.key),
+        result = await self.agent.turns.images.deliver_image(
+            self.agent.turns.contexts.get(self.message.key),
             {"action": "send_image", "path": path},
         )
         assert result["ok"]
@@ -110,31 +127,33 @@ class TestImages:
 
     async def test_stale_turn_cannot_send(self):
         self.save()
-        self.agent.image_contexts[self.message.key] = app.ImageTurn(
+        self.agent.turns.contexts[self.message.key] = ImageTurn(
             self.message, self.folder
         )
         with pytest.raises(ValueError, match="本轮已结束"):
-            await self.agent.deliver_image(self.context, {"action": "send_image"})
+            await self.agent.turns.images.deliver_image(
+                self.context, {"action": "send_image"}
+            )
         self.bot.send.assert_not_awaited()
 
     async def test_other_session_cannot_list_or_send(self):
         path = self.save()
         other = self.settings.workspace_dir / "other"
         other.mkdir()
-        context = app.ImageTurn(self.message, other)
-        self.agent.image_contexts[self.message.key] = context
-        assert self.agent.list_images(context)["images"] == []
+        context = ImageTurn(self.message, other)
+        self.agent.turns.contexts[self.message.key] = context
+        assert self.agent.turns.images.list_images(context)["images"] == []
         for request in (
             {"action": "send_image"},
             {"action": "send_image", "path": str(self.folder / path)},
         ):
             with pytest.raises(ValueError):
-                await self.agent.deliver_image(context, request)
+                await self.agent.turns.images.deliver_image(context, request)
         self.bot.send.assert_not_awaited()
 
     async def test_path_validation(self):
         valid = self.save()
-        result = await self.agent.deliver_image(
+        result = await self.agent.turns.images.deliver_image(
             self.context, {"action": "send_image", "path": str(self.folder / valid)}
         )
         assert result["ok"]
@@ -167,7 +186,7 @@ class TestImages:
                 state=self.settings.state_dir, filename=Path(valid).name
             )
         with pytest.raises(ValueError):
-            await self.agent.deliver_image(
+            await self.agent.turns.images.deliver_image(
                 self.context, {"action": "send_image", "path": value}
             )
         self.bot.send.assert_not_awaited()
@@ -193,7 +212,7 @@ class TestImages:
         stream = io.BytesIO()
         Image.new("RGB", (2, 2), "blue").save(stream, format="PNG")
         second = self.save(stream.getvalue(), item="second")
-        images = self.agent.list_images(self.context)["images"]
+        images = self.agent.turns.images.list_images(self.context)["images"]
         assert [image["generation_id"] for image in images] == ["first", "second"]
         subprocess.run(
             [
@@ -208,7 +227,7 @@ class TestImages:
             timeout=10,
         )
         self.bot.send.assert_not_awaited()
-        result = await self.agent.deliver_image(
+        result = await self.agent.turns.images.deliver_image(
             self.context, {"action": "send_image", "path": "animation.gif"}
         )
         assert result["ok"]
@@ -228,13 +247,13 @@ class TestImages:
                         result=base64.b64encode(PNG).decode(),
                     )
                 )
-            images = self.agent.list_images(
-                self.agent.image_contexts.get(self.message.key)
+            images = self.agent.turns.images.list_images(
+                self.agent.turns.contexts.get(self.message.key)
             )["images"]
             assert [image["generation_id"] for image in images] == ["frame1", "frame2"]
             for image in images:
                 assert (
-                    self.agent.image_contexts.get(self.message.key).folder
+                    self.agent.turns.contexts.get(self.message.key).folder
                     / image["path"]
                 ).read_bytes() == PNG
             assert not any(
@@ -248,8 +267,8 @@ class TestImages:
                 turn=AsyncMock(return_value=NS(stream=stream, interrupt=AsyncMock())),
             )
         )
-        await self.agent.execute(self.message)
-        assert self.agent.image_contexts.get(self.message.key) is None
+        await self.agent.turns.execute(self.message)
+        assert self.agent.turns.contexts.get(self.message.key) is None
         assert (
             self.agent.db.execute("SELECT COUNT(*) FROM generated_images").fetchone()[0]
             == 2
@@ -257,13 +276,17 @@ class TestImages:
 
     async def test_new_preserves_images(self):
         self.save()
-        await self.agent.deliver_image(self.context, {"action": "send_image"})
+        await self.agent.turns.images.deliver_image(
+            self.context, {"action": "send_image"}
+        )
         with self.agent.db:
             self.agent.db.execute(
                 "INSERT INTO sessions (key, thread, folder) VALUES (?, ?, ?)",
                 (self.message.key, "thread", self.folder.name),
             )
-        await self.agent.control(app.parse_message(event(text="/new"), self.settings))
+        await self.agent.commands.control(
+            parse_message(event(text="/new"), self.settings)
+        )
         assert self.folder.exists()
         for table in ("generated_images", "image_deliveries"):
             assert (
@@ -273,16 +296,18 @@ class TestImages:
 
     async def test_file_cleanup(self):
         path = self.save()
-        await self.agent.deliver_image(self.context, {"action": "send_image"})
+        await self.agent.turns.images.deliver_image(
+            self.context, {"action": "send_image"}
+        )
         missing = self.save(item="missing")
         (self.folder / missing).unlink()
-        self.agent.image_contexts.clear()
+        self.agent.turns.contexts.clear()
         with self.agent.db:
             self.agent.db.execute(
                 "INSERT INTO sessions (key, thread, folder) VALUES (?, ?, ?)",
                 (self.message.key, "thread", self.folder.name),
             )
-        cutoff = 2_000_000_000 - app.FILE_RETENTION
+        cutoff = 2_000_000_000 - cleanup.FILE_RETENTION
         for name, times in {
             path: (cutoff - 1, cutoff - 1),
             "accessed": (cutoff + 1, cutoff - 1),
@@ -301,22 +326,22 @@ class TestImages:
         (self.folder / "file-link").symlink_to(protected)
         (self.settings.workspace_dir / "outside-link").symlink_to(outside)
         os.mkfifo(self.folder / "pipe")
-        with patch.object(app.time, "time", return_value=2_000_000_000):
+        with patch.object(time, "time", return_value=2_000_000_000):
             for busy in (self.agent.jobs, self.agent.resetting):
                 if isinstance(busy, dict):
                     busy[self.message.key] = object()
                 else:
                     busy.add(self.message.key)
-                self.agent.clean_files()
+                self.agent.cleanup.clean_files()
                 assert (self.folder / path).exists()
                 busy.clear()
-            self.agent.clean_files()
+            self.agent.cleanup.clean_files()
         assert not (self.folder / path).exists()
         for name in ("accessed", "modified", "boundary", "link", "file-link", "pipe"):
             assert (self.folder / name).exists()
         assert protected.exists()
         assert self.folder.exists()
-        assert self.agent.list_images(self.context)["images"] == []
+        assert self.agent.turns.images.list_images(self.context)["images"] == []
         assert (
             self.agent.db.execute("SELECT COUNT(*) FROM image_deliveries").fetchone()[0]
             == 0
@@ -328,12 +353,12 @@ class TestImages:
 
     async def test_cleanup_schedule(self):
         with (
-            patch.object(self.agent, "clean_files") as clean,
-            patch.object(app.asyncio, "sleep", new_callable=AsyncMock) as sleep,
+            patch.object(self.agent.cleanup, "clean_files") as clean,
+            patch.object(asyncio, "sleep", new_callable=AsyncMock) as sleep,
         ):
             sleep.side_effect = [None, asyncio.CancelledError]
             with pytest.raises(asyncio.CancelledError):
-                await self.agent.cleanup_files()
+                await self.agent.cleanup.cleanup_files()
             assert clean.call_count == 2
             assert sleep.await_count == 2
             sleep.assert_awaited_with(24 * 60 * 60)
@@ -342,7 +367,7 @@ class TestImages:
         self.save()
 
         async def readline():
-            self.agent.image_contexts[self.message.key] = app.ImageTurn(
+            self.agent.turns.contexts[self.message.key] = ImageTurn(
                 self.message, self.folder
             )
             return b'{"action":"send_image"}\n'
@@ -354,7 +379,7 @@ class TestImages:
             wait_closed=AsyncMock(),
         )
         output = []
-        await self.agent.send_image(NS(readline=readline), writer)
+        await self.agent.tools.send_image(NS(readline=readline), writer)
         assert "error" in output[0]
         self.bot.send.assert_not_awaited()
 
@@ -375,7 +400,7 @@ class TestImages:
                     ).encode()
                 )
             )
-            await self.agent.send_image(reader, writer)
+            await self.agent.tools.send_image(reader, writer)
             if session == "other":
                 assert "error" in output[0]
             else:
@@ -389,11 +414,13 @@ class TestImages:
             await asyncio.sleep(0)
 
         self.bot.send.side_effect = send
-        result = await self.agent.deliver_image(self.context, {"action": "send_image"})
+        result = await self.agent.turns.images.deliver_image(
+            self.context, {"action": "send_image"}
+        )
         assert result["path"] == first
         assert [
             image["generation_id"]
-            for image in self.agent.list_images(self.context)["images"]
+            for image in self.agent.turns.images.list_images(self.context)["images"]
         ] == ["first", "second"]
 
     async def test_canceled_delivery_remains_unknown(self):
@@ -406,14 +433,18 @@ class TestImages:
 
         self.bot.send.side_effect = send
         task = asyncio.create_task(
-            self.agent.deliver_image(self.context, {"action": "send_image"})
+            self.agent.turns.images.deliver_image(
+                self.context, {"action": "send_image"}
+            )
         )
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         with pytest.raises(ValueError, match="结果未知"):
-            await self.agent.deliver_image(self.context, {"action": "send_image"})
+            await self.agent.turns.images.deliver_image(
+                self.context, {"action": "send_image"}
+            )
 
     async def test_slow_progress_does_not_delay_image_files(self):
         progress = asyncio.Event()
@@ -438,8 +469,8 @@ class TestImages:
             yield item_done(image)
             assert (
                 len(
-                    self.agent.list_images(
-                        self.agent.image_contexts.get(self.message.key)
+                    self.agent.turns.images.list_images(
+                        self.agent.turns.contexts.get(self.message.key)
                     )["images"]
                 )
                 == 1
@@ -453,7 +484,7 @@ class TestImages:
                 turn=AsyncMock(return_value=NS(stream=stream, interrupt=AsyncMock())),
             )
         )
-        await asyncio.wait_for(self.agent.execute(self.message), 2)
+        await asyncio.wait_for(self.agent.turns.execute(self.message), 2)
         assert release.is_set()
 
     def test_stdio_tools_and_path_arguments(self):

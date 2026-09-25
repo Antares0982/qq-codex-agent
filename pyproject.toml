@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["qq_codex_agent", "image_tool", "image_assets"]
-packages = ["pics"]
+packages = ["pics", "qq_agent"]
 
 [tool.setuptools.package-data]
 pics = ["*.png"]

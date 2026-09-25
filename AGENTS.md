@@ -4,6 +4,23 @@
 修改前阅读相关代码；优先小范围修改，运行测试后再提交。不提交凭据、真实白名单、认证缓存或聊天数据。
 只在匹配架构的主机上构建 NixOS 系统。
 
+## 代码结构
+
+`qq_codex_agent.py` 保留命令行入口及自检脚本使用的配置导入，业务实现在 `qq_agent/`：
+
+| 模块 | 职责 |
+| --- | --- |
+| `config`、`messages` | 配置校验；消息类型、解析及授权过滤 |
+| `onebot`、`inputs`、`replies` | NapCat 通信；模型输入组装；回复、表情及群提醒 |
+| `agent`、`commands` | 聊天调度、队列与取消；slash command |
+| `runtime`、`turns` | thread 配置、恢复、压缩及订阅；单轮执行与 steering |
+| `profiles`、`images`、`tool_server` | 成员画像；生成图片及交付；本地工具请求分发 |
+| `storage`、`cleanup`、`logging`、`cli` | 数据库初始化；文件清理；日志脱敏；进程启动退出 |
+
+组件显式组合，共用一个 SQLite 连接；调度状态由 `Agent` 管理，活动工具上下文由 `Turns` 管理。
+业务 SQL、常量及提示词放在各自功能模块。测试直接导入所属模块，并在实际使用位置 mock。
+`image_assets.py` 和 `image_tool.py` 分别保留图片文件安全操作与 MCP stdio 入口；提醒图片通过 `pics` 包资源加载。
+
 ## 行为
 
 - 私聊和各群独立授权，缺失或空名单不放行；所有名单为空时任何人均不能使用。
