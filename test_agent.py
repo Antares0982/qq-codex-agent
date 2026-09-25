@@ -932,7 +932,8 @@ class TestAgent:
             {"text": "任务完成。"}
         ]
 
-    async def test_group_silence(self):
+    @pytest.mark.parametrize("group", (10, None))
+    async def test_all_texts(self, group):
         image = ImageGenerationThreadItem(
             id="image1",
             type="imageGeneration",
@@ -957,33 +958,43 @@ class TestAgent:
             phase=MessagePhase.final_answer,
             text="last",
         )
-        progress = NS(method="item/started", payload=NS(item=ThreadItem(root=image)))
-        self.setup_turn(
-            [
-                progress,
-                *(item_done(i) for i in (commentary, image, first, last)),
-                turn_done(),
-            ]
+        unphased = AgentMessageThreadItem(
+            id="text4", type="agentMessage", phase=None, text="unphased"
         )
-        self.agent.receive(event(group=10))
+        empty = AgentMessageThreadItem(
+            id="text5", type="agentMessage", phase=None, text=""
+        )
+        progress = NS(method="item/started", payload=NS(item=ThreadItem(root=image)))
+        _, turn = self.setup_turn([])
+
+        async def stream():
+            yield progress
+            for item in (commentary, image, first, first, last, unphased, empty):
+                yield item_done(item)
+                if item.type == "agentMessage" and item.text:
+                    assert self.bot.send.call_args.kwargs == {"text": item.text}
+            yield turn_done()
+
+        turn.stream = stream
+        self.agent.receive(event(group=group))
         message = self.agent.queue.get_nowait()
         self.agent.mark(message, "running")
         await self.agent.turns.execute(message)
-        assert [call.kwargs for call in self.bot.send.call_args_list] == [
-            {"text": "last"}
-        ]
+        texts = [call.kwargs["text"] for call in self.bot.send.call_args_list]
+        expected = ["thinking", "first", "last", "unphased"]
+        if group is None:
+            assert texts[0] == "开始处理……"
+            assert texts.count("正在生成图片……") == 1
+            texts = [
+                text for text in texts if text not in ("开始处理……", "正在生成图片……")
+            ]
+        assert texts == expected
         assert (
             self.agent.db.execute(
                 "SELECT status FROM messages WHERE id=?", (message.identifier,)
             ).fetchone()[0]
             == "completed"
         )
-        self.bot.send.reset_mock()
-        await self.agent.turns.execute(parse_message(event(), self.settings))
-        texts = [
-            c.kwargs["text"] for c in self.bot.send.call_args_list if "text" in c.kwargs
-        ]
-        assert texts == ["开始处理……", "正在生成图片……", "last"]
 
     @pytest.mark.parametrize(
         "group, end, count",

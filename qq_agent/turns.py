@@ -5,7 +5,7 @@ import uuid
 
 from openai_codex import ApprovalMode, TextInput
 from openai_codex.errors import JsonRpcError
-from openai_codex.generated.v2_all import MessagePhase, ReasoningEffort, TurnStatus
+from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
 
 from .images import Images
 from .logging import LOG, log_text
@@ -174,7 +174,7 @@ class Turns:
                             turn, context, finished, submitted, deadline
                         )
                     )
-                delivered, final, status = set(), None, None
+                delivered, has_text, status = set(), False, None
                 shown_progress = set()
                 async for event in turn.stream():
                     if event.method == "error":
@@ -236,11 +236,9 @@ class Turns:
                                 item.phase,
                                 log_text(item.text),
                             )
-                        if item.type == "agentMessage" and item.phase in (
-                            None,
-                            MessagePhase.final_answer,
-                        ):
-                            final = item.text
+                            if item.text:
+                                has_text = True
+                                await self.replies.safe_send(message, item.text)
                         elif (
                             item.type == "imageGeneration"
                             and item.status == "completed"
@@ -268,7 +266,8 @@ class Turns:
                     await asyncio.gather(reminder, return_exceptions=True)
                 if status == TurnStatus.completed:
                     await asyncio.gather(*notices)
-                    await self.replies.safe_send(message, final or "任务完成。")
+                    if not has_text:
+                        await self.replies.safe_send(message, "任务完成。")
                     self.mark(message, "completed")
                 else:
                     await self.replies.safe_send(
