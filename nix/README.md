@@ -27,10 +27,12 @@
 的 provider 配置，以及 Nix daemon 和完整 store 的额外访问授权。
 通用模块仅挂载应用和运行工具的 Nix closure；closure 挂载清单在构建时生成，
 通过 `systemd.packages` 安装到两个 unit 的 drop-in，不在求值时构建其他架构的包。
-`codex/tmp/arg0` 供 runtime 创建和读取辅助入口。managed deny-read 通过逐层排除
-该路径保护其余所有状态文件，包括未来新增文件；父目录可列出，但敏感内容不可读。
+`codex/tmp/arg0` 供 runtime 创建和读取辅助入口。`codex/skills` 和
+`codex/plugins/cache` 允许工具读取技能、插件及其资源，不授予写入权限。
+managed deny-read 通过逐层排除这些路径保护其余所有状态文件，包括未来新增文件；
+父目录可列出，但敏感内容不可读。
 服务禁用 shell snapshot，避免从受保护状态目录挂载 shell 环境快照。
-启动自检同时验证 thread 创建和状态、Codex home、tmp 三层相邻文件的读取隔离。
+启动自检验证 thread 创建、技能和插件资源只读，以及各层相邻状态文件的读取隔离。
 
 ## 提示词
 

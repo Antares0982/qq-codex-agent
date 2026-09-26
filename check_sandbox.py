@@ -11,7 +11,7 @@ from openai_codex.generated.v2_all import CommandExecResponse
 from qq_codex_agent import Settings, codex_config
 
 
-def check_app_server_sandbox(settings, directory, denied_paths):
+def check_app_server_sandbox(settings, directory, denied_paths, readable_paths=()):
     with CodexClient(config=codex_config(settings)) as client:
         client.initialize()
         result = client.request(
@@ -20,9 +20,13 @@ def check_app_server_sandbox(settings, directory, denied_paths):
                 "command": [
                     "/bin/sh",
                     "-ec",
+                    'count=$1; shift; while [ "$count" -gt 0 ]; do '
+                    'test -r "$1"; test ! -w "$1"; shift; count=$((count - 1)); done; '
                     'for path do test ! -r "$path"; done; '
                     'printf ok > app-server-probe; test "$(cat app-server-probe)" = ok',
                     "sandbox-check",
+                    str(len(readable_paths)),
+                    *map(str, readable_paths),
                     *map(str, denied_paths),
                 ],
                 "cwd": str(directory),
@@ -73,11 +77,15 @@ def main():
         raise RuntimeError("Missing managed Codex requirements")
     env = os.environ.copy()
     env["CODEX_HOME"] = str(state / "codex")
+    plugins = state / "codex/plugins"
+    (plugins / "cache").mkdir(parents=True, exist_ok=True)
     with (
         tempfile.TemporaryDirectory(dir=work) as directory,
         tempfile.NamedTemporaryFile(dir=state) as canary,
         tempfile.NamedTemporaryFile(dir=state / "codex") as codex_canary,
         tempfile.NamedTemporaryFile(dir=state / "codex/tmp") as tmp_canary,
+        tempfile.NamedTemporaryFile(dir=plugins) as plugin_canary,
+        tempfile.NamedTemporaryFile(dir=plugins / "cache") as resource,
     ):
         result = subprocess.run(
             [
@@ -118,10 +126,12 @@ def main():
                 canary.name,
                 codex_canary.name,
                 tmp_canary.name,
+                plugin_canary.name,
                 state / "codex/auth.json",
                 settings.token_file,
                 "/etc/qq-codex-agent/allowlist.toml",
             ],
+            [state / "codex/skills/.system/imagegen/SKILL.md", resource.name],
         )
     print("Filesystem and Codex sandbox checks passed")
 

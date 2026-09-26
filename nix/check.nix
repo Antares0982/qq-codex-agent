@@ -71,23 +71,38 @@ pkgs.runCommand "qq-codex-deployment-check" { nativeBuildInputs = [ pkgs.python3
       assert config[key] == f"/etc/qq-codex-agent/{name}"
   requirements = tomllib.loads(Path(sys.argv[2]).read_text())
   patterns = requirements["permissions"]["filesystem"]["deny_read"]
-  parent = Path("/var/lib/qq-codex-agent")
-  for component in ("codex", "tmp", "arg0"):
-      for name in ("auth.json", ".secret", component + "extra") + tuple(
+  root = Path("/var/lib/qq-codex-agent")
+  for parent, allowed in (
+      (root, ("codex",)),
+      (root / "codex", ("tmp", "skills", "plugins")),
+      (root / "codex/tmp", ("arg0",)),
+      (root / "codex/plugins", ("cache",)),
+  ):
+      names = ("auth.json", ".secret", "sessions", "memories", "generated_images", "state_5.sqlite") + tuple(
           component[:i] + suffix
-          for i in range(len(component))
+          for component in allowed
+          for i in range(len(component) + 1)
           for suffix in ("", "X", ".")
-          if component[:i] + suffix not in ("", ".")
-      ):
+      )
+      for name in names:
+          if name in ("", ".", *allowed):
+              continue
           for path in (parent / name, parent / name / "nested/secret"):
               assert any(
                   ancestor.full_match(pattern)
                   for ancestor in (path, *path.parents)
                   for pattern in patterns
               ), path
-      parent /= component
-  for path in (parent, parent / "codex-arg0-test/codex-execve-wrapper"):
-      assert not any(path.full_match(pattern) for pattern in patterns), path
+      for name in allowed:
+          paths = [parent / name]
+          if name in ("skills", "cache", "arg0"):
+              paths.append(parent / name / "nested/resource")
+          for path in paths:
+              assert not any(
+                  ancestor.full_match(pattern)
+                  for ancestor in (path, *path.parents)
+                  for pattern in patterns
+              ), path
   PY
   touch "$out"
 ''
