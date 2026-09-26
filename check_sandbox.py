@@ -21,8 +21,11 @@ def check_app_server_sandbox(settings, directory, denied_paths, readable_paths=(
                     "/bin/sh",
                     "-ec",
                     'count=$1; shift; while [ "$count" -gt 0 ]; do '
-                    'test -r "$1"; test ! -w "$1"; shift; count=$((count - 1)); done; '
-                    'for path do test ! -r "$path"; done; '
+                    'test -r "$1" || { echo "Not readable: $1" >&2; exit 1; }; '
+                    'test ! -w "$1" || { echo "Unexpectedly writable: $1" >&2; exit 1; }; '
+                    "shift; count=$((count - 1)); done; "
+                    'for path do test ! -r "$path" || '
+                    '{ echo "Unexpectedly readable: $path" >&2; exit 1; }; done; '
                     'printf ok > app-server-probe; test "$(cat app-server-probe)" = ok',
                     "sandbox-check",
                     str(len(readable_paths)),

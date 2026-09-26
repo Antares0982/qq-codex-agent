@@ -88,7 +88,20 @@ let
         ) next;
       patterns = exclude "" names;
     in
-    map (pattern: "${parent}/${pattern}") patterns;
+    # Anchor ripgrep matches to parent directories.
+    lib.concatMap (
+      pattern:
+      if lib.hasInfix "*" pattern then
+        let
+          anchored = "${builtins.dirOf parent}/**/${builtins.baseNameOf parent}/${pattern}";
+        in
+        [
+          anchored
+          "${anchored}/**"
+        ]
+      else
+        [ "${parent}/${pattern}" ]
+    ) patterns;
   requirements = (pkgs.formats.toml { }).generate "qq-codex-requirements.toml" {
     allowed_approval_policies = [ "on-request" ];
     allowed_approvals_reviewers = [ "auto_review" ];
