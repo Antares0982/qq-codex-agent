@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Personal QQ agent backed by the local Codex runtime"
 requires-python = ">=3.13"
 dependencies = [
-    "openai-codex==0.157.0",
+    "openai-codex==0.159.2",
     "aiohttp>=3.12,<4",
     "pillow>=11,<13",
 ]
