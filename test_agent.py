@@ -345,13 +345,14 @@ class TestAgent:
         self.save_profile(self.member_context(), {"兴趣": "NixOS"})
         self.save_profile(self.member_context(user=2), {"兴趣": "摄影"})
         self.agent.turns.contexts.clear()
-        self.setup_turn([turn_done()])
+        thread, _ = self.setup_turn([turn_done()])
         message = parse_message(event(group=10, reply="42"), self.settings)
         self.bot.reply_content.return_value = ([("at", "2")], [])
         await self.agent.turns.execute(message)
         options = self.codex.thread_start.call_args.kwargs
-        assert "NixOS" in options["developer_instructions"]
-        assert "摄影" not in options["developer_instructions"]
+        recalled = thread.turn.call_args.args[0][-1].text
+        assert "NixOS" in recalled
+        assert "摄影" not in recalled
         assert MEMBER_INSTRUCTIONS in options["developer_instructions"]
         args = options["config"]["mcp_servers"]["qq_member"]["args"]
         context = self.member_context()
@@ -360,9 +361,10 @@ class TestAgent:
         message.parts.append(("at", "2"))
         await self.agent.turns.execute(message)
         options = self.codex.thread_resume.call_args.kwargs
-        assert "代码" in options["developer_instructions"]
-        assert "摄影" in options["developer_instructions"]
-        assert "NixOS" not in options["developer_instructions"]
+        recalled = thread.turn.call_args.args[0][-1].text
+        assert "代码" in recalled
+        assert "摄影" in recalled
+        assert "NixOS" not in recalled
         assert args[-1] != options["config"]["mcp_servers"]["qq_member"]["args"][-1]
         await self.agent.commands.control(
             parse_message(event(group=10, text="/new"), self.settings)
@@ -375,9 +377,16 @@ class TestAgent:
         instructions = self.codex.thread_start.call_args.kwargs[
             "developer_instructions"
         ]
-        assert "代码" in instructions
-        assert "摄影" in instructions
+        recalled = thread.turn.call_args.args[0][-1].text
+        assert "代码" in recalled
+        assert "摄影" in recalled
         assert MEMBER_INSTRUCTIONS in instructions
+        await self.agent.turns.execute(
+            parse_message(event(user=2, group=10), self.settings)
+        )
+        recalled = thread.turn.call_args.args[0][-1].text
+        assert "摄影" in recalled
+        assert "代码" not in recalled
         await self.agent.turns.execute(parse_message(event(), self.settings))
         assert (
             "qq_member"

@@ -106,6 +106,14 @@ class Turns:
                 self.contexts[message.key] = context
                 if "group_id" in message.target:
                     context.profiles = self.profiles.recall_profiles(message)
+                    if not manual:
+                        inputs.append(
+                            TextInput(
+                                MEMBER_INSTRUCTIONS
+                                + "\n"
+                                + json.dumps(context.profiles, ensure_ascii=False)
+                            )
+                        )
                 thread = await self.runtime.prepare_thread(
                     message, thread_id, context, options
                 )
