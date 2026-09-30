@@ -8,4 +8,4 @@ agents_file = "/etc/qq-codex-agent/AGENTS.md"
 private_agents_file = "/etc/qq-codex-agent/AGENTS.private.md"
 group_agents_file = "/etc/qq-codex-agent/AGENTS.group.md"
 queue_limit = 8
-task_timeout = 900
+task_timeout = 3600

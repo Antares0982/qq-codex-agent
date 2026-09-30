@@ -62,7 +62,7 @@ let
       state_dir = state;
       workspace_dir = work;
       queue_limit = 8;
-      task_timeout = 900;
+      task_timeout = 3600;
     }
     // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
   );

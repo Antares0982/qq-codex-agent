@@ -25,7 +25,7 @@ class Settings:
     private_agents_file: Path | None = None
     group_agents_file: Path | None = None
     queue_limit: int = 8
-    task_timeout: int = 900
+    task_timeout: int = 3600
     model: str | None = None
 
     def check_prompts(self, required=False):
