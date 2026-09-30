@@ -1,16 +1,15 @@
 import asyncio
-import json
 import time
 import uuid
 
-from openai_codex import ApprovalMode, TextInput
+from openai_codex import ApprovalMode
 from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
 
 from .images import Images
 from .logging import LOG, log_text
 from .messages import ImageTurn
-from .profiles import MEMBER_INSTRUCTIONS, Profiles
+from .profiles import Profiles
 
 IDLE_COMPACT_LIMIT = 50000
 
@@ -106,14 +105,6 @@ class Turns:
                 self.contexts[message.key] = context
                 if "group_id" in message.target:
                     context.profiles = self.profiles.recall_profiles(message)
-                    if not manual:
-                        inputs.append(
-                            TextInput(
-                                MEMBER_INSTRUCTIONS
-                                + "\n"
-                                + json.dumps(context.profiles, ensure_ascii=False)
-                            )
-                        )
                 thread = await self.runtime.prepare_thread(
                     message, thread_id, context, options
                 )
@@ -391,14 +382,6 @@ class Turns:
             if "group_id" in message.target:
                 if message.sender_id != context.message.sender_id:
                     context.profile_writable = False
-                profiles = self.profiles.recall_profiles(message)
-                inputs.append(
-                    TextInput(
-                        MEMBER_INSTRUCTIONS
-                        + "\n"
-                        + json.dumps(profiles, ensure_ascii=False)
-                    )
-                )
             pending.popleft()
             submitted.append(message)
             self.mark(message, "running")

@@ -299,7 +299,7 @@ class TestAgent:
             == "old-thread"
         )
 
-    def test_member_budget(self):
+    def test_group_profiles(self):
         for user in range(1, 7):
             with self.agent.db:
                 self.agent.db.execute(
@@ -313,12 +313,11 @@ class TestAgent:
                     ),
                 )
         message = parse_message(event(group=10), self.settings)
-        message.parts += [
-            ("at", user) for user in ("2", "2", "3", "4", "5", "6", "all", "99")
-        ]
         profiles = self.agent.turns.profiles.recall_profiles(message)
-        assert [profile["user_id"] for profile in profiles] == ["1", "2", "3"]
-        assert len(json.dumps(profiles, ensure_ascii=False)) <= 2000
+        assert [profile["user_id"] for profile in profiles] == [
+            str(user) for user in range(1, 7)
+        ]
+        assert len(json.dumps(profiles, ensure_ascii=False)) > 2000
 
     async def test_member_forget(self):
         context = self.member_context()
@@ -341,30 +340,50 @@ class TestAgent:
         )
         assert "用法" in self.bot.send.call_args.kwargs["text"]
 
+    def test_profile_refresh(self):
+        context = self.member_context()
+        self.save_profile(context, {"兴趣": "NixOS"})
+        other = self.member_context(user=2)
+        self.save_profile(other, {"兴趣": "摄影"})
+        self.agent.turns.contexts[context.message.key] = context
+        request = {"action": "list_profiles", "token": context.token}
+        result = self.agent.turns.profiles.member_request(context, request)
+        assert [member["user_id"] for member in result["profiles"]] == ["1", "2"]
+        with self.agent.db:
+            self.agent.db.execute(
+                "DELETE FROM member_profiles WHERE group_id=? AND user_id=?",
+                ("10", "2"),
+            )
+        result = self.agent.turns.profiles.member_request(context, request)
+        assert [member["user_id"] for member in result["profiles"]] == ["1"]
+
     async def test_member_recall(self):
         self.save_profile(self.member_context(), {"兴趣": "NixOS"})
         self.save_profile(self.member_context(user=2), {"兴趣": "摄影"})
+        self.save_profile(self.member_context(group=11), {"兴趣": "音乐"})
         self.agent.turns.contexts.clear()
         thread, _ = self.setup_turn([turn_done()])
-        message = parse_message(event(group=10, reply="42"), self.settings)
-        self.bot.reply_content.return_value = ([("at", "2")], [])
+        message = parse_message(event(group=10), self.settings)
+        message.sender_id = "3"
         await self.agent.turns.execute(message)
         options = self.codex.thread_start.call_args.kwargs
-        recalled = thread.turn.call_args.args[0][-1].text
+        recalled = options["developer_instructions"]
         assert "NixOS" in recalled
-        assert "摄影" not in recalled
+        assert "摄影" in recalled
+        assert "音乐" not in recalled
+        assert len(thread.turn.call_args.args[0]) == 1
         assert MEMBER_INSTRUCTIONS in options["developer_instructions"]
         args = options["config"]["mcp_servers"]["qq_member"]["args"]
         context = self.member_context()
         self.save_profile(context, {"兴趣": "代码"})
         self.agent.turns.contexts.clear()
-        message.parts.append(("at", "2"))
         await self.agent.turns.execute(message)
         options = self.codex.thread_resume.call_args.kwargs
-        recalled = thread.turn.call_args.args[0][-1].text
+        recalled = options["developer_instructions"]
         assert "代码" in recalled
         assert "摄影" in recalled
         assert "NixOS" not in recalled
+        assert len(thread.turn.call_args.args[0]) == 1
         assert args[-1] != options["config"]["mcp_servers"]["qq_member"]["args"][-1]
         await self.agent.commands.control(
             parse_message(event(group=10, text="/new"), self.settings)
@@ -377,16 +396,15 @@ class TestAgent:
         instructions = self.codex.thread_start.call_args.kwargs[
             "developer_instructions"
         ]
-        recalled = thread.turn.call_args.args[0][-1].text
-        assert "代码" in recalled
-        assert "摄影" in recalled
+        assert "代码" in instructions
+        assert "摄影" in instructions
+        assert "音乐" not in instructions
         assert MEMBER_INSTRUCTIONS in instructions
+        assert len(thread.turn.call_args.args[0]) == 1
         await self.agent.turns.execute(
             parse_message(event(user=2, group=10), self.settings)
         )
-        recalled = thread.turn.call_args.args[0][-1].text
-        assert "摄影" in recalled
-        assert "代码" not in recalled
+        assert len(thread.turn.call_args.args[0]) == 1
         await self.agent.turns.execute(parse_message(event(), self.settings))
         assert (
             "qq_member"
@@ -1776,6 +1794,10 @@ class TestAgent:
                 "QQ 用户 1（ID: 1）:\nfirst",
                 "QQ 用户 2（ID: 2）:\nsecond",
             ]
+            assert all(
+                len(call.args[0]) == 1
+                for call in turns["group-10"].steer.call_args_list
+            )
             assert len(turns["private-1"].steer.call_args.args[0]) == 2
             assert not self.agent.turns.contexts["group-10"].profile_writable
             assert len(self.agent.jobs) == 2

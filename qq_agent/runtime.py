@@ -219,7 +219,12 @@ class Runtime:
     async def prepare_thread(self, message, thread_id, context, options):
         folder = context.folder
         if "group_id" in message.target:
-            options["developer_instructions"] += "\n" + MEMBER_INSTRUCTIONS
+            options["developer_instructions"] += (
+                "\n"
+                + MEMBER_INSTRUCTIONS
+                + "\n"
+                + json.dumps(context.profiles, ensure_ascii=False)
+            )
             options["config"]["mcp_servers"]["qq_member"] = {
                 "command": sys.executable,
                 "args": [
