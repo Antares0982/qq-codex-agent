@@ -362,6 +362,7 @@ class TestAgent:
         assert "摄影" in options["developer_instructions"]
         assert "NixOS" not in options["developer_instructions"]
         assert args[-1] != options["config"]["mcp_servers"]["qq_member"]["args"][-1]
+        self.store_usage(0)
         message.generation = 1
         await self.agent.turns.execute(message)
         assert (

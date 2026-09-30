@@ -63,6 +63,10 @@ uv run --frozen python check_runtime.py --sandbox
 `--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。
 测试模拟 OneBot、模型事件和图片响应。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
 
+Codex 执行沙箱可能禁止测试所需的本地 Unix socket，导致 `test_member_socket`、`test_image_tool` 报 `PermissionError: [Errno 1] Operation not permitted`；跨线程异步测试也可能停在等待状态。遇到这些症状，应通过执行工具的提权审批在沙箱外重跑 pytest，或在本机终端运行上述命令，不要跳过测试或修改应用沙箱策略。若 uv 默认缓存目录只读，可设置 `UV_CACHE_DIR=/tmp/qq-pytest-uv`。
+
+`conftest.py` 仅对 pytest 临时目录内的 SQLite 数据库设置 `synchronous=OFF`，避免每个测试建表和提交时同步写盘；仍使用文件数据库，覆盖关闭重开和迁移行为，不验证断电持久性。生产数据库保持默认同步策略。定位慢测试可运行 `uv run --frozen pytest -q --durations=15`。
+
 Nix 部署检查及两仓库迁移步骤见 [nix/README.md](nix/README.md)。
 
 ## NixOS 部署
