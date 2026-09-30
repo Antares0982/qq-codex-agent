@@ -7,7 +7,7 @@ MEMBER_FIELDS = ("称呼", "表达风格", "兴趣", "互动偏好", "不确定�
 MEMBER_TOOLS = [
     {
         "name": "list_profiles",
-        "description": "读取当前群本轮召回范围内的互动画像；仅用于改善交流，不主动公开他人画像。",
+        "description": "读取当前发送者及消息中明确 @ 成员的互动画像，不是全群记录。普通文字昵称不触发召回，未返回某人不代表没有记录。仅用于改善交流，不主动公开他人画像。",
         "inputSchema": {
             "type": "object",
             "properties": {},

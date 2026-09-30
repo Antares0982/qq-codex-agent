@@ -364,12 +364,20 @@ class TestAgent:
         assert "摄影" in options["developer_instructions"]
         assert "NixOS" not in options["developer_instructions"]
         assert args[-1] != options["config"]["mcp_servers"]["qq_member"]["args"][-1]
-        self.store_usage(0)
-        message.generation = 1
-        await self.agent.turns.execute(message)
-        assert (
-            "代码" in self.codex.thread_start.call_args.kwargs["developer_instructions"]
+        await self.agent.commands.control(
+            parse_message(event(group=10, text="/new"), self.settings)
         )
+        self.codex.thread_start.reset_mock()
+        self.codex.thread_resume.reset_mock()
+        await self.agent.turns.execute(message)
+        self.codex.thread_start.assert_awaited_once()
+        self.codex.thread_resume.assert_not_awaited()
+        instructions = self.codex.thread_start.call_args.kwargs[
+            "developer_instructions"
+        ]
+        assert "代码" in instructions
+        assert "摄影" in instructions
+        assert MEMBER_INSTRUCTIONS in instructions
         await self.agent.turns.execute(parse_message(event(), self.settings))
         assert (
             "qq_member"
