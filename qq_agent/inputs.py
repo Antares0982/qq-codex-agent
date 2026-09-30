@@ -68,7 +68,9 @@ class Inputs:
         sender = message.sender_name
         if "group_id" in message.target:
             sender += f"（ID: {message.sender_id}）"
-        inputs = [TextInput(f"QQ 用户 {sender}:\n{content}")]
+        inputs: list[TextInput | LocalImageInput] = [
+            TextInput(f"QQ 用户 {sender}:\n{content}")
+        ]
         for image in images:
             data = await self.bot.image(image)
             path = folder / (uuid.uuid4().hex + image_suffix(data))

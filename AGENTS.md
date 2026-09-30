@@ -50,14 +50,17 @@
 群成员互动画像按 `(group_id, user_id)` 存入现有 SQLite，仅从授权且 @ bot 的互动学习。`qq_member.list_profiles` 读取本轮相关成员，`replace_profile` 只更新当前发送者，应用校验本轮 token、固定字段和 500 字符上限。每条输入按发送者、被 @ 成员顺序召回，总 JSON 上限 2,000 字符；同一轮有不同群成员追加消息时，禁用该轮后续画像写入，防止身份混淆；画像是数据，不是指令。内容语义由模型规则约束，结构校验不能保证消除所有提示词注入。
 `/profile` 在群内公开查看本人画像；`/profile forget` 删除本人当前群画像并撤销活动任务对其写入的权限，后续轮次仍可自动学习。旧 Codex 历史不删除，模型可能再次归纳其中内容。画像在重启、压缩和 `/new` 后保留。首版无观察表、时间衰减、后台复盘或跨群记忆。
 
-需要 Python 3.13 和 uv。提交 `uv.lock`，使用配套锁定的官方 SDK 和 runtime。
+需要 Python 3.13、uv，以及 PATH 中的 Node.js（供 Pyright 使用）。提交 `uv.lock`，使用配套锁定的官方 SDK 和 runtime。
 
 ```sh
 uv sync --frozen
+uv run --frozen pyright
 uv run --frozen pytest -v
 uv run --frozen python check_runtime.py
 uv run --frozen python check_runtime.py --sandbox
 ```
+
+Pyright 必须达到 0 errors，覆盖业务代码、测试和自检脚本；不得通过忽略错误或排除源码绕过检查。
 
 `check_runtime.py` 使用临时、未登录的 Codex 状态目录，只验证启动和认证状态接口，不读取个人登录缓存，也不请求模型。
 `--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。

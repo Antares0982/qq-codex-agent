@@ -4,9 +4,11 @@ import ipaddress
 import json
 import socket
 import uuid
+from typing import cast
 from urllib.parse import urlsplit
 
 import aiohttp
+from aiohttp.abc import AbstractResolver, ResolveResult
 
 from .config import qq_id
 from .logging import LOG
@@ -15,8 +17,8 @@ from .messages import parse_parts
 IMAGE_LIMIT = 10 * 1024 * 1024
 
 
-class PublicResolver(aiohttp.abc.AbstractResolver):
-    async def resolve(self, host, port=0, family=socket.AF_INET):
+class PublicResolver(AbstractResolver):
+    async def resolve(self, host, port=0, family=socket.AF_INET) -> list[ResolveResult]:
         records = await asyncio.get_running_loop().getaddrinfo(
             host, port, family=family, type=socket.SOCK_STREAM
         )
@@ -25,7 +27,7 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
         return [
             {
                 "hostname": host,
-                "host": record[4][0],
+                "host": cast(str, record[4][0]),
                 "port": port,
                 "family": record[0],
                 "proto": record[2],

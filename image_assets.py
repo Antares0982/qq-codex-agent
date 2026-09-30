@@ -25,7 +25,7 @@ def image_format(data):
                     "JPEG": ".jpg",
                     "GIF": ".gif",
                     "WEBP": ".webp",
-                }.get(image.format)
+                }.get(image.format or "")
                 if suffix is None:
                     raise ValueError("仅支持 PNG、JPEG、GIF 和 WebP，不支持 SVG。")
                 image.verify()

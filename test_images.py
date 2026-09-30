@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from openai_codex.generated.v2_all import ImageGenerationThreadItem
 from PIL import Image
+from PIL.GifImagePlugin import GifImageFile
 
 import image_assets
 import image_tool
@@ -234,6 +235,7 @@ class TestImages:
         data = self.bot.send.call_args.kwargs["image"]
         assert data == (self.folder / "animation.gif").read_bytes()
         with Image.open(io.BytesIO(data)) as gif:
+            assert isinstance(gif, GifImageFile)
             assert gif.n_frames == 2
 
     async def test_generation_is_saved_without_shell_or_automatic_delivery(self):
@@ -247,15 +249,12 @@ class TestImages:
                         result=base64.b64encode(PNG).decode(),
                     )
                 )
-            images = self.agent.turns.images.list_images(
-                self.agent.turns.contexts.get(self.message.key)
-            )["images"]
+            context = self.agent.turns.contexts.get(self.message.key)
+            assert context is not None
+            images = self.agent.turns.images.list_images(context)["images"]
             assert [image["generation_id"] for image in images] == ["frame1", "frame2"]
             for image in images:
-                assert (
-                    self.agent.turns.contexts.get(self.message.key).folder
-                    / image["path"]
-                ).read_bytes() == PNG
+                assert (context.folder / image["path"]).read_bytes() == PNG
             assert not any(
                 ("image" in call.kwargs for call in self.bot.send.call_args_list)
             )

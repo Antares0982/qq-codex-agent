@@ -8,6 +8,7 @@ from collections import deque
 from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +26,7 @@ from openai_codex.generated.v2_all import (
     TurnError,
     TurnStatus,
 )
+from openai_codex.models import Notification
 from PIL import Image
 
 import image_tool
@@ -184,10 +186,10 @@ class TestAgent:
             identity = "（ID: 1）" if group else ""
             assert inputs[0].text == f"QQ 用户 {expected}{identity}:\nhello"
         for card in (None, "", " \n ", 123):
-            incoming["sender"]["card"] = card
+            incoming["sender"] = {**incoming["sender"], "card": card}
             assert parse_message(incoming, self.settings).sender_name == "QQ昵称"
 
-    def member_context(self, user=1, group=10):
+    def member_context(self, user=1, group: int | None = 10):
         message = parse_message(event(user=user, group=group), self.settings)
         context = ImageTurn(message, self.settings.workspace_dir / "members")
         self.agent.turns.contexts[context.message.key] = context
@@ -1455,10 +1457,10 @@ class TestAgent:
                 self.agent.runtime.context_tokens("test-thread")
             )
             await asyncio.sleep(0)
-            await asyncio.to_thread(router.route_notification, item)
+            await asyncio.to_thread(router.route_notification, cast(Notification, item))
             assert await waiter == 51000
             item.payload.token_usage.last.total_tokens = 20000
-            await asyncio.to_thread(router.route_notification, item)
+            await asyncio.to_thread(router.route_notification, cast(Notification, item))
             await asyncio.sleep(0)
             assert await self.agent.runtime.context_tokens("test-thread") == 20000
         assert not self.agent.runtime.usage_ready
@@ -1541,7 +1543,9 @@ class TestAgent:
             assert await asyncio.wait_for(self.agent.runtime.compact(thread), 2)
             subscription = router.subscribe_turn("turn1")
             normal = turn_done()
-            await asyncio.to_thread(router.route_notification, normal)
+            await asyncio.to_thread(
+                router.route_notification, cast(Notification, normal)
+            )
             assert subscription.next() is normal
             subscription.close()
         assert router.route_notification == route
@@ -1591,7 +1595,9 @@ class TestAgent:
         async with asyncio.timeout(0.01) as deadline:
             before = deadline.when()
             await self.agent.turns.steer_messages(turn, context, finished, [], deadline)
-            assert deadline.when() > before + 800
+            after = deadline.when()
+            assert before is not None and after is not None
+            assert after > before + 800
             await asyncio.sleep(0.02)
         turn.steer.assert_awaited_once()
 
@@ -1676,7 +1682,7 @@ class TestAgent:
                 {"status": "ok", "retcode": 0, "data": {"ok": True}}
             )
 
-        bot.ws = NS(closed=False, send_json=send)
+        bot.ws = MagicMock(closed=False, send_json=send)
         assert await bot.call("get_status", {}) == {"ok": True}
         assert not bot.pending
 
