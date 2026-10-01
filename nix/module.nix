@@ -9,6 +9,7 @@ let
   user = "qq-codex-agent";
   state = "/var/lib/qq-codex-agent";
   work = "/var/lib/qq-codex-work";
+  resources = "/var/lib/qq-codex-resources";
   home = "${work}/.home";
   app = cfg.package;
   prompts = {
@@ -56,52 +57,18 @@ let
   nsswitch = pkgs.writeText "qq-codex-nsswitch.conf" "hosts: files dns\n";
   configFile = (pkgs.formats.toml { }).generate "qq-codex-config.toml" (
     {
-      allowlist_file = "/etc/qq-codex-agent/allowlist.toml";
+      allowlist_file = "/etc/qq-codex-private/allowlist.toml";
       napcat_url = cfg.napcatUrl;
-      token_file = "/etc/qq-codex-agent/napcat-token";
+      token_file = "/etc/qq-codex-private/napcat-token";
       state_dir = state;
       workspace_dir = work;
       queue_limit = 8;
       task_timeout = 3600;
+      auth_socket = cfg.authSocket;
+      resources_dir = resources;
     }
     // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
   );
-  denySiblings =
-    parent: names:
-    let
-      exclude =
-        prefix: remaining:
-        let
-          next = lib.unique (
-            map (name: builtins.substring 0 1 name) (builtins.filter (name: name != "") remaining)
-          );
-        in
-        lib.optional (prefix != "" && !(builtins.elem "" remaining)) prefix
-        ++ [ (if next == [ ] then "${prefix}?*" else "${prefix}[!${lib.concatStrings next}]*") ]
-        ++ lib.concatMap (
-          char:
-          exclude (prefix + char) (
-            map (name: builtins.substring 1 (builtins.stringLength name) name) (
-              builtins.filter (lib.hasPrefix char) remaining
-            )
-          )
-        ) next;
-      patterns = exclude "" names;
-    in
-    # Anchor ripgrep matches to parent directories.
-    lib.concatMap (
-      pattern:
-      if lib.hasInfix "*" pattern then
-        let
-          anchored = "${builtins.dirOf parent}/**/${builtins.baseNameOf parent}/${pattern}";
-        in
-        [
-          anchored
-          "${anchored}/**"
-        ]
-      else
-        [ "${parent}/${pattern}" ]
-    ) patterns;
   requirements = (pkgs.formats.toml { }).generate "qq-codex-requirements.toml" {
     allowed_approval_policies = [ "on-request" ];
     allowed_approvals_reviewers = [ "auto_review" ];
@@ -110,20 +77,12 @@ let
       "read-only"
     ];
     allow_login_shell = false;
-    permissions.filesystem.deny_read =
-      denySiblings state [ "codex" ]
-      ++ denySiblings "${state}/codex" [
-        "tmp"
-        "skills"
-        "plugins"
-      ]
-      ++ denySiblings "${state}/codex/tmp" [ "arg0" ]
-      ++ denySiblings "${state}/codex/plugins" [ "cache" ]
-      ++ [
-        "/etc/qq-codex-agent/napcat-token"
-        "/etc/qq-codex-agent/allowlist.toml"
-      ]
-      ++ cfg.extraDeniedPaths;
+    permissions.filesystem.deny_read = [
+      state
+      "/etc/qq-codex-private"
+      "/run/codex-auth"
+    ]
+    ++ cfg.extraDeniedPaths;
   };
   closure = pkgs.closureInfo {
     rootPaths = [
@@ -132,14 +91,12 @@ let
     ];
   };
   runtimeMounts = pkgs.runCommand "qq-codex-runtime-mounts" { } ''
-    for unit in qq-codex-agent qq-codex-login; do
-      directory="$out/lib/systemd/system/$unit.service.d"
-      mkdir -p "$directory"
-      echo '[Service]' > "$directory/runtime.conf"
-      while IFS= read -r path; do
-        echo "BindReadOnlyPaths=$path" >> "$directory/runtime.conf"
-      done < ${closure}/store-paths
-    done
+    directory="$out/lib/systemd/system/qq-codex-agent.service.d"
+    mkdir -p "$directory"
+    echo '[Service]' > "$directory/runtime.conf"
+    while IFS= read -r path; do
+      echo "BindReadOnlyPaths=$path" >> "$directory/runtime.conf"
+    done < ${closure}/store-paths
   '';
   serviceConfig = {
     Type = "exec";
@@ -151,13 +108,14 @@ let
     StateDirectory = [
       "qq-codex-agent"
       "qq-codex-work"
+      "qq-codex-resources"
     ];
     StateDirectoryMode = "0700";
     UMask = "0077";
     BindReadOnlyPaths = [
       "${configFile}:/etc/qq-codex-agent/config.toml"
-      "${cfg.allowlistFile}:/etc/qq-codex-agent/allowlist.toml"
-      "${cfg.agentsFile}:${state}/codex/AGENTS.md"
+      "${cfg.allowlistFile}:/etc/qq-codex-private/allowlist.toml"
+      "${pkgs.emptyDirectory}:${state}/codex/tmp/arg0"
       "${codexConfig}:${state}/codex/config.toml"
       "${requirements}:/etc/codex/requirements.toml"
       "${pkgs.bash}/bin/bash:/bin/sh"
@@ -170,6 +128,7 @@ let
     BindPaths = [
       state
       work
+      resources
     ];
     PrivateTmp = true;
     PrivateDevices = true;
@@ -205,6 +164,10 @@ in
     package = lib.mkOption { type = lib.types.package; };
     allowlistFile = lib.mkOption { type = lib.types.str; };
     tokenFile = lib.mkOption { type = lib.types.str; };
+    authSocket = lib.mkOption {
+      type = lib.types.str;
+      default = "/run/codex-auth/auth.sock";
+    };
     extraPackages = lib.mkOption {
       type = lib.types.listOf lib.types.package;
       default = [ ];
@@ -241,12 +204,15 @@ in
       isSystemUser = true;
       group = user;
       home = state;
+      extraGroups = [ "codex-auth-clients" ];
     };
     systemd.tmpfiles.rules = [
       "d /var/lib/qq-codex-root 0755 root root -"
       "d ${state} 0700 ${user} ${user} -"
       "d ${state}/codex 0700 ${user} ${user} -"
       "d ${state}/codex/tmp/arg0 0700 ${user} ${user} -"
+      "d ${resources} 0700 ${user} ${user} -"
+      "d /etc/qq-codex-private 0750 root ${user} -"
       "d ${work} 0700 ${user} ${user} -"
       "d ${home} 0700 ${user} ${user} -"
       "d ${work}/.uv 0700 ${user} ${user} -"
@@ -257,7 +223,10 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [
         "network-online.target"
+        "codex-auth.service"
       ];
+      requires = [ "codex-auth.service" ];
+      partOf = [ "codex-auth.service" ];
       restartTriggers = [ runtimeMounts ];
       wants = [ "network-online.target" ];
       inherit environment;
@@ -267,23 +236,17 @@ in
         ];
         ExecStart = "${app}/bin/qq-codex-agent";
         BindReadOnlyPaths = serviceConfig.BindReadOnlyPaths ++ [
-          "${cfg.tokenFile}:/etc/qq-codex-agent/napcat-token"
+          "${cfg.tokenFile}:/etc/qq-codex-private/napcat-token"
+          "/run/codex-auth"
         ];
         Restart = "on-failure";
         RestartSec = "10s";
       };
     };
     systemd.services.qq-codex-login = {
-      description = "QQ Codex device login";
-      restartTriggers = [ runtimeMounts ];
-      conflicts = [ "qq-codex-agent.service" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      inherit environment;
-      serviceConfig = serviceConfig // {
-        ExecStart = "${app}/bin/qq-codex-agent --login";
-        Restart = "no";
-      };
+      description = "Shared Codex login compatibility entry";
+      serviceConfig.Type = "oneshot";
+      script = "${pkgs.systemd}/bin/systemctl start codex-login.service";
     };
   };
 }

@@ -26,7 +26,7 @@
 - 私聊和各群独立授权，缺失或空名单不放行；所有名单为空时任何人均不能使用。
 - 私聊需要用户号在 `private_users` 中。群聊需要该群 `users` 授权，并明确 @ bot；`users` 包含字符串 `"all"` 时仅该群全员可用。私聊不支持 `"all"`。
 - 每个私聊独立上下文，同群授权用户共享上下文；群回复对所有群成员公开。消息间隔超过两小时且当前上下文估算超过 50,000 tokens 时，在原 thread 先压缩再提交新消息；私聊提示，群聊静默。
-- `/new` 中断本会话任务，清空等待任务，后续创建不携带历史的空白 thread，保留工作文件和图片索引；待切换状态跨重启保留。旧 Codex 历史仍在认证用户的状态目录保留。
+- `/new` 中断本会话任务，清空等待任务，后续创建不携带历史的空白 thread，保留工作文件和图片索引；待切换状态跨重启保留。旧 Codex 历史仍在服务用户的状态目录保留。
 - `/stop` 中断本会话任务并清空本会话队列；群内任一授权用户均可使用。
 - `/status` 查看登录状态、忙碌状态、当前 thread 标题及已提交的用户消息数。消息数取自 Codex thread 历史，不包含排队消息或 slash command；未命名时显示“未命名”，尚未创建时显示 0。群内命令也需要 @ bot。
 - `/help` 查看使用方法及全部指令。
@@ -106,7 +106,7 @@ users = ["all"]
 ```
 
 解密文件位于 `/run/agenix/qqCodexAllowlist`，仅专用服务用户可读。
-它在服务内只读挂载为 `/etc/qq-codex-agent/allowlist.toml`，禁止 Codex 工具读取。
+它在服务内只读挂载为 `/etc/qq-codex-private/allowlist.toml`，禁止 Codex 工具读取。
 主配置通过 `allowlist_file` 指向该文件，不将 QQ 号写入公开 Nix 配置或 Nix store。
 空名单不放行任何用户；文件缺失或格式错误会阻止启动。修改后重新部署，服务自动重启读取。
 独立运行仍可使用 `config.example.toml` 中的内联名单；设置 `allowlist_file` 时以外部文件为准。
@@ -132,38 +132,40 @@ NapCat 的 forward WebSocket 使用 `ws://127.0.0.1:3001`，必须支持多客�
 服务和登录 unit 均设置 `http_proxy`、`https_proxy` 为 `http://127.0.0.1:1081`，
 `no_proxy=127.0.0.1,localhost,::1`。这是环境变量代理，不是强制流量代理；本机 NapCat 连接直连。
 
-## 设备码登录
+## 共享 ChatGPT 登录
 
-在 ChatGPT 安全设置启用设备码登录，然后在树莓派执行：
+RPi 使用独立 `codex-auth.service` 作为唯一刷新者，凭据位于
+`/var/lib/codex-auth/codex`，由 Nix 仓库的 `rpi/codex-auth.nix` 管理。
+QQ 与 Antares 通过 `/run/codex-auth/auth.sock` 获取短期 access token；各自 CODEX_HOME
+只保管会话，认证使用内存存储，不读取旧 auth.json，也不拥有 refresh token。
 
-```sh
-sudo systemctl start qq-codex-login
-sudo journalctl -u qq-codex-login -f -o cat
-```
-
-在自己的浏览器打开日志中的验证地址，输入一次性 code 并授权。不要分享设备码或认证文件。
-该登录流程使用专用用户、同一官方 runtime 和同一持久认证目录；登录结束后输出成功信息，服务退出。
-登录 unit 与 bot unit 互斥，避免同时更新认证。
-
-完成登录并配置好加密白名单后，启动 bot：
+首次迁移先停止消费者，再运行宿主提供的 `codex-auth-import`，复用现有 QQ 登录。
+已有统一认证时不要再次导入。需要重新验证时：
 
 ```sh
-sudo systemctl start qq-codex-agent
-sudo journalctl -u qq-codex-agent -f -o cat
+sudo systemctl start codex-login
+sudo journalctl -u codex-login -f -o cat
+sudo systemctl start codex-auth qq-codex-agent antares-agent
 ```
 
-不自动回退到 API Key。认证失效时重新运行登录服务。设备码登录过程应由你操作。
+登录 unit 与认证服务互斥；成功后需重新启动消费者。旧 `qq-codex-login` 仅转调新入口。
+不分享设备码或认证文件，不将认证放进 Nix store/Git，不同时运行第二个刷新者。
+本地不设置 `auth_socket` 时仍支持独立登录，但 RPi 配置始终使用共享认证。
+完整停服、备份和回退流程见 antares-agent 的 `docs/design/06-codex-migration.md`。
 
 ## 提示词和目录边界
 
 默认修改本仓库的三份 `AGENTS*.runtime.md`，随应用重新部署。需要本机定制时，在 Nix 配置中设置 `services.qq-codex-agent.agentsFile`、`privateAgentsFile`、`groupAgentsFile` 为自定义文件的绝对路径；不要让秘密内容进入 Nix store。外部文件修改后重启 agent，公共提示词更新后在 QQ `/new`。首次迁移前比较 Pi 上原有三份 `/etc/qq-codex-agent/AGENTS*.md`，将需要保留的手工修改显式配置为覆盖文件；迁移不删除旧文件。
-公共文件只读挂载为专用 `CODEX_HOME/AGENTS.md`，由 Codex 原生加载；`agents_file` 用于部署路径和启动校验，应用不将其内容注入 thread。私聊和群聊文件由部署配置的 `private_agents_file`、`group_agents_file` 指定，须只读挂载到服务内，应用按消息类型读取并作为 `developer_instructions` 注入新建和恢复的 thread。应用同时注入 QQ 文件交付规则和 Pillow Python 路径。配置路径与挂载由应用仓库的同一个 Nix 模块生成；启动自检验证三份文件可读且非空。增加部署资源时在本仓库同步修改包、模块及检查，无需修改 dotfile。
+公共文件与按聊天类型选择的私聊/群聊文件由应用读取，注入新建和恢复 thread 的
+`developer_instructions`。`agents_file`、`private_agents_file`、`group_agents_file`
+由 Nix 模块统一生成并只读挂载；启动校验三份文件可读且非空。应用同时注入 QQ 文件交付
+规则和 Pillow Python 路径。工作区内 AGENTS.md 保持原生层级加载。
 会话工作目录会被显式标记为可信项目。工作目录下新建的 AGENTS.md 遵循 Codex 自身规则，不能改变应用 allowlist 或宿主挂载。
 
 服务的私有根目录仅挂载所需运行时 Nix closure、只读应用和配置、专用状态与工作目录，以及 DNS/hosts 和必要虚拟文件系统。
 默认不挂载宿主完整 `/nix/store`、`/home`、`/etc`、`/run` 或 `/var`；当前 Pi 对 store 和 Nix daemon 的额外授权见上文。
 工作区为 `/var/lib/qq-codex-work`，每个私聊或群聊始终使用同一个子目录，切换 thread 和 `/new` 均不改变目录；这提供会话组织，不是授权用户之间的强多租户隔离。
-状态与认证位于 `/var/lib/qq-codex-agent`。不可修改的 Codex managed requirements 禁止工具读取该目录和 NapCat token；外层文件系统仍约束自动审批后的访问范围。
+会话状态位于 `/var/lib/qq-codex-agent`，共享认证位于独立用户目录。不可修改的 Codex managed requirements 禁止工具读取该目录和 NapCat token；外层文件系统仍约束自动审批后的访问范围。
 所有授权用户都能够操作专用工作区内的数据，因此只加入你信任的 QQ 号。
 默认不开放额外业务目录；需要添加时修改管理员维护的 Nix bind mounts 并重新部署。
 
@@ -198,7 +200,11 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 在 Pi 查看 `sudo journalctl -u qq-codex-agent -n 100 --no-pager`。
 INFO 日志包含授权消息的发送者、正文、图片数量、引用消息 ID、回复正文、图片交付路径和大小，以及 thread/turn、工具状态、压缩结果和任务耗时。错误事件及终态错误直接进入 journal，超时与主动取消分别标注；不记录工具的图片 Base64 或认证头。常见 token、API key、密码字段会脱敏，文本换行转义；任意自然语言秘密无法保证自动识别。journal 含私聊与群聊内容，仅向受信任管理员开放，按宿主 journald 策略保留。
 启动前检查失败会阻止服务运行，优先查看 traceback；不要通过删除沙箱检查或放宽目录权限绕过错误。
-`codex-linux-sandbox` 在 runtime 0.154.0 中是 Codex 启动时创建的辅助入口，不是独立的 Python 包。检查日志中的 `could not create PATH aliases`，以及 `CODEX_HOME/tmp/arg0` 是否可由服务用户创建子目录和入口。Nix 模块保持该目录可写，同时保留认证目录的 managed deny-read；不要为它添加只读挂载。不能通过开放整个状态目录或关闭沙箱修复。启动自检现在也执行 app-server 的沙箱命令，可提前暴露 CLI 检查未覆盖的问题。服务模块现在随本仓库维护，仍需在实际 Pi 部署验证。
+Codex 0.159.2 的多个文件级 deny-read 会触发 bubblewrap 文件描述符复用错误。
+部署改用整个目录隔离，技能与插件 cache 放在 `/var/lib/qq-codex-resources`；
+`CODEX_HOME/tmp/arg0` 只读，让官方 runtime 使用自身可执行文件回退入口。
+PATH aliases 的只读警告是预期现象；必须以实际 thread、沙箱和资源读取自检为准。
+不要开放私有状态或关闭沙箱。详情见 `nix/README.md`。
 遇到 `Unknown allowlist fields`，核对加密文件格式和实际运行的源码版本；重启服务不会更新 flake 锁定的旧代码。
 登录失败检查登录 unit 日志和本地代理；不要输出或分享 token、设备码及认证文件。
 推送源码后必须更新 Nix input、同步锁文件并在 Pi 切换系统；只更新应用仓库不会更新运行中的服务。

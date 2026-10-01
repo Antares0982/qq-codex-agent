@@ -7,9 +7,10 @@ import signal
 from openai_codex import AsyncCodex
 
 from .agent import Agent
+from .auth_client import TokenClient, deny_request
 from .config import Settings
 from .onebot import OneBot
-from .runtime import codex_config
+from .runtime import codex_config, prepare_home
 
 
 async def run(settings, login):
@@ -17,7 +18,20 @@ async def run(settings, login):
     os.environ.pop("NAPCAT_WS_TOKEN", None)
     if not login:
         settings.check_prompts()
-    async with AsyncCodex(config=codex_config(settings)) as codex:
+    prepare_home(settings)
+    codex = AsyncCodex(config=codex_config(settings))
+    tokens = TokenClient(settings.auth_socket) if settings.auth_socket else None
+    codex._client._sync._approval_handler = deny_request
+    if tokens:
+        if login:
+            raise RuntimeError("请通过 codex-login.service 完成统一登录")
+        codex._client._sync._approval_handler = tokens.handle
+    async with codex:
+        if tokens:
+            value = await asyncio.to_thread(tokens.fetch)
+            await codex._client.account_login_start(
+                {"type": "chatgptAuthTokens", **value}
+            )
         if login:
             handle = await codex.login_chatgpt_device_code()
             print(handle.verification_url, handle.user_code, flush=True)

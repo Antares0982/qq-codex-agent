@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import shutil
 import sys
 import time
 
@@ -200,6 +201,10 @@ class Runtime:
                 },
             },
         }
+        if self.settings.agents_file.is_file():
+            options["developer_instructions"] += (
+                "\n" + self.settings.agents_file.read_text()
+            )
         agents_file = (
             self.settings.group_agents_file
             if "group_id" in message.target
@@ -242,10 +247,34 @@ class Runtime:
         return await self.codex.thread_start(**options)
 
 
+def prepare_home(settings):
+    (settings.state_dir / "codex").mkdir(parents=True, exist_ok=True, mode=0o700)
+    if settings.resources_dir is None:
+        return
+    for relative in ("skills", "plugins/cache"):
+        source = (settings.state_dir / "codex") / relative
+        target = settings.resources_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if source.is_symlink():
+            if source.resolve() != target.resolve():
+                raise ValueError(f"资源链接冲突：{source}")
+            continue
+        if source.exists():
+            if target.exists():
+                raise ValueError(f"资源目录冲突：{source} → {target}")
+            shutil.move(str(source), str(target))
+        else:
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.symlink_to(target, target_is_directory=True)
+
+
 def codex_config(settings):
     overrides = (
         'forced_login_method="chatgpt"',
-        'cli_auth_credentials_store="file"',
+        'cli_auth_credentials_store="ephemeral"'
+        if settings.auth_socket
+        else 'cli_auth_credentials_store="file"',
         'approval_policy="on-request"',
         'approvals_reviewer="auto_review"',
         'model_reasoning_effort="medium"',

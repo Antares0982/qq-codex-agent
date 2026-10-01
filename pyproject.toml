@@ -23,12 +23,13 @@ venv = ".venv"
 pythonVersion = "3.13"
 
 [tool.pytest.ini_options]
-testpaths = ["test_agent.py", "test_images.py"]
+testpaths = ["test_agent.py", "test_images.py", "test_auth.py"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [project.scripts]
 qq-codex-agent = "qq_codex_agent:main"
+codex-auth = "qq_agent.auth:main"
 
 [build-system]
 requires = ["setuptools>=77"]

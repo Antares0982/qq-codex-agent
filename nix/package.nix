@@ -24,6 +24,7 @@ in
 pkgs.runCommand "qq-codex-agent" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
   mkdir -p "$out/bin" "$out/share/qq-codex-agent"
   makeWrapper ${env}/bin/qq-codex-agent "$out/bin/qq-codex-agent"
+  makeWrapper ${env}/bin/codex-auth "$out/bin/codex-auth"
   makeWrapper ${env}/bin/python "$out/bin/qq-codex-check" \
     --add-flags ${source}/check_sandbox.py
   makeWrapper ${env}/bin/python "$out/bin/qq-codex-python"

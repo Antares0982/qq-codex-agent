@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 from codex_cli_bin import bundled_codex_path
@@ -9,6 +10,7 @@ from openai_codex.client import CodexClient
 from openai_codex.generated.v2_all import CommandExecResponse
 
 from qq_codex_agent import Settings, codex_config
+from qq_agent.runtime import prepare_home
 
 
 def check_app_server_sandbox(settings, directory, denied_paths, readable_paths=()):
@@ -44,6 +46,35 @@ def check_app_server_sandbox(settings, directory, denied_paths, readable_paths=(
         )
         if result.exit_code:
             raise RuntimeError(f"App-server sandbox self-check failed: {result.stderr}")
+        if settings.auth_socket:
+            if not settings.auth_socket.is_socket():
+                raise RuntimeError("Authentication socket unavailable")
+            probe = """import socket, sys
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.settimeout(1)
+    try:
+        connection.connect(sys.argv[1])
+    except OSError:
+        pass
+    else:
+        raise RuntimeError('Authentication socket exposed')
+"""
+            result = client.request(
+                "command/exec",
+                {
+                    "command": [sys.executable, "-c", probe, str(settings.auth_socket)],
+                    "cwd": str(directory),
+                    "sandboxPolicy": {
+                        "type": "workspaceWrite",
+                        "writableRoots": [str(directory)],
+                        "networkAccess": True,
+                    },
+                    "timeoutMs": 10000,
+                },
+                response_model=CommandExecResponse,
+            )
+            if result.exit_code:
+                raise RuntimeError(f"Auth sandbox self-check failed: {result.stderr}")
 
 
 def check_thread_start(settings, directory):
@@ -64,6 +95,9 @@ def check_thread_start(settings, directory):
 def main():
     settings = Settings.load("/etc/qq-codex-agent/config.toml")
     settings.check_prompts(required=True)
+    prepare_home(settings)
+    if settings.resources_dir is None:
+        raise RuntimeError("Missing public resource directory")
     state = Path("/var/lib/qq-codex-agent")
     work = Path("/var/lib/qq-codex-work")
     for path in (
@@ -78,6 +112,12 @@ def main():
             raise RuntimeError(f"Unexpected host exposure: {path}")
     if not Path("/etc/codex/requirements.toml").is_file():
         raise RuntimeError("Missing managed Codex requirements")
+    rules = tomllib.loads(Path("/etc/codex/requirements.toml").read_text())
+    for path in rules["permissions"]["filesystem"]["deny_read"]:
+        if any(char in path for char in "*?[") or (
+            Path(path).exists() and not Path(path).is_dir()
+        ):
+            raise RuntimeError("Managed deny-read requires directory paths")
     env = os.environ.copy()
     env["CODEX_HOME"] = str(state / "codex")
     plugins = state / "codex/plugins"
@@ -106,7 +146,8 @@ def main():
                 (
                     'test ! -r "$1"; '
                     "test ! -r /var/lib/qq-codex-agent/codex/auth.json; "
-                    "test ! -r /etc/qq-codex-agent/napcat-token; "
+                    "test ! -r /etc/qq-codex-private/napcat-token; "
+                    "test ! -r /run/codex-auth/auth.sock; "
                     'printf ok > probe; test "$(cat probe)" = ok'
                 ),
                 "sandbox-check",
@@ -126,15 +167,19 @@ def main():
             settings,
             directory,
             [
+                *([str(settings.auth_socket)] if settings.auth_socket else []),
                 canary.name,
                 codex_canary.name,
                 tmp_canary.name,
                 plugin_canary.name,
                 state / "codex/auth.json",
                 settings.token_file,
-                "/etc/qq-codex-agent/allowlist.toml",
+                "/etc/qq-codex-private/allowlist.toml",
             ],
-            [state / "codex/skills/.system/imagegen/SKILL.md", resource.name],
+            [
+                settings.resources_dir / "skills/.system/imagegen/SKILL.md",
+                settings.resources_dir / "plugins/cache" / Path(resource.name).name,
+            ],
         )
     print("Filesystem and Codex sandbox checks passed")
 

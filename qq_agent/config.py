@@ -27,6 +27,8 @@ class Settings:
     queue_limit: int = 8
     task_timeout: float = 3600
     model: str | None = None
+    auth_socket: Path | None = None
+    resources_dir: Path | None = None
 
     def check_prompts(self, required=False):
         for key in ("agents_file", "private_agents_file", "group_agents_file"):
@@ -78,7 +80,12 @@ class Settings:
             raw[key] = Path(raw[key])
             if not raw[key].is_absolute():
                 raise ValueError(f"{key} must be absolute")
-        for key in ("private_agents_file", "group_agents_file"):
+        for key in (
+            "private_agents_file",
+            "group_agents_file",
+            "auth_socket",
+            "resources_dir",
+        ):
             if key in raw:
                 raw[key] = Path(raw[key])
                 if not raw[key].is_absolute():
