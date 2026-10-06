@@ -184,7 +184,7 @@ class Runtime:
             + f"\n图片加工可使用已安装 Pillow 的 Python：{sys.executable}",
             "config": {
                 "model_reasoning_effort": "medium",
-                "model_auto_compact_token_limit": 100000,
+                "model_auto_compact_token_limit": 200000,
                 "model_auto_compact_token_limit_scope": "total",
                 "projects": {str(folder): {"trust_level": "trusted"}},
                 "mcp_servers": {
@@ -278,7 +278,7 @@ def codex_config(settings):
         'approval_policy="on-request"',
         'approvals_reviewer="auto_review"',
         'model_reasoning_effort="medium"',
-        "model_auto_compact_token_limit=100000",
+        "model_auto_compact_token_limit=200000",
         'model_auto_compact_token_limit_scope="total"',
         f'projects.{json.dumps(str(settings.workspace_dir))}.trust_level="trusted"',
         "project_root_markers=[]",

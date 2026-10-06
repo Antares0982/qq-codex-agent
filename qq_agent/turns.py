@@ -11,7 +11,7 @@ from .logging import LOG, log_text
 from .messages import ImageTurn
 from .profiles import Profiles
 
-IDLE_COMPACT_LIMIT = 50000
+IDLE_COMPACT_LIMIT = 100000
 
 
 class Turns:

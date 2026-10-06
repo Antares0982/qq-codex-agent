@@ -962,7 +962,7 @@ class TestAgent:
                 "INSERT INTO sessions VALUES (?, 'test-thread', 'folder', 0)",
                 (message.key,),
             )
-        self.store_usage(60000)
+        self.store_usage(110000)
 
         async def compact(thread):
             assert self.bot.send.call_args.kwargs == {"text": "正在压缩上下文……"}
@@ -1463,7 +1463,7 @@ class TestAgent:
 
     @pytest.mark.parametrize(
         "tokens, gap, expected",
-        ((50000, 7201, False), (50001, 7200, False), (50001, 7201, True)),
+        ((100000, 7201, False), (100001, 7200, False), (100001, 7201, True)),
     )
     async def test_compact_boundaries(self, tokens, gap, expected):
         thread, _ = self.setup_turn([turn_done()])
@@ -1498,10 +1498,10 @@ class TestAgent:
             self.codex.thread_resume.call_args.kwargs["config"][
                 "model_auto_compact_token_limit"
             ]
-            == 100000
+            == 200000
         )
         config = codex_config(self.settings)
-        assert "model_auto_compact_token_limit=100000" in config.config_overrides
+        assert "model_auto_compact_token_limit=200000" in config.config_overrides
         assert 'model_auto_compact_token_limit_scope="total"' in config.config_overrides
 
     async def test_compact_queue(self):
@@ -1518,7 +1518,7 @@ class TestAgent:
                 "INSERT INTO sessions VALUES ('private-1', 'test-thread', 'folder', 0)"
             )
             self.agent.db.execute("INSERT INTO activity VALUES ('private-1', 0, 0, 0)")
-        self.store_usage(60000)
+        self.store_usage(110000)
         self.agent.receive(event())
         worker = asyncio.create_task(self.agent.work())
         try:
