@@ -953,22 +953,30 @@ class TestAgent:
         assert "没有可读取" in self.bot.send.call_args.kwargs["text"]
         assert not hasattr(self.codex, "thread_start")
 
-    async def test_idle_group_silence(self):
+    @pytest.mark.parametrize("group", (10, None))
+    async def test_idle_notice(self, group):
         self.setup_turn([turn_done()])
+        message = parse_message(event(group=group), self.settings)
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('group-10', 'test-thread', 'folder', 0)"
+                "INSERT INTO sessions VALUES (?, 'test-thread', 'folder', 0)",
+                (message.key,),
             )
         self.store_usage(60000)
-        self.agent.runtime.compact = AsyncMock(return_value=False)
-        message = parse_message(event(group=10), self.settings)
+
+        async def compact(thread):
+            assert self.bot.send.call_args.kwargs == {"text": "正在压缩上下文……"}
+            return False
+
+        self.agent.runtime.compact = AsyncMock(side_effect=compact)
         message.generation = 1
         await self.agent.turns.execute(message)
         self.agent.runtime.compact.assert_awaited_once()
         self.codex.thread_start.assert_not_awaited()
-        assert [call.kwargs for call in self.bot.send.call_args_list] == [
-            {"text": "任务完成。"}
-        ]
+        texts = [call.kwargs["text"] for call in self.bot.send.call_args_list]
+        assert texts == ["正在压缩上下文……"] + (
+            ["开始处理……"] if group is None else []
+        ) + ["任务完成。"]
 
     @pytest.mark.parametrize("group", (10, None))
     async def test_all_texts(self, group):
@@ -1139,6 +1147,84 @@ class TestAgent:
             )
         assert self.bot.send.await_count == 2
 
+    @pytest.mark.parametrize(
+        "stage, outcome",
+        (
+            ("prepare_input", "ok"),
+            ("prepare_input", "invalid"),
+            ("prepare_input", "error"),
+            ("prepare_input", "cancel"),
+            ("thread_options", "ok"),
+            ("prepare_thread", "ok"),
+        ),
+    )
+    async def test_reaction_order(self, stage, outcome):
+        self.setup_turn([turn_done()])
+        reacted, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def account():
+            self.bot.call.assert_not_awaited()
+            return NS(account=object())
+
+        async def react(action, params):
+            reacted.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        self.codex.account.side_effect = account
+        self.bot.call.side_effect = react
+        owner = self.agent.inputs if stage == "prepare_input" else self.agent.runtime
+        original = getattr(owner, stage)
+
+        async def prepare(*args):
+            assert reacted.is_set()
+            if outcome == "invalid":
+                return None
+            if outcome == "error":
+                raise RuntimeError("input failed")
+            if outcome == "cancel":
+                raise asyncio.CancelledError
+            return await original(*args)
+
+        message = parse_message(event(group=10), self.settings)
+        with patch.object(owner, stage, side_effect=prepare):
+            if outcome == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(self.agent.turns.execute(message), 2)
+            else:
+                await asyncio.wait_for(self.agent.turns.execute(message), 2)
+        assert cancelled.is_set()
+        assert not self.agent.turns.contexts
+        self.bot.call.assert_awaited_once_with(
+            "set_msg_emoji_like",
+            {"message_id": "1", "emoji_id": "124", "set": True},
+        )
+
+    @pytest.mark.parametrize("group", (10, None))
+    @pytest.mark.parametrize("status", (TurnStatus.completed, TurnStatus.failed))
+    async def test_auto_compact_notice(self, group, status):
+        events = []
+        for identifier in ("compact1", "compact1", "compact2"):
+            item = ThreadItem.model_validate(
+                {"type": "contextCompaction", "id": identifier}
+            )
+            events.append(NS(method="item/started", payload=NS(item=item)))
+            events.append(NS(method="item/completed", payload=NS(item=item)))
+        _, turn = self.setup_turn([])
+
+        async def stream():
+            for notification in events:
+                yield notification
+                assert self.bot.send.call_args.kwargs == {"text": "正在压缩上下文……"}
+            yield turn_done(status)
+
+        turn.stream = stream
+        await self.agent.turns.execute(parse_message(event(group=group), self.settings))
+        texts = [call.kwargs["text"] for call in self.bot.send.call_args_list]
+        assert texts.count("正在压缩上下文……") == 2
+
     async def test_progress_once(self):
         kinds = (
             "commandExecution",
@@ -1249,6 +1335,7 @@ class TestAgent:
         with patch.object(AsyncThread, "read", new_callable=AsyncMock) as read:
             await self.agent.commands.control(message)
             read.assert_not_called()
+            assert "上下文：0 tokens" in self.bot.send.call_args.kwargs["text"]
             assert "用户消息：0 条" in self.bot.send.call_args.kwargs["text"]
             with self.agent.db:
                 self.agent.db.execute(
@@ -1277,14 +1364,20 @@ class TestAgent:
             await self.agent.commands.control(message)
             read.assert_awaited_once_with(include_turns=True)
             text = self.bot.send.call_args.kwargs["text"]
-            assert "图片测试" in text
+            assert "标题" not in text and "图片测试" not in text
+            assert "上下文：暂未知" in text
             assert "用户消息：2 条" in text
-            read.return_value.thread.name = None
-            await self.agent.commands.control(message)
-            assert "未命名" in self.bot.send.call_args.kwargs["text"]
+            for tokens in (0, 12345):
+                self.store_usage(tokens, thread="thread1")
+                await self.agent.commands.control(message)
+                assert (
+                    f"上下文：约 {tokens:,} tokens"
+                    in self.bot.send.call_args.kwargs["text"]
+                )
             read.side_effect = TimeoutError
             await self.agent.commands.control(message)
             assert "暂时无法读取" in self.bot.send.call_args.kwargs["text"]
+            assert "上下文：约 12,345 tokens" in self.bot.send.call_args.kwargs["text"]
             await self.agent.commands.control(
                 parse_message(event(group=10, text="/new"), self.settings)
             )
@@ -1292,6 +1385,7 @@ class TestAgent:
             await self.agent.commands.control(message)
             read.assert_not_called()
             assert "用户消息：0 条" in self.bot.send.call_args.kwargs["text"]
+            assert "上下文：0 tokens" in self.bot.send.call_args.kwargs["text"]
 
     async def test_interrupt_failure(self):
         _, turn = self.setup_turn([])
@@ -1315,11 +1409,13 @@ class TestAgent:
             await self.agent.turns.execute(parse_message(event(), self.settings))
         turn.interrupt.assert_awaited_once()
 
-    async def test_no_login(self):
+    @pytest.mark.parametrize("group", (10, None))
+    async def test_no_login(self, group):
         self.codex.account.return_value = NS(account=None)
-        await self.agent.turns.execute(parse_message(event(), self.settings))
+        await self.agent.turns.execute(parse_message(event(group=group), self.settings))
         assert "设备码" in self.bot.send.call_args.kwargs["text"]
         self.bot.image.assert_not_called()
+        self.bot.call.assert_not_called()
 
     def compact_event(self, method, thread="test-thread", turn="compact1", **kwargs):
         payload = NS(thread_id=thread, turn_id=turn, **kwargs)
@@ -1392,6 +1488,10 @@ class TestAgent:
             self.agent.receive(event())
         await self.agent.turns.execute(self.agent.queue.get_nowait())
         assert thread.compact.await_count == int(expected)
+        assert sum(
+            call.kwargs.get("text") == "正在压缩上下文……"
+            for call in self.bot.send.call_args_list
+        ) == int(expected)
         self.codex.thread_start.assert_not_awaited()
         self.read_history.assert_not_awaited()
         assert (
@@ -1506,37 +1606,45 @@ class TestAgent:
             assert await self.agent.runtime.context_tokens("missing") is None
         assert not self.agent.runtime.usage_ready
 
-    async def test_compact_command(self):
+    @pytest.mark.parametrize("group", (10, None))
+    async def test_compact_command(self, group):
         thread, _ = self.setup_turn([])
-        await self.agent.turns.execute(
-            parse_message(event(text="/compact"), self.settings)
-        )
+        message = parse_message(event(group=group, text="/compact"), self.settings)
+        await self.agent.turns.execute(message)
         self.codex.thread_start.assert_not_awaited()
         assert "暂无" in self.bot.send.call_args.kwargs["text"]
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('private-1', 'test-thread', 'folder', 0)"
+                "INSERT INTO sessions VALUES (?, 'test-thread', 'folder', 0)",
+                (message.key,),
             )
 
         async def compact():
+            assert self.bot.send.call_args.kwargs == {"text": "正在压缩上下文……"}
             self.agent.runtime.observe_codex(self.compact_event("turn/started"))
             self.store_usage(20000)
             self.agent.runtime.observe_codex(self.compact_event("turn/completed"))
 
         thread.compact = AsyncMock(side_effect=compact)
-        self.agent.receive(event(text="/compact", identifier=2))
-        self.agent.receive(event(text="/compact", identifier=3))
+        self.agent.receive(event(group=group, text="/compact", identifier=2))
+        self.agent.receive(event(group=group, text="/compact", identifier=3))
         await asyncio.gather(*self.agent.controls)
         assert self.agent.queue.qsize() == 1
         await self.agent.turns.execute(self.agent.queue.get_nowait())
         thread.compact.assert_awaited_once()
         thread.turn.assert_not_awaited()
         assert self.bot.send.call_args.kwargs["text"] == "上下文压缩完成。"
-        self.agent.jobs["private-1"] = object()
-        await self.agent.commands.control(
-            parse_message(event(text="/compact"), self.settings)
-        )
+        self.agent.jobs[message.key] = object()
+        await self.agent.commands.control(message)
         assert "结束后" in self.bot.send.call_args.kwargs["text"]
+        self.bot.call.assert_not_awaited()
+        assert (
+            sum(
+                call.kwargs.get("text") == "正在压缩上下文……"
+                for call in self.bot.send.call_args_list
+            )
+            == 1
+        )
         self.agent.jobs.clear()
         assert await self.agent.runtime.context_tokens("test-thread") == 20000
         self.agent.db.close()
@@ -1763,10 +1871,18 @@ class TestAgent:
                         return
 
             turns[key] = NS(stream=stream, steer=AsyncMock(), interrupt=AsyncMock())
-        threads = iter(
-            NS(id=key, turn=AsyncMock(return_value=turns[key])) for key in turns
-        )
-        self.codex.thread_start = AsyncMock(side_effect=lambda **kwargs: next(threads))
+        threads = {
+            key: NS(id=key, turn=AsyncMock(return_value=turns[key])) for key in turns
+        }
+
+        async def start(**options):
+            key = self.agent.db.execute(
+                "SELECT key FROM sessions WHERE folder=?",
+                (Path(options["cwd"]).name,),
+            ).fetchone()[0]
+            return threads[key]
+
+        self.codex.thread_start = AsyncMock(side_effect=start)
         self.agent.receive(event(group=10))
         self.agent.receive(event())
         worker = asyncio.create_task(self.agent.work())
@@ -1787,6 +1903,10 @@ class TestAgent:
                 await asyncio.sleep(0.01)
             assert turns["group-10"].steer.await_count == 2
             assert turns["private-1"].steer.await_count == 1
+            self.bot.call.assert_awaited_once_with(
+                "set_msg_emoji_like",
+                {"message_id": "1", "emoji_id": "124", "set": True},
+            )
             texts = [
                 call.args[0][0].text for call in turns["group-10"].steer.call_args_list
             ]

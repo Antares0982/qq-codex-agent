@@ -43,13 +43,18 @@ class Turns:
         self.images = Images(db, replies.bot, self.contexts)
 
     async def execute(self, message):
-        turn = context = steering = reminder = None
+        turn = context = steering = reminder = reaction = None
         thread = None
         started = time.monotonic()
         finished = asyncio.Event()
         submitted = []
         notices = []
         starting_turn = False
+        manual = (
+            message.text == "/compact"
+            and not message.images
+            and not message.unsupported
+        )
         try:
             async with asyncio.timeout(self.settings.task_timeout) as deadline:
                 account = await self.codex.account()
@@ -59,7 +64,10 @@ class Turns:
                     )
                     self.mark(message, "failed")
                     return
-                session = await self.prepare_session(message)
+                if "group_id" in message.target and not manual:
+                    reaction = asyncio.create_task(self.replies.react_message(message))
+                    await asyncio.sleep(0)
+                session = await self.prepare_session(message, manual)
                 if session is None:
                     return
                 thread_id, folder, inputs, manual, renewing = session
@@ -139,6 +147,9 @@ class Turns:
                 message, "任务失败，未自动重试。请检查登录状态、图片格式或服务日志。"
             )
         finally:
+            if reaction:
+                reaction.cancel()
+                await asyncio.gather(reaction, return_exceptions=True)
             if reminder:
                 reminder.cancel()
                 await asyncio.gather(reminder, return_exceptions=True)
@@ -158,17 +169,12 @@ class Turns:
             if thread is not None:
                 await self.runtime.release_thread(thread.id)
 
-    async def prepare_session(self, message):
+    async def prepare_session(self, message, manual):
         row = self.db.execute(
             "SELECT thread, folder, renew FROM sessions WHERE key=?",
             (message.key,),
         ).fetchone()
         thread_id, folder_name, requested = row if row else (None, uuid.uuid4().hex, 0)
-        manual = (
-            message.text == "/compact"
-            and not message.images
-            and not message.unsupported
-        )
         if manual and (not thread_id or requested):
             await self.replies.safe_send(message, "暂无可压缩的会话。")
             self.mark(message, "completed")
@@ -207,6 +213,7 @@ class Turns:
             )
 
     async def compact_manual(self, message, thread):
+        await self.replies.safe_send(message, "正在压缩上下文……")
         success = await self.runtime.compact(thread)
         await self.replies.safe_send(
             message,
@@ -217,18 +224,13 @@ class Turns:
     async def compact_idle(self, message, thread):
         tokens = await self.runtime.context_tokens(thread.id)
         if tokens is not None and tokens > IDLE_COMPACT_LIMIT:
-            await self.replies.safe_send(
-                message,
-                "超过两小时未互动，正在压缩上下文……",
-                intermediate=True,
-            )
+            await self.replies.safe_send(message, "正在压缩上下文……")
             await self.runtime.compact(thread)
 
     async def start_notices(self, context):
         message = context.message
         await self.replies.safe_send(message, "开始处理……", intermediate=True)
         if "group_id" in message.target:
-            context.tasks.add(asyncio.create_task(self.replies.react_message(message)))
             return asyncio.create_task(
                 self.replies.remind_group(message, asyncio.get_running_loop().time())
             )
@@ -249,7 +251,7 @@ class Turns:
                     log_text(event.payload),
                 )
             if event.method == "item/started":
-                self.show_progress(
+                await self.show_progress(
                     message, event.payload.item.root, shown_progress, notices
                 )
             elif event.method == "item/completed":
@@ -277,13 +279,19 @@ class Turns:
                     await steering
         return status, has_text
 
-    def show_progress(self, message, item, shown_progress, notices):
+    async def show_progress(self, message, item, shown_progress, notices):
         LOG.info(
             "Item started chat=%s type=%s item=%s",
             message.key,
             item.type,
             item.id,
         )
+        if item.type == "contextCompaction":
+            key = (item.type, item.id)
+            if key not in shown_progress:
+                shown_progress.add(key)
+                await self.replies.safe_send(message, "正在压缩上下文……")
+            return
         progress = {
             "commandExecution": "正在执行代码……",
             "imageGeneration": "正在生成图片……",

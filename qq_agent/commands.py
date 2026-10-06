@@ -10,14 +10,14 @@ HELP = """直接发送文字或图片，可提问、执行代码或请求生成�
 /help 查看用法
 /model 列出可选模型及本会话设置
 /model <模型ID> 切换本会话模型，下一轮请求生效
-/status 查看登录、任务状态、thread 标题及用户消息数
+/status 查看登录、任务状态、上下文长度及用户消息数
 /stop 停止本会话任务并清空队列
 /new 开启空白会话，保留工作文件、图片索引、模型选择及聊天偏好
 /compact 压缩当前会话上下文，执行任务时请稍后重试
 /profile 在当前群公开查看本人聊天偏好
 /profile forget 删除本人当前群偏好，后续仍可自动学习
 推理强度固定为 medium。模型选择在重启后保留。
-群聊发送图片、全部模型文字回复及记录聊天偏好时的小本本提示，不发送其他工具进度通知。
+群聊发送图片、全部模型文字回复、压缩提示及记录聊天偏好时的小本本提示，不发送其他工具进度通知。
 私聊与各群权限独立；群聊须获该群授权并 @ bot。同群共享会话和模型设置。
 不同聊天独立执行；处理中继续发送消息会追加到当前任务。"""
 
@@ -124,8 +124,13 @@ class Commands:
                     "SELECT thread FROM sessions WHERE key=? AND renew=0",
                     (message.key,),
                 ).fetchone()
-                details = "Thread 标题：尚未创建\n用户消息：0 条"
+                context = "0 tokens"
+                messages = "0 条"
                 if row and row[0]:
+                    usage = self.db.execute(
+                        "SELECT tokens FROM context_usage WHERE thread=?", (row[0],)
+                    ).fetchone()
+                    context = f"约 {usage[0]:,} tokens" if usage else "暂未知"
                     try:
                         async with asyncio.timeout(20):
                             result = await AsyncThread(self.codex, row[0]).read(
@@ -136,18 +141,18 @@ class Commands:
                             for turn in result.thread.turns
                             for item in turn.items
                         )
-                        title = result.thread.name or "未命名"
-                        details = f"Thread 标题：{title}\n用户消息：{count} 条"
+                        messages = f"{count} 条"
                     except Exception as error:
                         LOG.warning(
                             "Thread status failed chat=%s error=%s",
                             message.key,
                             log_text(error),
                         )
-                        details = "Thread 标题及用户消息数：暂时无法读取"
+                        messages = "暂时无法读取"
                 await self.safe_send(
                     message,
-                    f"{text}；本会话{'执行中' if busy else '空闲'}。\n{details}",
+                    f"{text}；本会话{'执行中' if busy else '空闲'}。\n"
+                    f"上下文：{context}\n用户消息：{messages}",
                 )
                 return
             if message.key in self.resetting:
