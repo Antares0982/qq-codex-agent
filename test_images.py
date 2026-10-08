@@ -307,13 +307,21 @@ class TestImages:
                 (self.message.key, "thread", self.folder.name),
             )
         cutoff = 2_000_000_000 - cleanup.FILE_RETENTION
+        skills = (
+            ".agents/skills/custom/SKILL.md",
+            ".agents/skills/custom/scripts/helper.py",
+            "project/.agents/skills/custom/references/guide.md",
+        )
         for name, times in {
             path: (cutoff - 1, cutoff - 1),
             "accessed": (cutoff + 1, cutoff - 1),
             "modified": (cutoff - 1, cutoff + 1),
             "boundary": (cutoff, cutoff),
+            ".agents/expired": (cutoff - 1, cutoff - 1),
+            **{name: (cutoff - 1, cutoff - 1) for name in skills},
         }.items():
             file = self.folder / name
+            file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(PNG)
             os.utime(file, times)
         outside = self.root / "outside"
@@ -336,6 +344,8 @@ class TestImages:
                 busy.clear()
             self.agent.cleanup.clean_files()
         assert not (self.folder / path).exists()
+        assert not (self.folder / ".agents/expired").exists()
+        assert all((self.folder / name).is_file() for name in skills)
         for name in ("accessed", "modified", "boundary", "link", "file-link", "pipe"):
             assert (self.folder / name).exists()
         assert protected.exists()

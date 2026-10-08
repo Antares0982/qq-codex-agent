@@ -10,7 +10,7 @@ from .agent import Agent
 from .auth_client import TokenClient, deny_request
 from .config import Settings
 from .onebot import OneBot
-from .runtime import codex_config, prepare_home
+from .runtime import codex_config, load_skills, prepare_home
 
 
 async def run(settings, login):
@@ -40,6 +40,7 @@ async def run(settings, login):
                 raise RuntimeError("Device login failed")
             print("设备码登录成功。")
             return
+        await load_skills(codex)
         bot = OneBot(settings)
         agent = Agent(settings, bot, codex)
         socket_path = settings.state_dir / "image.sock"

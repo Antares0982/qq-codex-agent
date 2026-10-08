@@ -26,9 +26,11 @@ class Cleanup:
             LOG.warning("Workspace cleanup failed error=%s", log_text(error))
 
         with workspace_directory(folder) as root:
-            for path, _, files, directory in os.fwalk(
+            for path, directories, files, directory in os.fwalk(
                 ".", follow_symlinks=False, dir_fd=root, onerror=report
             ):
+                if Path(path).name == ".agents":
+                    directories[:] = [name for name in directories if name != "skills"]
                 for name in files:
                     try:
                         info = os.stat(name, dir_fd=directory, follow_symlinks=False)

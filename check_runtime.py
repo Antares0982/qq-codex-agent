@@ -5,13 +5,62 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_cli_bin import bundled_codex_path
 from openai_codex import AsyncCodex
-from openai_codex.generated.v2_all import ThreadUnsubscribeResponse
+from openai_codex.generated.v2_all import SkillsListResponse, ThreadUnsubscribeResponse
 
 from check_sandbox import check_app_server_sandbox
+from qq_agent import runtime
 from qq_codex_agent import Settings, codex_config
+
+
+async def check_skills(codex, root, workspace):
+    assert runtime.BUILTIN_SKILLS.is_dir()
+    await runtime.load_skills(codex)
+    installed = await codex._client.request(
+        "skills/list",
+        {"cwds": [str(workspace)], "forceReload": True},
+        response_model=SkillsListResponse,
+    )
+    assert not installed.data[0].errors, installed.data[0].errors
+    assert any(
+        skill.name == "harness-maintenance" for skill in installed.data[0].skills
+    )
+    builtin = root / "builtin-skills"
+    other = root / "other-work"
+    other.mkdir()
+    for directory, name in (
+        (builtin, "qq-builtin-probe"),
+        (workspace / ".agents/skills", "qq-workspace-probe"),
+    ):
+        skill = directory / name / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            f"---\nname: {name}\ndescription: Runtime self-check only.\n---\n"
+            "Temporary discovery fixture.\n"
+        )
+    with patch.object(runtime, "BUILTIN_SKILLS", builtin):
+        await runtime.load_skills(codex)
+    result = await codex._client.request(
+        "skills/list",
+        {"cwds": [str(workspace), str(other)], "forceReload": True},
+        response_model=SkillsListResponse,
+    )
+    assert len(result.data) == 2
+    for entry in result.data:
+        assert not entry.errors, entry.errors
+        skills = {skill.name: skill for skill in entry.skills}
+        assert "qq-builtin-probe" in skills
+        assert ("qq-workspace-probe" in skills) == (entry.cwd == str(workspace))
+        assert (
+            Path(skills["qq-builtin-probe"].path.root)
+            .read_text()
+            .endswith("Temporary discovery fixture.\n")
+        )
+    await runtime.load_skills(codex)
+    print("Builtin and workspace skills discovered independently.")
 
 
 def check_permissions(root, settings):
@@ -95,6 +144,7 @@ async def main(sandbox=False):
         async with AsyncCodex(config=codex_config(settings)) as codex:
             account = await codex.account()
             assert account.account is None
+            await check_skills(codex, root, settings.workspace_dir)
             thread = await codex.thread_start(cwd=str(settings.workspace_dir))
             result = await codex._client.request(
                 "thread/unsubscribe",

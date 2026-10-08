@@ -4,16 +4,31 @@ import json
 import shutil
 import sys
 import time
+from pathlib import Path
 
 from openai_codex import ApprovalMode, CodexConfig, Sandbox
 from openai_codex.errors import JsonRpcError
-from openai_codex.generated.v2_all import ThreadUnsubscribeResponse, TurnStatus
+from openai_codex.generated.v2_all import (
+    SkillsExtraRootsSetResponse,
+    ThreadUnsubscribeResponse,
+    TurnStatus,
+)
 
 import image_tool
 
 from .images import IMAGE_INSTRUCTIONS
 from .logging import LOG, log_text
 from .profiles import MEMBER_INSTRUCTIONS
+
+BUILTIN_SKILLS = Path(__file__).with_name("skills")
+
+
+async def load_skills(codex):
+    await codex._client.request(
+        "skills/extraRoots/set",
+        {"extraRoots": [str(BUILTIN_SKILLS.resolve())]},
+        response_model=SkillsExtraRootsSetResponse,
+    )
 
 
 class Runtime:

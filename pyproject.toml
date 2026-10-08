@@ -41,3 +41,4 @@ packages = ["pics", "qq_agent"]
 
 [tool.setuptools.package-data]
 pics = ["*.png"]
+qq_agent = ["skills/**/*"]
