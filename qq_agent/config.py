@@ -29,6 +29,7 @@ class Settings:
     model: str | None = None
     auth_socket: Path | None = None
     resources_dir: Path | None = None
+    group_prompt_allow_members: bool = False
 
     def check_prompts(self, required=False):
         for key in ("agents_file", "private_agents_file", "group_agents_file"):
@@ -91,6 +92,8 @@ class Settings:
                 if not raw[key].is_absolute():
                     raise ValueError(f"{key} must be absolute")
         settings = cls(**raw)
+        if type(settings.group_prompt_allow_members) is not bool:
+            raise ValueError("group_prompt_allow_members must be boolean")
         url = urlsplit(settings.napcat_url)
         if (
             url.scheme != "ws"

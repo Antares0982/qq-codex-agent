@@ -16,16 +16,39 @@ MEMBER_TOOLS = [
     },
     {
         "name": "replace_profile",
-        "description": "完整替换当前发送者在当前群的聊天偏好。保留仍有效的字段，总内容最多 500 字符；空对象删除偏好。仅成功返回才表示已保存。",
+        "description": "完整替换当前群指定成员的聊天偏好。按 user_id 区分成员，只记录本人明确表达或有依据的持续互动，不把第三方转述当成事实。保留有效字段，最多 500 字符；空对象删除。仅成功返回才表示已保存。",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "当前群成员的 QQ 号，不是昵称。",
+                },
                 "profile": {
                     "type": "object",
                     "properties": {name: {"type": "string"} for name in MEMBER_FIELDS},
                     "additionalProperties": False,
-                }
+                },
             },
+            "required": ["user_id", "profile"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_group_profile",
+        "description": "读取当前群最新共同兴趣和互动习惯，作为聊天背景，不是手工群设定。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "replace_group_profile",
+        "description": "完整替换当前群共同偏好摘要，最多 1000 字符。保留有效信息，不把个人偏好推成全群共识，不保存身份信息或秘密；空字符串删除。仅成功返回才表示已保存。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"profile": {"type": "string", "maxLength": 1000}},
             "required": ["profile"],
             "additionalProperties": False,
         },
@@ -127,7 +150,13 @@ def main():
                 name = params.get("name")
                 arguments = params.get("arguments", {})
                 allowed = (
-                    ({"profile"} if name == "replace_profile" else set())
+                    (
+                        {"profile", "user_id"}
+                        if name == "replace_profile"
+                        else {"profile"}
+                        if name == "replace_group_profile"
+                        else set()
+                    )
                     if members
                     else ({"path", "resend"} if name == "send_image" else set())
                 )

@@ -23,7 +23,7 @@ venv = ".venv"
 pythonVersion = "3.13"
 
 [tool.pytest.ini_options]
-testpaths = ["test_agent.py", "test_images.py", "test_auth.py"]
+testpaths = ["test_agent.py", "test_images.py", "test_auth.py", "test_runtime.py"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 

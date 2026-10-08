@@ -42,7 +42,8 @@ class ImageTurn:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tasks: set = field(default_factory=set)
     profiles: list = field(default_factory=list)
-    profile_writable: bool = True
+    blocked_members: set[str] = field(default_factory=set)
+    group_writable: bool = True
 
 
 def parse_parts(segments, group, bot=None):

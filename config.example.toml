@@ -1,5 +1,6 @@
 private_users = []
 groups = {}
+group_prompt_allow_members = false
 napcat_url = "ws://127.0.0.1:3001"
 token_file = "/etc/qq-codex-agent/napcat-token"
 state_dir = "/var/lib/qq-codex-agent"

@@ -1,4 +1,6 @@
 import asyncio
+import time
+import unicodedata
 
 from openai_codex import AsyncThread
 from openai_codex.generated.v2_all import ReasoningEffort
@@ -16,6 +18,13 @@ HELP = """直接发送文字或图片，可提问、执行代码或请求生成�
 /compact 压缩当前会话上下文，执行任务时请稍后重试
 /profile 在当前群公开查看本人聊天偏好
 /profile forget 删除本人当前群偏好，后续仍可自动学习
+/prompt 查看当前群设定
+/prompt set <内容> 替换群设定，最多 4000 字符，下个独立任务生效
+/prompt clear 恢复默认群设定
+/group-profile 查看本群共同偏好
+/group-profile forget 清除本群共同偏好，后续仍可自动学习
+群设定修改和群记录清除默认仅授权群主、管理员可用，管理员可配置开放给全部授权成员。
+删除记录不清除旧聊天历史及 journal；/new 保留群设定和记录。
 推理强度固定为 medium。模型选择在重启后保留。
 群聊发送图片、全部模型文字回复、压缩提示及记录聊天偏好时的小本本提示，不发送其他工具进度通知。
 私聊与各群权限独立；群聊须获该群授权并 @ bot。同群共享会话和模型设置。
@@ -46,6 +55,84 @@ class Commands:
         self.resetting = resetting
         self.mark = mark
         self.cancel_chat = cancel_chat
+
+    async def group_control(self, message):
+        if "group_id" not in message.target:
+            await self.safe_send(message, "此指令仅群聊可用，请在群内 @ bot 使用。")
+            return
+        group = str(message.target["group_id"])
+        parts = message.text.split(maxsplit=2)
+        prompt = parts[0] == "/prompt"
+        if len(parts) == 1:
+            if prompt:
+                row = self.db.execute(
+                    "SELECT prompt FROM group_prompts WHERE group_id=?", (group,)
+                ).fetchone()
+                text = row[0] if row else "暂无自定义群设定。"
+            else:
+                text = self.profiles.group_profile(group) or "暂无群共同偏好。"
+            await self.safe_send(message, text)
+            return
+        if prompt and len(parts) == 3 and parts[1] == "set":
+            text = parts[2].strip()
+            if (
+                not text
+                or len(text) > 4000
+                or any(
+                    unicodedata.category(char).startswith("C") and char not in "\n\r\t"
+                    for char in text
+                )
+            ):
+                await self.safe_send(
+                    message, "群设定须为 1 至 4000 字符的文本，可换行。"
+                )
+                return
+        elif parts == ["/prompt", "clear"] or parts == ["/group-profile", "forget"]:
+            text = ""
+        else:
+            await self.safe_send(
+                message,
+                "用法：/prompt、/prompt set <内容>、/prompt clear。"
+                if prompt
+                else "用法：/group-profile 或 /group-profile forget。",
+            )
+            return
+        if not self.runtime.settings.group_prompt_allow_members:
+            try:
+                info = await self.profiles.member_info(group, message.sender_id)
+            except Exception as error:
+                LOG.warning(
+                    "Group role failed chat=%s error=%s", message.key, log_text(error)
+                )
+                await self.safe_send(message, "无法确认群管理权限，请稍后重试。")
+                return
+            if info.get("role") not in {"owner", "admin"}:
+                await self.safe_send(
+                    message, "仅可交互用户中的群主、管理员可执行此操作。"
+                )
+                return
+        with self.db:
+            if prompt:
+                if text:
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO group_prompts VALUES (?, ?, ?, ?)",
+                        (group, text, message.sender_id, time.time()),
+                    )
+                else:
+                    self.db.execute(
+                        "DELETE FROM group_prompts WHERE group_id=?", (group,)
+                    )
+            else:
+                self.db.execute("DELETE FROM group_profiles WHERE group_id=?", (group,))
+                context = self.profiles.contexts.get(message.key)
+                if context:
+                    context.group_writable = False
+        await self.safe_send(
+            message,
+            "保存成功"
+            if prompt
+            else "已删除本群共同偏好。旧聊天历史和 journal 仍保留，后续独立轮次可能重新形成偏好。",
+        )
 
     async def select_model(self, message):
         async with asyncio.timeout(20):
@@ -86,6 +173,9 @@ class Commands:
 
     async def control(self, message):
         try:
+            if message.text.split(maxsplit=1)[:1] in (["/prompt"], ["/group-profile"]):
+                await self.group_control(message)
+                return
             if message.text == "/compact":
                 busy = (
                     message.key in self.jobs

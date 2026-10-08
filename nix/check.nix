@@ -24,6 +24,7 @@ let
       agentsFile = "/custom/common.md";
       privateAgentsFile = "/custom/private.md";
       groupAgentsFile = "/custom/group.md";
+      groupPromptAllowMembers = true;
     };
   };
   mounts = config.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
@@ -42,6 +43,8 @@ let
   );
   requirementsFile = builtins.head (pkgs.lib.splitString ":" requirementsMount);
 in
+assert !config.services.qq-codex-agent.groupPromptAllowMembers;
+assert custom.services.qq-codex-agent.groupPromptAllowMembers;
 assert builtins.all (
   name:
   builtins.elem "${pkgs.emptyDirectory}/share/qq-codex-agent/${name}:/etc/qq-codex-agent/${name}" mounts
@@ -77,6 +80,7 @@ pkgs.runCommand "qq-codex-deployment-check"
     ):
         assert config[key] == f"/etc/qq-codex-agent/{name}"
     assert config["auth_socket"] == "/run/codex-auth/auth.sock"
+    assert config["group_prompt_allow_members"] is False
     requirements = tomllib.loads(Path(sys.argv[2]).read_text())
     assert requirements["allowed_approval_policies"] == ["on-request"]
     assert requirements["allowed_approvals_reviewers"] == ["auto_review"]

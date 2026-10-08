@@ -3,6 +3,10 @@ import contextlib
 import json
 import sqlite3
 
+import aiohttp
+
+from image_tool import MEMBER_TOOLS
+
 
 class ToolServer:
     def __init__(self, contexts, images, profiles, send):
@@ -31,14 +35,21 @@ class ToolServer:
                 context.tasks.add(task)
                 if request == {"action": "list_images"}:
                     response = self.images.list_images(context)
-                elif request.get("action") in {"list_profiles", "replace_profile"}:
-                    response = self.profiles.member_request(context, request)
+                elif request.get("action") in {tool["name"] for tool in MEMBER_TOOLS}:
+                    response = await self.profiles.member_request(context, request)
                     if request["action"] == "replace_profile" and any(
                         response["profile"].values()
                     ):
                         await self.safe_send(
                             context.message,
-                            f"📝正在给{context.message.sender_name}记进小本本……",
+                            f"📝正在给{response['display_name']}记进小本本……",
+                        )
+                    elif (
+                        request["action"] == "replace_group_profile"
+                        and response["profile"]
+                    ):
+                        await self.safe_send(
+                            context.message, "📝正在给本群记进小本本……"
                         )
                 elif (
                     isinstance(request, dict) and request.get("action") == "send_image"
@@ -52,6 +63,7 @@ class ToolServer:
                 RuntimeError,
                 TimeoutError,
                 sqlite3.Error,
+                aiohttp.ClientError,
             ) as error:
                 response = {"error": str(error)}
             writer.write((json.dumps(response) + "\n").encode())

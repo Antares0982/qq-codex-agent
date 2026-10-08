@@ -66,6 +66,7 @@ let
       task_timeout = 3600;
       auth_socket = cfg.authSocket;
       resources_dir = resources;
+      group_prompt_allow_members = cfg.groupPromptAllowMembers;
     }
     // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
   );
@@ -164,6 +165,11 @@ in
     package = lib.mkOption { type = lib.types.package; };
     allowlistFile = lib.mkOption { type = lib.types.str; };
     tokenFile = lib.mkOption { type = lib.types.str; };
+    groupPromptAllowMembers = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow all authorized group members to change group prompts and clear group memory.";
+    };
     authSocket = lib.mkOption {
       type = lib.types.str;
       default = "/run/codex-auth/auth.sock";

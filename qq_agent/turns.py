@@ -39,7 +39,7 @@ class Turns:
         self.resetting = resetting
         self.mark = mark
         self.contexts = {}
-        self.profiles = Profiles(db, self.contexts, replies.safe_send)
+        self.profiles = Profiles(db, self.contexts, replies.safe_send, replies.bot)
         self.images = Images(db, replies.bot, self.contexts)
 
     async def execute(self, message):
@@ -86,6 +86,10 @@ class Turns:
                     return
                 if renewing:
                     await self.compact_idle(message, thread)
+                if "group_id" in message.target:
+                    await self.runtime.update_group(
+                        thread, message, self.profiles, model
+                    )
                 with self.db:
                     self.db.execute(
                         "UPDATE activity SET thread_gen=? WHERE key=?",
@@ -421,9 +425,6 @@ class Turns:
                 continue
             if finished.is_set():
                 return
-            if "group_id" in message.target:
-                if message.sender_id != context.message.sender_id:
-                    context.profile_writable = False
             pending.popleft()
             submitted.append(message)
             self.mark(message, "running")

@@ -52,6 +52,11 @@ RPi 的共享服务和一次性 `codex-auth-import` 由 Nix 仓库维护；令�
 默认文件直接来自应用包，升级和回滚会同时切换代码与提示词。
 `agentsFile`、`privateAgentsFile`、`groupAgentsFile` 可分别指定覆盖文件的绝对路径。
 公共文件与私聊/群聊文件由应用注入相应 thread 的 developer instructions。
+群聊另使用简短基础提示词，群设定和记忆在每个独立 turn 前刷新。
+`services.qq-codex-agent.groupPromptAllowMembers` 默认 `false`，对应主配置
+`group_prompt_allow_members`：仅可交互用户中的群主、管理员能修改群设定或清除群共同记录；
+设为 `true` 后，所有可交互用户均可操作。查看仍对所有可交互用户开放。
+群提示词通过 `/prompt set <内容>` 设置，`/prompt clear` 恢复默认，下个独立 turn 生效。
 启动自检要求三份文件可读且非空，登录流程不要求 NapCat token 已准备完成。
 
 首次迁移前比较 Pi 上原有 `/etc/qq-codex-agent/AGENTS*.md` 与本仓库模板。
