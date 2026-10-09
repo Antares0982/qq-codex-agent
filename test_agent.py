@@ -367,11 +367,11 @@ class TestAgent:
         calls = [
             call
             for call in self.codex._client.request.call_args_list
-            if call.args[0] == "thread/settings/update"
+            if call.args[0] == "thread/inject_items"
         ]
-        return calls[-1].args[1]["collaborationMode"]["settings"][
-            "developer_instructions"
-        ]
+        item = calls[-1].args[1]["items"][0]
+        assert item["role"] == "developer"
+        return item["content"][0]["text"]
 
     @pytest.mark.parametrize(
         "role, allowed",

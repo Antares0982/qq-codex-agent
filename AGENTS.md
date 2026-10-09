@@ -52,7 +52,7 @@
 允许记录游戏、音乐、专业方向和本人主动提供、用于共同游戏的 Steam 公开标识；不记录真实姓名、私密联系方式、住址、证件、登录账号、凭据及其他敏感信息，不拼接现实身份线索。语义由模型规则约束，结构校验不能保证消除提示词注入或敏感内容。
 `/profile` 查看本人记录，`/profile forget` 删除并禁止当前活动任务写回该成员，不论其是否为任务发起者。`/group-profile` 查看群共同记录，`/group-profile forget` 清除并禁止当前任务写回，清除权限与群设定修改一致。后续独立轮次仍可重新学习；删除不清除旧 Codex 历史、旧提示词快照或 journal。不提供永久关闭记忆、跨群记忆或后台总结。
 `/prompt` 查看群设定，`/prompt set <内容>` 完整替换（允许多行，最多 4000 字符），`/prompt clear` 恢复默认。设置和清除成功只回复“保存成功”。主配置 `group_prompt_allow_members` 必须为 bool，默认 false：仅可交互用户中的群主、管理员能修改；true 时所有可交互用户均可修改。NapCat 群角色查询失败时拒绝修改。SQLite 的 `group_prompts` 按群保存设定、修改者和时间；所有设定及记录在重启、压缩和 `/new` 后保留。
-仅群聊使用应用提供的简短 `base_instructions`，保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。固定应用规则在新建及恢复时注入；每个独立 turn 开始前通过 `thread/settings/update` 的 `collaborationMode.settings.developer_instructions` 更新群设定及最新全群记忆，default 模式、实际模型及 medium。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前设定；保存的变更下个独立 turn 生效，历史保留。普通消息及 steering 不附加偏好文本。
+仅群聊使用应用提供的简短 `base_instructions`，保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。固定应用规则在新建及恢复时注入；每个独立 turn 开始前通过 `thread/inject_items` 注入 developer 消息，包含群设定及最新全群记忆，最新快照替代旧快照，清除时也注入空设定。不能借用 `collaborationMode.settings.developer_instructions`：模型目录中的协作模板会优先覆盖该字段。群 thread 开启 `features.retain_client_developer_messages`，使远程 v2 手动、轮前及轮中自动压缩保留客户端 developer 消息。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前设定；保存的变更下个独立 turn 生效，历史保留。普通消息及 steering 不附加偏好文本。
 
 需要 Python 3.13、uv，以及 PATH 中的 Node.js（供 Pyright 使用）。提交 `uv.lock`，使用配套锁定的官方 SDK 和 runtime。
 
@@ -68,7 +68,7 @@ Pyright 必须达到 0 errors，覆盖业务代码、测试和自检脚本；不
 
 `check_runtime.py` 使用临时、未登录的 Codex 状态目录，只验证启动和认证状态接口，不读取个人登录缓存，也不请求模型。
 `--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。
-测试模拟 OneBot、模型事件和图片响应。`test_runtime.py` 另用锁定 runtime、临时未登录状态目录及本地模拟 Responses 端点检查实际请求的提示词、历史、工具和技能，不调用真实模型。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
+测试模拟 OneBot、模型事件和图片响应。`test_runtime.py` 另用锁定 runtime、临时未登录状态目录及本地模拟 Responses 端点检查实际请求的提示词、历史、工具和技能，覆盖模型目录协作模板、设定替换和清除、重启恢复、远程手动及自动压缩、本地手动压缩后重新注入，不调用真实模型。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
 
 Codex 执行沙箱可能禁止测试所需的本地 Unix socket，导致 `test_member_socket`、`test_image_tool` 报 `PermissionError: [Errno 1] Operation not permitted`；跨线程异步测试也可能停在等待状态。遇到这些症状，应通过执行工具的提权审批在沙箱外重跑 pytest，或在本机终端运行上述命令，不要跳过测试或修改应用沙箱策略。若 uv 默认缓存目录只读，可设置 `UV_CACHE_DIR=/tmp/qq-pytest-uv`。
 

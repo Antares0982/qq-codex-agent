@@ -87,9 +87,7 @@ class Turns:
                 if renewing:
                     await self.compact_idle(message, thread)
                 if "group_id" in message.target:
-                    await self.runtime.update_group(
-                        thread, message, self.profiles, model
-                    )
+                    await self.runtime.update_group(thread, message, self.profiles)
                 with self.db:
                     self.db.execute(
                         "UPDATE activity SET thread_gen=? WHERE key=?",
