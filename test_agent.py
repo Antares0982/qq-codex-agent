@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+import sqlite3
 import sys
 import time
 from collections import deque
@@ -34,7 +35,7 @@ from qq_agent import onebot, replies
 from qq_agent.agent import Agent
 from qq_agent.config import Settings
 from qq_agent.images import IMAGE_INSTRUCTIONS
-from qq_agent.logging import LOG, log_text
+from qq_agent.logging import LOG, log_text, read_diagnostics, watch_diagnostics
 from qq_agent.messages import ImageTurn, parse_message
 from qq_agent.onebot import OneBot
 from qq_agent.profiles import MEMBER_INSTRUCTIONS
@@ -2026,7 +2027,11 @@ class TestAgent:
         failed.payload.turn.error = TurnError(
             message="HTTP 400 Bad Request", codex_error_info=None
         )
-        self.setup_turn([failed])
+        _, turn = self.setup_turn([failed])
+        turn.id = "turn1"
+        self.store_usage(191431)
+        with self.agent.db:
+            self.agent.db.execute("INSERT INTO models VALUES ('private-1', 'alpha')")
         with caplog.at_level("INFO", logger=LOG.name):
             self.agent.receive(event(text="测试消息"))
             await self.agent.turns.execute(self.agent.queue.get_nowait())
@@ -2034,7 +2039,99 @@ class TestAgent:
         assert "测试消息" in output
         assert "HTTP 400 Bad Request" in output
         assert "thread=test-thread" in output
+        assert "turn=turn1" in output
+        assert "model=alpha effort=medium context_tokens=191431" in output
         self.codex._client.request.assert_awaited_once()
+
+    async def test_request_diagnostics(self, caplog):
+        path = self.root / "runtime.sqlite"
+        db = sqlite3.connect(path)
+        db.execute(
+            "CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, thread_id TEXT, "
+            "target TEXT, feedback_log_body TEXT)"
+        )
+        response = (
+            "turn{turn.id=turn1 model=alpha}: Request completed method=POST "
+            "url=https://example.test/responses status=400 Bad Request "
+            'headers={"x-oai-request-id": "req_probe", "authorization": "secret", '
+            '"set-cookie": "secret"} payload=private-chat base64=YWJj'
+        )
+        db.execute(
+            "INSERT INTO logs VALUES (1, 123, 'thread1', ?, ?)",
+            ("codex_http_client::client", response),
+        )
+        db.commit()
+        cursor, records = read_diagnostics(path, None)
+        assert cursor == 1 and not records
+        db.executemany(
+            "INSERT INTO logs VALUES (?, 124, 'thread1', ?, ?)",
+            [
+                (2, "codex_http_client::client", response),
+                (
+                    3,
+                    "codex_http_client::request",
+                    "Compressed request body with zstd "
+                    "pre_compression_bytes=45000000 post_compression_bytes=31000000 "
+                    "compression_duration_ms=385 secret=private-chat",
+                ),
+                (4, "tool_output", response),
+                (5, "codex_http_client::request", "Compressed request body incomplete"),
+                (
+                    6,
+                    "codex_http_client::client",
+                    response.replace("/responses", "/models"),
+                ),
+            ],
+        )
+        db.commit()
+        cursor, records = read_diagnostics(path, cursor)
+        assert cursor == 6
+        assert records == [
+            {
+                "event": "response",
+                "log_id": 2,
+                "timestamp": 124,
+                "status": 400,
+                "thread": "thread1",
+                "turn": "turn1",
+                "model": "alpha",
+                "request_id": "req_probe",
+            },
+            {
+                "event": "compression",
+                "log_id": 3,
+                "timestamp": 124,
+                "pre_compression_bytes": 45000000,
+                "post_compression_bytes": 31000000,
+                "compression_duration_ms": 385,
+                "thread": "thread1",
+            },
+        ]
+        assert read_diagnostics(path, cursor) == (cursor, [])
+        db.close()
+        with (
+            caplog.at_level("INFO", logger=LOG.name),
+            patch(
+                "qq_agent.logging.read_diagnostics",
+                side_effect=[
+                    sqlite3.OperationalError("busy"),
+                    sqlite3.OperationalError("busy"),
+                    (cursor, records),
+                    asyncio.CancelledError(),
+                ],
+            ),
+            patch("qq_agent.logging.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await watch_diagnostics(self.settings.state_dir)
+        assert caplog.text.count("Codex diagnostics unavailable") == 1
+        assert caplog.text.count("Codex request diagnostic") == 2
+        for secret in ("secret", "private-chat", "YWJj", "authorization", "set-cookie"):
+            assert secret not in caplog.text
+        missing = self.root / "missing.sqlite"
+        with pytest.raises(sqlite3.OperationalError):
+            read_diagnostics(missing, None)
+        assert not missing.exists()
 
     def test_log_redaction(self):
         output = log_text(

@@ -94,6 +94,9 @@ class Turns:
                         (message.generation, message.key),
                     )
                 reminder = await self.start_notices(context)
+                usage = self.db.execute(
+                    "SELECT tokens FROM context_usage WHERE thread=?", (thread.id,)
+                ).fetchone()
                 starting_turn = True
                 turn = await thread.turn(
                     inputs,
@@ -103,11 +106,13 @@ class Turns:
                 )
                 starting_turn = False
                 LOG.info(
-                    "Turn started chat=%s message=%s thread=%s turn=%s",
+                    "Turn started chat=%s message=%s thread=%s turn=%s model=%s effort=medium context_tokens=%s",
                     message.key,
                     message.identifier,
                     thread.id,
                     getattr(turn, "id", "unknown"),
+                    model or "default",
+                    usage[0] if usage else "unknown",
                 )
                 if message.key in self.pending:
                     steering = asyncio.create_task(
@@ -266,9 +271,10 @@ class Turns:
             elif event.method == "turn/completed":
                 status = event.payload.turn.status
                 LOG.info(
-                    "Turn completed chat=%s thread=%s status=%s seconds=%.1f error=%s",
+                    "Turn completed chat=%s thread=%s turn=%s status=%s seconds=%.1f error=%s",
                     message.key,
                     thread.id,
+                    event.payload.turn.id,
                     status,
                     time.monotonic() - started,
                     log_text(getattr(event.payload.turn, "error", None)),

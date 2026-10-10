@@ -9,6 +9,7 @@ from openai_codex import AsyncCodex
 from .agent import Agent
 from .auth_client import TokenClient, deny_request
 from .config import Settings
+from .logging import watch_diagnostics
 from .onebot import OneBot
 from .runtime import codex_config, load_skills, prepare_home
 
@@ -58,6 +59,7 @@ async def run(settings, login):
             asyncio.create_task(bot.listen(agent.receive)),
             asyncio.create_task(agent.work()),
             asyncio.create_task(agent.cleanup.cleanup_files()),
+            asyncio.create_task(watch_diagnostics(settings.state_dir)),
             asyncio.create_task(stop.wait()),
         ]
         try:

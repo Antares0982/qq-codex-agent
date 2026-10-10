@@ -9,6 +9,7 @@ from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, TextInput
 from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
 
 from qq_agent.config import Settings
+from qq_agent.logging import read_diagnostics
 from qq_agent.messages import ImageTurn, Message
 from qq_agent.profiles import Profiles
 from qq_agent.runtime import GROUP_BASE_INSTRUCTIONS, Runtime, load_skills
@@ -21,10 +22,17 @@ async def test_runtime_prompts(tmp_path, mode):
     compactions = []
     local_compact = False
     tool_sent = False
+    diagnose_failure = False
 
     async def respond(request):
         nonlocal tool_sent
         body = await request.json()
+        if diagnose_failure:
+            return web.json_response(
+                {"detail": "Bad Request"},
+                status=400,
+                headers={"x-oai-request-id": "req_failure"},
+            )
         compacting = local_compact or any(
             item.get("type") == "compaction_trigger" for item in body["input"]
         )
@@ -87,6 +95,7 @@ async def test_runtime_prompts(tmp_path, mode):
         return web.Response(
             text="".join(f"data: {json.dumps(event)}\n\n" for event in events),
             content_type="text/event-stream",
+            headers={"x-oai-request-id": "req_probe"},
         )
 
     app = web.Application()
@@ -293,6 +302,35 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert metadata["compaction"]["phase"] == (
                     "pre_turn" if mode == "pre_turn" else "mid_turn"
                 )
+            if mode == "plain":
+                diagnose_failure = True
+                assert thread is not None
+                options, _ = await runtime.thread_options(message, workspace)
+                thread = await runtime.prepare_thread(
+                    message, thread.id, ImageTurn(message, workspace), options
+                )
+                turn = await thread.turn([TextInput("diagnostic probe")])
+                async for event in turn.stream():
+                    if event.method == "turn/completed":
+                        assert event.payload.turn.status == TurnStatus.failed
+                async with asyncio.timeout(10):
+                    while True:
+                        _, diagnostics = read_diagnostics(home / "logs_2.sqlite", 0)
+                        responses = [
+                            record
+                            for record in diagnostics
+                            if record["event"] == "response"
+                        ]
+                        if any(record["status"] == 400 for record in responses):
+                            break
+                        await asyncio.sleep(0.1)
+                assert {record["status"] for record in responses} == {200, 400}
+                failure = next(
+                    record for record in responses if record["status"] == 400
+                )
+                assert failure["request_id"] == "req_failure"
+                assert failure["thread"] == thread.id
+                assert failure["turn"] == turn.id
     finally:
         await codex.close()
         db.close()
