@@ -74,13 +74,16 @@ class OneBot:
         finally:
             self.pending.pop(echo, None)
 
-    async def send(self, message, text=None, image=None):
+    async def send(self, message, text=None, image=None, *, sticker=False):
         receipt = None
         if image is not None:
             segments = [
                 {
                     "type": "image",
-                    "data": {"file": "base64://" + base64.b64encode(image).decode()},
+                    "data": {
+                        "file": "base64://" + base64.b64encode(image).decode(),
+                        **({"sub_type": 1} if sticker else {}),
+                    },
                 }
             ]
             receipt = await self.call(

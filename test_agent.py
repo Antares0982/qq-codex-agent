@@ -1334,9 +1334,11 @@ class TestAgent:
             for _, name in replies.GROUP_REMINDERS
         ]
         for data in images:
-            assert len(data) < 120000
+            assert len(data) <= 110000
             with Image.open(io.BytesIO(data)) as picture:
-                picture.verify()
+                assert picture.format == "PNG"
+                alpha = picture.convert("RGBA").getchannel("A").histogram()
+                assert alpha[0] and sum(alpha[1:250]) and sum(alpha[250:])
         self.bot.send.reset_mock()
         _, turn = self.setup_turn([])
 
@@ -1366,10 +1368,8 @@ class TestAgent:
                 await self.agent.turns.execute(message)
             await asyncio.sleep(0.04)
         assert [
-            c.kwargs["image"]
-            for c in self.bot.send.call_args_list
-            if "image" in c.kwargs
-        ] == images[:count]
+            c.kwargs for c in self.bot.send.call_args_list if "image" in c.kwargs
+        ] == [{"image": data, "sticker": True} for data in images[:count]]
         if end == "failed":
             assert self.bot.send.call_args.kwargs["text"] == "哎呀！宕机了……"
 
@@ -2142,6 +2142,31 @@ class TestAgent:
         assert "\n" not in output
         assert "TimeoutError" in log_text(TimeoutError())
         assert "hidden" not in log_text("{'password': 'hidden value'}")
+
+    @pytest.mark.parametrize("sticker", (False, True))
+    async def test_send_image(self, sticker):
+        bot = OneBot(self.settings)
+        receipt = {"message_id": 42}
+        bot.call = AsyncMock(return_value=receipt)
+        message = parse_message(event(group=10), self.settings)
+        if sticker:
+            result = await bot.send(message, image=PNG, sticker=True)
+        else:
+            result = await bot.send(message, image=PNG)
+        assert result == receipt
+        data = {"file": "base64://" + base64.b64encode(PNG).decode()}
+        bot.call.assert_awaited_once_with(
+            "send_msg",
+            {
+                **message.target,
+                "message": [
+                    {
+                        "type": "image",
+                        "data": {**data, "sub_type": 1} if sticker else data,
+                    }
+                ],
+            },
+        )
 
     async def test_image_validation(self):
         bot = OneBot(self.settings)

@@ -55,6 +55,6 @@ class Replies:
             await asyncio.sleep(max(0, started + delay - loop.time()))
             try:
                 data = files("pics").joinpath(filename).read_bytes()
-                await self.bot.send(message, image=data)
+                await self.bot.send(message, image=data, sticker=True)
             except (OSError, RuntimeError, TimeoutError, aiohttp.ClientError):
                 LOG.warning("Group reminder delivery failed")
