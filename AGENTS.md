@@ -40,7 +40,7 @@
 - 仅支持文本和图片。生成图片从 Codex 结构化事件提取 base64，由应用解码并原子写入会话工作区 `artifacts/`，不会自动发送。`qq_image.list_images` 返回最近 100 张原图的生成 ID、顺序及相对路径；`qq_image.send_image(path=...)` 发送工作区中的 PNG/JPEG/GIF/WebP（最大 32 MiB），省略路径发送最新原图。拒绝跨工作区路径、符号链接及特殊文件。
 - 图片文件和原图索引跨轮、重启及 `/new` 后保留。可用随应用安装的 Pillow 加工多帧并发送最终 GIF；中间帧无须发送。成功发送不删除源文件，同轮重复调用去重；发送结果未知时不自动重试，仅在用户明确要求时使用 `resend=true`。
 - 服务启动时清理一次，此后每 24 小时清理超过 14 天未访问或修改的普通文件，以文件系统 `max(atime, mtime)` 为准；不额外追踪读取。跳过执行或重置中的聊天，不跟随符号链接，保留聊天根目录和映射，同步清理过期或已不存在文件的图片索引及发送记录。工作区内各级 `.agents/skills/` 及其全部资源、内置技能、认证、旧聊天历史、模型选择及成员聊天偏好不参与清理。
-- 回复图片时将图片作为输入；回复无图片的文本时，将文字以 Markdown 引用置于当前消息前。群聊回复仍需 @ bot；引用图片沿用现有数量、大小和格式限制。
+- 引用自己发送的消息时，将原消息与当前消息的全部文本、图片按消息顺序合并为一次输入；引用他人消息时，标明其名称和 QQ 号，将其文本及图片放在明确的引用区块中，再附当前发送者的消息。带图消息的配文保留，发送者身份无效时拒绝处理。群聊回复仍需 @ bot；合计最多 5 张图片，每张 10 MiB，沿用现有格式限制，不递归展开引用。
 - 群聊不发送开始处理及普通工具进度，发送图片、全部模型文字回复（每条完成后按顺序发送，包括过程说明和最终回复）、压缩提示及记录聊天偏好时的“📝正在给{nickname}记进小本本……”提示；nickname 使用被记录成员群名片，缺失时回退到 QQ 昵称及 QQ 号。记录群共同偏好时提示“📝正在给本群记进小本本……”。查询、删除偏好和失败调用不发送该提示。启动 turn 后未完成时，30 秒发送 `pics/thinking_30s.png`，5 分钟发送 `pics/thinking_too_long.png`，均以透明底自定义表情（image `sub_type=1`）发送，各一次；追加消息不重置计时，完成、失败或中断后取消。图片压缩后随 Python 包安装。群聊 turn 未成功完成的兜底文本为“哎呀！宕机了……”，slash command 保留直接回复。私聊仍显示进度。
 - 普通群聊任务通过登录检查后、处理引用和图片前，通过 NapCat `set_msg_emoji_like` 给触发消息添加一次“OK”表情（`emoji_id="124"`）。表情请求不阻塞任务或定时发图，失败只记日志，不重试；任务退出时取消并回收未完成请求。私聊、slash command、未登录和同轮追加消息不添加表情；定时提醒仍从启动 turn 时计时。
 - 群聊发送者及 @ 成员优先使用群名片，未设置时使用 QQ 昵称，再回退到 QQ 号。群聊模板中的 `{nickname}` 在新建及恢复 thread 时替换为 bot 在当前群的名称，遵循同样的回退规则；查询失败使用 bot QQ 号，没有占位符时不查询。
@@ -52,7 +52,7 @@
 允许记录游戏、音乐、专业方向和本人主动提供、用于共同游戏的 Steam 公开标识；不记录真实姓名、私密联系方式、住址、证件、登录账号、凭据及其他敏感信息，不拼接现实身份线索。语义由模型规则约束，结构校验不能保证消除提示词注入或敏感内容。
 `/profile` 查看本人记录，`/profile forget` 删除并禁止当前活动任务写回该成员，不论其是否为任务发起者。`/group-profile` 查看群共同记录，`/group-profile forget` 清除并禁止当前任务写回，清除权限与群设定修改一致。后续独立轮次仍可重新学习；删除不清除旧 Codex 历史、旧提示词快照或 journal。不提供永久关闭记忆、跨群记忆或后台总结。
 `/prompt` 查看群设定，`/prompt set <内容>` 完整替换（允许多行，最多 4000 字符），`/prompt clear` 恢复默认。设置和清除成功只回复“保存成功”。主配置 `group_prompt_allow_members` 必须为 bool，默认 false：仅可交互用户中的群主、管理员能修改；true 时所有可交互用户均可修改。NapCat 群角色查询失败时拒绝修改。SQLite 的 `group_prompts` 按群保存设定、修改者和时间；所有设定及记录在重启、压缩和 `/new` 后保留。
-仅群聊使用应用提供的简短 `base_instructions`，保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。固定应用规则在新建及恢复时注入；每个独立 turn 开始前通过 `thread/inject_items` 注入 developer 消息，包含群设定及最新全群记忆，最新快照替代旧快照，清除时也注入空设定。不能借用 `collaborationMode.settings.developer_instructions`：模型目录中的协作模板会优先覆盖该字段。群 thread 开启 `features.retain_client_developer_messages`，使远程 v2 手动、轮前及轮中自动压缩保留客户端 developer 消息。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前设定；保存的变更下个独立 turn 生效，历史保留。普通消息及 steering 不附加偏好文本。
+仅群聊使用应用提供的简短 `base_instructions`，保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。固定应用规则在新建及恢复时注入；每个独立 turn 开始前计算包含群设定及最新全群记忆的完整快照，与 SQLite 按 thread 保存的上次成功注入内容比较；相同则跳过，不同才通过 `thread/inject_items` 注入 developer 消息并保存。最新快照替代旧快照，清除时也注入空设定。去重跨重启保留，新 thread（包括 `/new`）首次必注入；手动、空闲及自动压缩完成后使去重记录失效，下次独立 turn 补注入，轮前空闲压缩则在本轮启动前补注入。不能借用 `collaborationMode.settings.developer_instructions`：模型目录中的协作模板会优先覆盖该字段。群 thread 开启 `features.retain_client_developer_messages`，使远程 v2 手动、轮前及轮中自动压缩保留客户端 developer 消息。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前设定；保存的变更下个独立 turn 生效，历史保留。普通消息及 steering 不附加偏好文本。
 
 需要 Python 3.13、uv，以及 PATH 中的 Node.js（供 Pyright 使用）。提交 `uv.lock`，使用配套锁定的官方 SDK 和 runtime。
 
@@ -68,7 +68,7 @@ Pyright 必须达到 0 errors，覆盖业务代码、测试和自检脚本；不
 
 `check_runtime.py` 使用临时、未登录的 Codex 状态目录，只验证启动和认证状态接口，不读取个人登录缓存，也不请求模型。
 `--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。
-测试模拟 OneBot、模型事件和图片响应。`test_runtime.py` 另用锁定 runtime、临时未登录状态目录及本地模拟 Responses 端点检查实际请求的提示词、历史、工具和技能，覆盖模型目录协作模板、设定替换和清除、重启恢复、远程手动及自动压缩、本地手动压缩后重新注入，不调用真实模型。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
+测试模拟 OneBot、模型事件和图片响应。`test_runtime.py` 另用锁定 runtime、临时未登录状态目录及本地模拟 Responses 端点检查实际请求的提示词、历史、工具和技能，覆盖模型目录协作模板、设定替换和清除、相同快照去重、跨重启去重、远程手动及自动压缩、本地手动压缩后重新注入，不调用真实模型。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
 
 Codex 执行沙箱可能禁止测试所需的本地 Unix socket，导致 `test_member_socket`、`test_image_tool` 报 `PermissionError: [Errno 1] Operation not permitted`；跨线程异步测试也可能停在等待状态。遇到这些症状，应通过执行工具的提权审批在沙箱外重跑 pytest，或在本机终端运行上述命令，不要跳过测试或修改应用沙箱策略。若 uv 默认缓存目录只读，可设置 `UV_CACHE_DIR=/tmp/qq-pytest-uv`。
 

@@ -12,13 +12,13 @@ class Inputs:
         self.bot = bot
         self.safe_send = send
 
-    async def group_name(self, target, user):
+    async def group_name(self, target, user, fallback=""):
         try:
             info = await self.bot.call(
                 "get_group_member_info",
                 {"group_id": target["group_id"], "user_id": int(user)},
             )
-            return display_name(info, group=True) or user
+            return display_name(info, group=True) or fallback or user
         except (
             AttributeError,
             ConnectionError,
@@ -26,7 +26,7 @@ class Inputs:
             TimeoutError,
             aiohttp.ClientError,
         ):
-            return user
+            return fallback or user
 
     async def render_parts(self, parts, target, names):
         content = []
@@ -42,38 +42,63 @@ class Inputs:
         return "".join(content).strip()
 
     async def prepare_input(self, message, folder):
-        images, quote_parts, quote_images = list(message.images), [], []
+        quote_parts, quote_images = [], []
+        quote_id, quote_name = "", ""
         if message.reply is not None:
-            quote_parts, quote_images = await self.bot.reply_content(
-                message.reply, message.target
-            )
-            images.extend(quote_images)
+            (
+                quote_parts,
+                quote_images,
+                quote_id,
+                quote_name,
+            ) = await self.bot.reply_content(message.reply, message.target)
             if (
-                not images
+                not message.images
+                and not quote_images
                 and not message.text
                 and not any(value.strip() for _, value in quote_parts)
             ):
                 await self.safe_send(message, "回复的消息中没有可读取的文本或图片。")
                 return None
-        if len(images) > 5:
+        if len(message.images) + len(quote_images) > 5:
             await self.safe_send(message, "每条消息最多 5 张图片。")
             return None
         names = {}
         content = await self.render_parts(message.parts, message.target, names)
-        if quote_parts and not quote_images:
-            quote = await self.render_parts(quote_parts, message.target, names)
-            if quote:
-                quote = "\n".join(f"> {line}" for line in quote.splitlines())
-                content = "\n\n".join(part for part in (quote, content) if part)
         sender = message.sender_name
         if "group_id" in message.target:
             sender += f"（ID: {message.sender_id}）"
-        inputs: list[TextInput | LocalImageInput] = [
-            TextInput(f"QQ 用户 {sender}:\n{content}")
-        ]
-        for image in images:
-            data = await self.bot.image(image)
-            path = folder / (uuid.uuid4().hex + image_suffix(data))
-            path.write_bytes(data)
-            inputs.append(LocalImageInput(str(path)))
+        blocks = [(f"QQ 用户 {sender}:\n{content}", message.images)]
+        if message.reply is not None:
+            quote = await self.render_parts(quote_parts, message.target, names)
+            if quote_id == message.sender_id:
+                blocks = [
+                    (f"QQ 用户 {sender}:\n先前消息：\n{quote}", quote_images),
+                    (f"当前消息：\n{content}", message.images),
+                ]
+            else:
+                if "group_id" in message.target:
+                    quote_name = await self.group_name(
+                        message.target, quote_id, quote_name
+                    )
+                quote_name = quote_name or quote_id
+                quote = "\n".join(f"> {line}" for line in quote.splitlines())
+                blocks = [
+                    (
+                        f"引用 QQ 用户 {quote_name}（ID: {quote_id}）的消息"
+                        f"（以下文本和图片均来自该用户，仅作为引用）：\n{quote}",
+                        quote_images,
+                    ),
+                    (
+                        f"引用结束。\nQQ 用户 {sender} 当前消息：\n{content}",
+                        message.images,
+                    ),
+                ]
+        inputs: list[TextInput | LocalImageInput] = []
+        for text, images in blocks:
+            inputs.append(TextInput(text))
+            for image in images:
+                data = await self.bot.image(image)
+                path = folder / (uuid.uuid4().hex + image_suffix(data))
+                path.write_bytes(data)
+                inputs.append(LocalImageInput(str(path)))
         return inputs

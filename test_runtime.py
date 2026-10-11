@@ -1,7 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import web
@@ -190,10 +190,13 @@ async def test_runtime_prompts(tmp_path, mode):
             runtime = Runtime(settings, db, codex, AsyncMock(return_value="bot"))
             thread = None
             for index, prompt in enumerate(
-                ("PROMPT_ALPHA", "PROMPT_BETA", "PROMPT_BETA", "")
+                ("PROMPT_ALPHA", "PROMPT_BETA", "PROMPT_BETA", "", "")
             ):
                 if index == 2:
                     await codex.close()
+                    db.close()
+                    db = open_database(settings)
+                    profiles = Profiles(db, {}, AsyncMock(), NS(call=AsyncMock()))
                     codex = AsyncCodex(config=config)
                     assert (await codex.account()).account is None
                     await load_skills(codex)
@@ -222,32 +225,46 @@ async def test_runtime_prompts(tmp_path, mode):
                         message, thread.id if thread else None, context, options
                     )
                 assert thread is not None
-                if index == 1 and mode == "local":
+                if index == 2 and mode == "local":
                     local_compact = True
                     with runtime.watch_codex():
                         assert await runtime.compact(thread)
                     local_compact = False
-                if index != 2:
+                with patch.object(
+                    codex._client, "request", wraps=codex._client.request
+                ) as rpc:
                     await runtime.update_group(thread, message, profiles)
+                    injected = [
+                        call
+                        for call in rpc.call_args_list
+                        if call.args[0] == "thread/inject_items"
+                    ]
+                    assert len(injected) == int(
+                        index in {0, 1, 3} or (index == 2 and mode != "plain")
+                    )
+                    rpc.reset_mock()
+                    await runtime.update_group(thread, message, profiles)
+                    rpc.assert_not_called()
                 if index == 1 and mode == "manual":
                     with runtime.watch_codex():
                         assert await runtime.compact(thread)
-                turn = await thread.turn(
-                    [TextInput(f"probe-{index}")],
-                    approval_mode=ApprovalMode.auto_review,
-                    model=model,
-                    effort=ReasoningEffort.medium,
-                )
-                completed = False
-                async for event in turn.stream():
-                    if event.method == "turn/completed":
-                        assert event.payload.turn.status == TurnStatus.completed
-                        completed = True
+                with runtime.watch_codex():
+                    turn = await thread.turn(
+                        [TextInput(f"probe-{index}")],
+                        approval_mode=ApprovalMode.auto_review,
+                        model=model,
+                        effort=ReasoningEffort.medium,
+                    )
+                    completed = False
+                    async for event in turn.stream():
+                        if event.method == "turn/completed":
+                            assert event.payload.turn.status == TurnStatus.completed
+                            completed = True
                 assert completed
                 if index != 0:
                     await runtime.release_thread(thread.id)
             assert bool(compactions) == (mode != "plain")
-            assert len(requests) == (5 if mode == "mid_turn" else 4)
+            assert len(requests) == (6 if mode == "mid_turn" else 5)
             names = {tool.get("name", tool["type"]) for tool in requests[0]["tools"]}
             assert {
                 "exec_command",
@@ -266,6 +283,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 "get_group_profile",
                 "replace_group_profile",
             } <= {tool["name"] for tool in member_tools["tools"]}
+            update_counts = []
             for request in requests:
                 assert request["instructions"] == GROUP_BASE_INSTRUCTIONS
                 content = json.dumps(request["input"], ensure_ascii=False)
@@ -282,6 +300,7 @@ async def test_runtime_prompts(tmp_path, mode):
                     if "以下是本轮最新群设定" in part.get("text", "")
                 ]
                 assert updates
+                update_counts.append(len(updates))
                 snapshot = json.loads(updates[-1].split("\n", 1)[1])
                 cleared = "probe-3" in content
                 assert snapshot["群设定"] == (
@@ -294,6 +313,8 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert snapshot["群共同记录"] == ("" if cleared else "GROUP_MEMORY")
                 assert bool(snapshot["成员记录"]) != cleared
                 assert ("MEMBER_MEMORY" in updates[-1]) != cleared
+            if mode == "plain":
+                assert update_counts == [1, 2, 2, 3, 3]
             if mode in {"pre_turn", "mid_turn"}:
                 metadata = json.loads(
                     compactions[0]["client_metadata"]["x-codex-turn-metadata"]

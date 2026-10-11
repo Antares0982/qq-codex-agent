@@ -65,6 +65,7 @@ class Runtime:
                 "thread/tokenUsage/updated",
                 "turn/started",
                 "turn/completed",
+                "item/completed",
                 "error",
             }:
                 loop.call_soon_threadsafe(deliver, event)
@@ -79,6 +80,13 @@ class Runtime:
     def observe_codex(self, event):
         payload = event.payload
         thread_id = getattr(payload, "thread_id", None)
+        if event.method == "item/completed":
+            if payload.item.root.type == "contextCompaction":
+                with self.db:
+                    self.db.execute(
+                        "DELETE FROM group_snapshots WHERE thread=?", (thread_id,)
+                    )
+            return
         if event.method == "thread/tokenUsage/updated":
             tokens = payload.token_usage.last.total_tokens
             with self.db:
@@ -287,8 +295,14 @@ class Runtime:
                     "成员记录": profiles.recall_profiles(message),
                 },
                 ensure_ascii=False,
+                sort_keys=True,
             )
         )
+        previous = self.db.execute(
+            "SELECT instructions FROM group_snapshots WHERE thread=?", (thread.id,)
+        ).fetchone()
+        if previous and previous[0] == instructions:
+            return
         await self.codex._client.request(
             "thread/inject_items",
             {
@@ -303,6 +317,11 @@ class Runtime:
             },
             response_model=ThreadInjectItemsResponse,
         )
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO group_snapshots VALUES (?, ?)",
+                (thread.id, instructions),
+            )
 
 
 def prepare_home(settings):

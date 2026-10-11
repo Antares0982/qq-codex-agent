@@ -13,7 +13,7 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from openai_codex import ApprovalMode, AsyncThread, LocalImageInput
+from openai_codex import ApprovalMode, AsyncThread, LocalImageInput, TextInput
 from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
@@ -101,7 +101,7 @@ class TestAgent:
             call=AsyncMock(return_value={}),
             send=AsyncMock(),
             image=AsyncMock(return_value=PNG),
-            reply_content=AsyncMock(return_value=([], [])),
+            reply_content=AsyncMock(return_value=([], [], "1", "1")),
         )
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
         self.codex._client = NS(
@@ -462,9 +462,103 @@ class TestAgent:
             dynamic = json.loads(self.group_instructions().split("\n", 1)[1])
             assert dynamic["群设定"] == prompt
         assert thread.turn.await_count == 3
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO group_prompts VALUES ('10', 'changed', '1', 0)"
+            )
         self.codex._client.request.side_effect = RuntimeError("update failed")
         await self.agent.turns.execute(message)
         assert thread.turn.await_count == 3
+
+    async def test_snapshot_dedup(self):
+        thread, _ = self.setup_turn([turn_done()])
+        message = parse_message(event(group=10), self.settings)
+
+        def injections():
+            return sum(
+                call.args[0] == "thread/inject_items"
+                for call in self.codex._client.request.call_args_list
+            )
+
+        for _ in range(2):
+            await self.agent.turns.execute(message)
+        assert injections() == 1
+        self.agent.db.close()
+        self.agent = Agent(self.settings, self.bot, self.codex)
+        await self.agent.turns.execute(message)
+        assert injections() == 1
+        for prompt in ("first", "second", "first", ""):
+            with self.agent.db:
+                self.agent.db.execute(
+                    "INSERT OR REPLACE INTO group_prompts VALUES ('10', ?, '1', 0)",
+                    (prompt,),
+                )
+            before = injections()
+            await self.agent.turns.execute(message)
+            await self.agent.turns.execute(message)
+            assert injections() == before + 1
+        for statement in (
+            "INSERT INTO group_profiles VALUES ('10', '音乐', 0)",
+            "INSERT INTO member_profiles VALUES ('10', '2', 'Other', '{}', 0)",
+            "UPDATE member_profiles SET display_name='Renamed'",
+            "DELETE FROM member_profiles",
+            "DELETE FROM group_profiles",
+        ):
+            with self.agent.db:
+                self.agent.db.execute(statement)
+            before = injections()
+            await self.agent.turns.execute(message)
+            assert injections() == before + 1
+        before = injections()
+        with self.agent.db:
+            self.agent.db.execute("UPDATE group_prompts SET prompt='retry'")
+        old = self.agent.db.execute("SELECT * FROM group_snapshots").fetchall()
+        with patch.object(
+            self.codex._client, "request", side_effect=RuntimeError("failed")
+        ):
+            await self.agent.turns.execute(message)
+        assert self.agent.db.execute("SELECT * FROM group_snapshots").fetchall() == old
+        await self.agent.turns.execute(message)
+        assert injections() == before + 1
+        before = injections()
+        await self.agent.commands.control(
+            parse_message(event(group=10, text="/new"), self.settings)
+        )
+        thread.id = "new-thread"
+        await self.agent.turns.execute(message)
+        assert injections() == before + 1
+        assert self.agent.db.execute(
+            "SELECT COUNT(*) FROM group_snapshots"
+        ).fetchone() == (2,)
+
+    async def test_snapshot_compaction(self):
+        from openai_codex._message_router import MessageRouter
+
+        router = MessageRouter()
+        self.codex._client._sync = NS(_router=router)
+        self.setup_turn([turn_done()])
+        message = parse_message(event(group=10), self.settings)
+        await self.agent.turns.execute(message)
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT INTO group_snapshots VALUES ('other', 'keep')"
+            )
+        item = ThreadItem.model_validate({"type": "contextCompaction", "id": "compact"})
+        with self.agent.runtime.watch_codex():
+            await asyncio.to_thread(
+                router.route_notification,
+                cast(Notification, item_done(item.root)),
+            )
+            await asyncio.sleep(0)
+        assert self.agent.db.execute("SELECT * FROM group_snapshots").fetchall() == [
+            ("other", "keep")
+        ]
+        self.agent.db.close()
+        self.agent = Agent(self.settings, self.bot, self.codex)
+        await self.agent.turns.execute(message)
+        assert (
+            len(self.agent.db.execute("SELECT * FROM group_snapshots").fetchall()) == 2
+        )
 
     async def test_other_member(self):
         context = self.member_context()
@@ -1174,7 +1268,12 @@ class TestAgent:
 
     async def test_reply_image(self):
         self.setup_turn([turn_done()])
-        self.bot.reply_content.return_value = ([("text", "caption")], ["quoted-image"])
+        self.bot.reply_content.return_value = (
+            [("text", "caption")],
+            ["quoted-image"],
+            "1",
+            "1",
+        )
         message = parse_message(
             event(group=10, text="解释图片", reply="42"), self.settings
         )
@@ -1182,7 +1281,8 @@ class TestAgent:
         self.bot.reply_content.assert_awaited_once_with("42", {"group_id": 10})
         self.bot.image.assert_awaited_once_with("quoted-image")
         inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert inputs[0].text == "QQ 用户 1（ID: 1）:\n解释图片"
+        assert inputs[0].text == "QQ 用户 1（ID: 1）:\n先前消息：\ncaption"
+        assert inputs[2].text == "当前消息：\n解释图片"
         assert isinstance(inputs[1], LocalImageInput)
 
     async def test_reply_text(self):
@@ -1190,6 +1290,8 @@ class TestAgent:
         self.bot.reply_content.return_value = (
             [("text", "第一行\n"), ("at", "2"), ("text", " 第二行")],
             [],
+            "1",
+            "1",
         )
         self.bot.call = AsyncMock(return_value={"card": "小明", "nickname": "QQ昵称"})
         message = parse_message(
@@ -1199,29 +1301,88 @@ class TestAgent:
         inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
         assert (
             inputs[0].text
-            == "QQ 用户 1（ID: 1）:\n> 第一行\n> @小明（ID: 2） 第二行\n\n你怎么看？"
+            == "QQ 用户 1（ID: 1）:\n先前消息：\n第一行\n@小明（ID: 2） 第二行"
         )
         self.bot.call.assert_any_await(
             "get_group_member_info", {"group_id": 10, "user_id": 2}
         )
-        self.bot.reply_content.return_value = ([("text", "只有引用")], [])
+        self.bot.reply_content.return_value = ([("text", "只有引用")], [], "1", "1")
         await self.agent.turns.execute(
             parse_message(event(group=10, text="", reply="42"), self.settings)
         )
         inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert inputs[0].text == "QQ 用户 1（ID: 1）:\n> 只有引用"
-        self.bot.reply_content.return_value = ([("text", "私聊引用")], [])
+        assert inputs[0].text == "QQ 用户 1（ID: 1）:\n先前消息：\n只有引用"
+        self.bot.reply_content.return_value = ([("text", "私聊引用")], [], "1", "1")
         await self.agent.turns.execute(
             parse_message(event(text="继续", reply="42"), self.settings)
         )
         inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert inputs[0].text == "QQ 用户 1:\n> 私聊引用\n\n继续"
+        assert inputs[0].text == "QQ 用户 1:\n先前消息：\n私聊引用"
+        assert inputs[1].text == "当前消息：\n继续"
 
     async def test_empty_reply(self):
         message = parse_message(event(group=10, text="", reply="42"), self.settings)
         await self.agent.turns.execute(message)
         assert "没有可读取" in self.bot.send.call_args.kwargs["text"]
         assert not hasattr(self.codex, "thread_start")
+
+    @pytest.mark.parametrize("group", (10, None))
+    @pytest.mark.parametrize("own", (True, False))
+    @pytest.mark.parametrize("pictures", (0, 2, 3))
+    async def test_reply_blocks(self, group, own, pictures):
+        message = parse_message(
+            event(group=group, text="当前配文", reply="42"), self.settings
+        )
+        message.sender_name = "同名"
+        message.images = [f"current-{index}" for index in range(pictures)]
+        quoted = [f"quoted-{index}" for index in range(pictures)]
+        self.bot.reply_content.return_value = (
+            [("text", "引用配文\n第二行")],
+            quoted,
+            "1" if own else "2",
+            "同名",
+        )
+        self.bot.call.return_value = {"card": "同名", "nickname": "昵称"}
+        inputs = await self.agent.turns.inputs.prepare_input(message, self.root)
+        if pictures == 3:
+            assert inputs is None
+            self.bot.image.assert_not_awaited()
+            assert "最多 5 张" in self.bot.send.call_args.kwargs["text"]
+            return
+        assert inputs is not None
+        assert len(inputs) == 2 + pictures * 2
+        quote, current = inputs[0], inputs[pictures + 1]
+        assert isinstance(quote, TextInput)
+        assert isinstance(current, TextInput)
+        assert "引用配文" in quote.text
+        if own:
+            assert "先前消息" in quote.text
+            assert "引用 QQ 用户" not in quote.text
+        else:
+            assert "引用 QQ 用户 同名（ID: 2）" in quote.text
+            assert "> 引用配文\n> 第二行" in quote.text
+            assert "引用结束" in current.text
+        assert "当前消息：\n当前配文" in current.text
+        assert [call.args[0] for call in self.bot.image.call_args_list] == (
+            quoted + message.images
+        )
+        assert all(
+            isinstance(item, LocalImageInput)
+            for item in inputs[1 : pictures + 1] + inputs[pictures + 2 :]
+        )
+
+    @pytest.mark.parametrize("fallback", ("引用昵称", ""))
+    async def test_quote_fallback(self, fallback):
+        message = parse_message(event(group=10, text="", reply="42"), self.settings)
+        self.bot.reply_content.return_value = ([], ["photo"], "2", fallback)
+        self.bot.call.side_effect = ConnectionError("offline")
+        inputs = await self.agent.turns.inputs.prepare_input(message, self.root)
+        assert inputs is not None
+        assert isinstance(inputs[0], TextInput)
+        assert isinstance(inputs[2], TextInput)
+        assert f"引用 QQ 用户 {fallback or '2'}（ID: 2）" in inputs[0].text
+        assert isinstance(inputs[1], LocalImageInput)
+        assert "引用结束" in inputs[2].text
 
     @pytest.mark.parametrize("group", (10, None))
     async def test_idle_notice(self, group):
@@ -2188,6 +2349,7 @@ class TestAgent:
             return_value={
                 "message_type": "group",
                 "group_id": 10,
+                "sender": {"user_id": 2, "card": "群名片", "nickname": "昵称"},
                 "message": [
                     {"type": "text", "data": {"text": "caption"}},
                     {"type": "at", "data": {"qq": "2"}},
@@ -2198,15 +2360,59 @@ class TestAgent:
         assert await bot.reply_content("42", {"group_id": 10}) == (
             [("text", "caption"), ("at", "2")],
             ["image-id"],
+            "2",
+            "群名片",
         )
         bot.call.return_value["message"].pop()
         assert await bot.reply_content("42", {"group_id": 10}) == (
             [("text", "caption"), ("at", "2")],
             [],
+            "2",
+            "群名片",
         )
         bot.call.return_value["group_id"] = 11
         with pytest.raises(ValueError):
             await bot.reply_content("42", {"group_id": 10})
+
+    @pytest.mark.parametrize(
+        "sender", (None, {}, {"user_id": True}, {"user_id": "bad"})
+    )
+    async def test_reply_identity(self, sender):
+        bot = OneBot(self.settings)
+        bot.call = AsyncMock(
+            return_value={
+                "message_type": "group",
+                "group_id": 10,
+                "message": [],
+                "sender": sender,
+            }
+        )
+        with pytest.raises(ValueError):
+            await bot.reply_content("42", {"group_id": 10})
+
+    @pytest.mark.parametrize("group", (True, False))
+    async def test_reply_names(self, group):
+        bot = OneBot(self.settings)
+        sender = {"user_id": 2, "nickname": "昵称", "card": "群名片"}
+        bot.call = AsyncMock(
+            return_value={
+                "message_type": "group" if group else "private",
+                "group_id": 10,
+                "message": [],
+                "sender": sender,
+            }
+        )
+        target = {"group_id": 10} if group else {"user_id": 1}
+        assert (await bot.reply_content("42", target))[2:] == (
+            "2",
+            "群名片" if group else "昵称",
+        )
+        sender.pop("card")
+        assert (await bot.reply_content("42", target))[3] == "昵称"
+        sender.pop("nickname")
+        assert (await bot.reply_content("42", target))[2:] == ("2", "")
+        with pytest.raises(ValueError):
+            await bot.reply_content("42", {"user_id": 1} if group else {"group_id": 10})
 
     async def test_action_response(self):
         bot = OneBot(self.settings)
@@ -2284,7 +2490,12 @@ class TestAgent:
             self.agent.receive(event(group=10, identifier=2, text="first"))
             self.agent.receive(event(user=2, group=10, identifier=3, text="second"))
             self.agent.receive(event(identifier=2, text="private update", reply="42"))
-            self.bot.reply_content.return_value = ([("text", "quoted")], ["photo"])
+            self.bot.reply_content.return_value = (
+                [("text", "quoted")],
+                ["photo"],
+                "2",
+                "Other",
+            )
             for _ in range(100):
                 if (
                     turns["group-10"].steer.await_count == 2
@@ -2309,7 +2520,12 @@ class TestAgent:
                 len(call.args[0]) == 1
                 for call in turns["group-10"].steer.call_args_list
             )
-            assert len(turns["private-1"].steer.call_args.args[0]) == 2
+            steered = turns["private-1"].steer.call_args.args[0]
+            assert len(steered) == 3
+            assert "引用 QQ 用户 Other（ID: 2）" in steered[0].text
+            assert "> quoted" in steered[0].text
+            assert isinstance(steered[1], LocalImageInput)
+            assert steered[2].text == "引用结束。\nQQ 用户 1 当前消息：\nprivate update"
             assert not self.agent.turns.contexts["group-10"].blocked_members
             assert len(self.agent.jobs) == 2
             self.codex.thread_start.assert_awaited()

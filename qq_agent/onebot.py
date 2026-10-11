@@ -12,7 +12,7 @@ from aiohttp.abc import AbstractResolver, ResolveResult
 
 from .config import qq_id
 from .logging import LOG
-from .messages import parse_parts
+from .messages import display_name, parse_parts
 
 IMAGE_LIMIT = 10 * 1024 * 1024
 
@@ -165,8 +165,12 @@ class OneBot:
         segments = result.get("message")
         if not isinstance(segments, list):
             raise ValueError("Invalid replied message")
+        sender = result.get("sender")
+        if not isinstance(sender, dict):
+            raise ValueError("Invalid replied sender")
+        sender_id = qq_id(sender.get("user_id"))
         parts, images, _, _ = parse_parts(segments, expected == "group")
-        return parts, images
+        return parts, images, sender_id, display_name(sender, expected == "group")
 
     async def listen(self, receive):
         token = self.settings.token_file.read_text().strip()
