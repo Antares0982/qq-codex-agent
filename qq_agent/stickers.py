@@ -16,6 +16,7 @@ def unique_names(pairs):
 
 def load_stickers():
     with as_file(files("stickers")) as root:
+        root = root.resolve(strict=True)
         config = json.loads(
             root.joinpath("sticker_config.json").read_text(encoding="utf-8"),
             object_pairs_hook=unique_names,

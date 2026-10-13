@@ -35,5 +35,6 @@ pkgs.runCommand "qq-codex-agent" { nativeBuildInputs = [ pkgs.makeWrapper ]; } '
     test -s "$prompt"
   done
   "$out/bin/qq-codex-agent" --help >/dev/null
+  "$out/bin/qq-codex-python" -I -c 'from qq_agent.stickers import load_stickers; load_stickers()'
   ${testEnv}/bin/python -m pytest -v -p no:cacheprovider ${source}
 ''

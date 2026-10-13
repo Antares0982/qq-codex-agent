@@ -688,12 +688,15 @@ def test_sticker_resources():
                     assert picture.info["duration"] == 120
 
 
-def test_sticker_config(tmp_path):
+@pytest.mark.parametrize("linked", (False, True))
+def test_sticker_config(tmp_path, linked):
+    root = tmp_path / "package"
+    root.symlink_to(tmp_path, target_is_directory=True)
     (tmp_path / "ok.png").write_bytes(PNG)
     (tmp_path / "link.png").symlink_to(tmp_path / "ok.png")
     (tmp_path / "bad.png").write_bytes(b"invalid")
     config = tmp_path / "sticker_config.json"
-    with patch.object(stickers, "files", return_value=tmp_path):
+    with patch.object(stickers, "files", return_value=root if linked else tmp_path):
         for value in (
             "[]",
             '{"": "ok.png"}',
