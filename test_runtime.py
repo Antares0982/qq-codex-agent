@@ -16,7 +16,9 @@ from qq_agent.runtime import GROUP_BASE_INSTRUCTIONS, Runtime, load_skills
 from qq_agent.storage import open_database
 
 
-@pytest.mark.parametrize("mode", ["plain", "manual", "pre_turn", "mid_turn", "local"])
+@pytest.mark.parametrize(
+    "mode", ["plain", "manual", "pre_turn", "mid_turn", "local", "upgrade"]
+)
 async def test_runtime_prompts(tmp_path, mode):
     requests = []
     compactions = []
@@ -190,7 +192,9 @@ async def test_runtime_prompts(tmp_path, mode):
             runtime = Runtime(settings, db, codex, AsyncMock(return_value="bot"))
             thread = None
             for index, prompt in enumerate(
-                ("PROMPT_ALPHA", "PROMPT_BETA", "PROMPT_BETA", "", "")
+                ("PROMPT_ALPHA", "PROMPT_ALPHA", "PROMPT_ALPHA", "", "")
+                if mode == "upgrade"
+                else ("PROMPT_ALPHA", "PROMPT_BETA", "PROMPT_BETA", "", "")
             ):
                 if index == 2:
                     await codex.close()
@@ -219,12 +223,20 @@ async def test_runtime_prompts(tmp_path, mode):
                             (json.dumps({"兴趣": "MEMBER_MEMORY"}),),
                         )
                 options, model = await runtime.thread_options(message, workspace)
+                if mode == "upgrade" and index == 0:
+                    options["developer_instructions"] = "LEGACY_APPLICATION_RULES"
                 context = ImageTurn(message, workspace)
                 if index != 1:
                     thread = await runtime.prepare_thread(
                         message, thread.id if thread else None, context, options
                     )
                 assert thread is not None
+                if mode == "upgrade" and index == 0:
+                    with db:
+                        db.execute(
+                            "INSERT INTO group_snapshots VALUES (?, ?)",
+                            (thread.id, "legacy group-only snapshot"),
+                        )
                 if index == 2 and mode == "local":
                     local_compact = True
                     with runtime.watch_codex():
@@ -233,17 +245,21 @@ async def test_runtime_prompts(tmp_path, mode):
                 with patch.object(
                     codex._client, "request", wraps=codex._client.request
                 ) as rpc:
-                    await runtime.update_group(thread, message, profiles)
+                    if mode != "upgrade" or index != 0:
+                        await runtime.update_group(thread, message, profiles)
                     injected = [
                         call
                         for call in rpc.call_args_list
                         if call.args[0] == "thread/inject_items"
                     ]
                     assert len(injected) == int(
-                        index in {0, 1, 3} or (index == 2 and mode != "plain")
+                        (index == 0 and mode != "upgrade")
+                        or index in {1, 3}
+                        or (index == 2 and mode not in {"plain", "upgrade"})
                     )
                     rpc.reset_mock()
-                    await runtime.update_group(thread, message, profiles)
+                    if mode != "upgrade" or index != 0:
+                        await runtime.update_group(thread, message, profiles)
                     rpc.assert_not_called()
                 if index == 1 and mode == "manual":
                     with runtime.watch_codex():
@@ -263,7 +279,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert completed
                 if index != 0:
                     await runtime.release_thread(thread.id)
-            assert bool(compactions) == (mode != "plain")
+            assert bool(compactions) == (mode not in {"plain", "upgrade"})
             assert len(requests) == (6 if mode == "mid_turn" else 5)
             names = {tool.get("name", tool["type"]) for tool in requests[0]["tools"]}
             assert {
@@ -290,11 +306,15 @@ async def test_runtime_prompts(tmp_path, mode):
                 if tool.get("name") == "mcp__qq_image"
             )
             assert "send_sticker" in {tool["name"] for tool in image_tools["tools"]}
-            for request in requests:
+            for index, request in enumerate(requests):
                 assert request["instructions"] == GROUP_BASE_INSTRUCTIONS
                 content = json.dumps(request["input"], ensure_ascii=False)
                 assert "prompt-probe" in content
                 assert "harness-maintenance" in content
+                if mode == "upgrade" and index == 0:
+                    assert "LEGACY_APPLICATION_RULES" in content
+                    assert "全部可用表情名称" not in content
+                    continue
                 assert "qq_member" in content
                 assert "当有合适场景的表情时，尽可能调用表情工具发送表情" in content
                 assert all(name in content for name in runtime.stickers)
@@ -315,7 +335,7 @@ async def test_runtime_prompts(tmp_path, mode):
                     ""
                     if cleared
                     else "PROMPT_BETA"
-                    if "probe-1" in content
+                    if "probe-1" in content and mode != "upgrade"
                     else "PROMPT_ALPHA"
                 )
                 assert snapshot["群共同记录"] == ("" if cleared else "GROUP_MEMORY")

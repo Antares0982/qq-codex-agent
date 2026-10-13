@@ -66,6 +66,7 @@ class TestImages:
         return path
 
     async def test_sticker_limit(self):
+        self.group_context()
         request = {"action": "send_sticker", "name": "开心"}
         results = await asyncio.gather(
             *(
@@ -108,6 +109,7 @@ class TestImages:
         "error", [TimeoutError(), RuntimeError(), asyncio.CancelledError()]
     )
     async def test_sticker_failure(self, error):
+        self.group_context()
         self.bot.send.side_effect = error
         request = {"action": "send_sticker", "name": "开心"}
         with pytest.raises(
@@ -121,6 +123,7 @@ class TestImages:
         self.bot.send.assert_awaited_once()
 
     async def test_sticker_validation(self):
+        self.group_context()
         for arguments in (
             {},
             {"name": []},
@@ -135,6 +138,7 @@ class TestImages:
         self.bot.send.assert_not_awaited()
 
     async def test_sticker_socket(self):
+        self.group_context()
         socket_path = self.settings.state_dir / "stickers.sock"
         server = await asyncio.start_unix_server(
             self.agent.tools.send_image, path=socket_path
@@ -164,6 +168,20 @@ class TestImages:
         finally:
             server.close()
             await server.wait_closed()
+
+    def group_context(self):
+        self.agent.turns.contexts.clear()
+        self.message = parse_message(event(group=10), self.settings)
+        self.context = ImageTurn(self.message, self.folder)
+        self.agent.turns.contexts[self.message.key] = self.context
+
+    async def test_private_sticker(self):
+        with pytest.raises(ValueError, match="仅群聊"):
+            await self.agent.turns.images.deliver_sticker(
+                self.context, {"action": "send_sticker", "name": "开心"}
+            )
+        self.bot.send.assert_not_awaited()
+        assert not self.context.sticker_used
 
     async def test_default_send_keeps_file_and_receipt(self):
         path = self.save()
@@ -598,7 +616,8 @@ class TestImages:
         await asyncio.wait_for(self.agent.turns.execute(self.message), 2)
         assert release.is_set()
 
-    def test_stdio_tools_and_path_arguments(self):
+    @pytest.mark.parametrize("group", (False, True))
+    def test_stdio_tools_and_path_arguments(self, group):
         requests = [
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
             {
@@ -640,7 +659,12 @@ class TestImages:
         ]
         output = io.StringIO()
         with (
-            patch.object(sys, "argv", ["image_tool.py", "socket", "session"]),
+            patch.object(
+                sys,
+                "argv",
+                ["image_tool.py", "socket", "session"]
+                + (["--stickers"] if group else []),
+            ),
             patch.object(
                 sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)))
             ),
@@ -652,8 +676,7 @@ class TestImages:
         assert {tool["name"] for tool in responses[0]["result"]["tools"]} == {
             "list_images",
             "send_image",
-            "send_sticker",
-        }
+        } | ({"send_sticker"} if group else set())
         assert call.call_args_list[0].args == (
             "socket",
             "session",
@@ -661,13 +684,16 @@ class TestImages:
             {"path": "animation.gif"},
         )
         assert call.call_args_list[1].args == ("socket", "session", "list_images", {})
-        assert call.call_args_list[2].args == (
-            "socket",
-            "session",
-            "send_sticker",
-            {"name": "开心"},
-        )
-        assert call.call_count == 3
+        if group:
+            assert call.call_args_list[2].args == (
+                "socket",
+                "session",
+                "send_sticker",
+                {"name": "开心"},
+            )
+        else:
+            assert "error" in responses[3]
+        assert call.call_count == (3 if group else 2)
         assert all("error" in response for response in responses[4:])
 
 

@@ -56,7 +56,7 @@ MEMBER_TOOLS = [
 ]
 
 
-TOOLS = [
+STICKER_TOOLS = [
     {
         "name": "send_sticker",
         "description": "当有合适场景的表情时，尽可能调用表情工具发送表情。使用提示词列出的表情名称，将应用内置表情发送到当前 QQ 会话。每 turn 最多一次，同轮追加消息不重置；失败或结果未知也不能重试。只有成功回执表示已发送。",
@@ -72,6 +72,10 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+]
+
+
+TOOLS = [
     {
         "name": "list_images",
         "description": "查询当前 QQ 会话已自动保存到工作区的生成图片，按生成顺序返回 ID、路径和大小（最近 100 张）。跨轮和重启后仍可查询。用真实路径加工中间帧或发送原图；无需自行解码 Base64。",
@@ -141,7 +145,8 @@ def main():
     session = sys.argv[2] if len(sys.argv) > 2 else None
     members = len(sys.argv) == 5 and sys.argv[3] == "--members"
     token = sys.argv[4] if members else None
-    tools = MEMBER_TOOLS if members else TOOLS
+    stickers = len(sys.argv) == 4 and sys.argv[3] == "--stickers"
+    tools = MEMBER_TOOLS if members else TOOLS + (STICKER_TOOLS if stickers else [])
     for line in sys.stdin:
         request = {}
         try:

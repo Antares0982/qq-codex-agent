@@ -487,6 +487,30 @@ class TestAgent:
         self.agent = Agent(self.settings, self.bot, self.codex)
         await self.agent.turns.execute(message)
         assert injections() == 1
+        group_file = self.root / "group-runtime.md"
+        group_file.write_text("")
+        self.settings.group_agents_file = group_file
+        for path, text in (
+            (self.settings.agents_file, "更新公共规则"),
+            (group_file, "更新群聊规则"),
+            (self.settings.agents_file, "再次更新公共规则"),
+            (group_file, ""),
+        ):
+            path.write_text(text)
+            before = injections()
+            await self.agent.turns.execute(message)
+            await self.agent.turns.execute(message)
+            assert injections() == before + 1
+            rules = json.loads(self.group_instructions().split("\n", 1)[1])[
+                "应用提示词"
+            ]
+            assert text in rules
+        before = injections()
+        self.agent.runtime.stickers["新增表情"] = PNG
+        await self.agent.turns.execute(message)
+        await self.agent.turns.execute(message)
+        assert injections() == before + 1
+        assert "新增表情" in self.group_instructions()
         for prompt in ("first", "second", "first", ""):
             with self.agent.db:
                 self.agent.db.execute(
@@ -721,9 +745,14 @@ class TestAgent:
         recalled = self.group_instructions()
         assert "NixOS" in recalled
         assert "摄影" in recalled
-        assert "音乐" not in recalled
+        assert "音乐" not in json.dumps(
+            json.loads(recalled.split("\n", 1)[1])["成员记录"], ensure_ascii=False
+        )
         assert len(thread.turn.call_args.args[0]) == 1
-        assert MEMBER_INSTRUCTIONS in options["developer_instructions"]
+        assert "developer_instructions" not in options
+        assert (
+            MEMBER_INSTRUCTIONS in json.loads(recalled.split("\n", 1)[1])["应用提示词"]
+        )
         args = options["config"]["mcp_servers"]["qq_member"]["args"]
         context = self.member_context()
         await self.save_profile(context, {"兴趣": "代码"})
@@ -747,10 +776,12 @@ class TestAgent:
         instructions = self.group_instructions()
         assert "代码" in instructions
         assert "摄影" in instructions
-        assert "音乐" not in instructions
+        assert "音乐" not in json.dumps(
+            json.loads(instructions.split("\n", 1)[1])["成员记录"], ensure_ascii=False
+        )
         assert (
             MEMBER_INSTRUCTIONS
-            in self.codex.thread_start.call_args.kwargs["developer_instructions"]
+            in json.loads(instructions.split("\n", 1)[1])["应用提示词"]
         )
         assert len(thread.turn.call_args.args[0]) == 1
         await self.agent.turns.execute(
@@ -1223,11 +1254,18 @@ class TestAgent:
             (event(group=10), "当前是群聊", "当前是私聊"),
         ):
             await self.agent.turns.execute(parse_message(incoming, self.settings))
-            instructions = self.codex.thread_start.call_args.kwargs[
-                "developer_instructions"
-            ]
+            options = self.codex.thread_start.call_args.kwargs
+            instructions = (
+                json.loads(self.group_instructions().split("\n", 1)[1])["应用提示词"]
+                if incoming.get("group_id")
+                else options["developer_instructions"]
+            )
             assert expected in instructions
             assert excluded not in instructions
+            assert ("send_sticker" in instructions) == bool(incoming.get("group_id"))
+            assert (
+                "--stickers" in options["config"]["mcp_servers"]["qq_image"]["args"]
+            ) == bool(incoming.get("group_id"))
         assert all(
             (c.args[0] == "set_msg_emoji_like" for c in self.bot.call.call_args_list)
         )
@@ -1254,10 +1292,9 @@ class TestAgent:
             await self.agent.turns.execute(
                 parse_message(event(group=group_id), self.settings)
             )
-            method = self.codex.thread_start if index < 2 else self.codex.thread_resume
             assert (
                 f"你的昵称：{expected}，再说一次：{expected}。{{other}}"
-                in method.call_args.kwargs["developer_instructions"]
+                in json.loads(self.group_instructions().split("\n", 1)[1])["应用提示词"]
             )
             self.bot.call.assert_any_await(
                 "get_group_member_info", {"group_id": group_id, "user_id": 99}
@@ -1718,6 +1755,7 @@ class TestAgent:
                 image_tool.__file__,
                 str(socket_path),
                 self.agent.turns.contexts["group-10"].folder.name,
+                "--stickers",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
             )

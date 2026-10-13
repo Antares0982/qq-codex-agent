@@ -51,8 +51,8 @@ RPi 的共享服务和一次性 `codex-auth-import` 由 Nix 仓库维护；令�
 
 默认文件直接来自应用包，升级和回滚会同时切换代码与提示词。
 `agentsFile`、`privateAgentsFile`、`groupAgentsFile` 可分别指定覆盖文件的绝对路径。
-公共文件与私聊/群聊文件由应用注入相应 thread 的 developer instructions。
-群聊另使用简短基础提示词，群设定和记忆在每个独立 turn 前刷新。
+私聊继续在新建/恢复 thread 时传入公共及私聊模板，不提供表情工具。
+群聊在每个独立 turn 前重读公共及群聊模板，将应用规则、表情名称、群设定与记忆纳入完整快照；与上次成功注入内容相同则跳过，否则显式注入并持久保存。群聊升级无需 `/new`，压缩后下一轮补注入；表情 JSON 仍仅启动时加载。
 `services.qq-codex-agent.groupPromptAllowMembers` 默认 `false`，对应主配置
 `group_prompt_allow_members`：仅可交互用户中的群主、管理员能修改群设定或清除群共同记录；
 设为 `true` 后，所有可交互用户均可操作。查看仍对所有可交互用户开放。

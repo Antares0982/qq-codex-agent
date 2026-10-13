@@ -21,6 +21,8 @@ class Images:
         self.stickers = stickers
 
     async def deliver_sticker(self, context, request):
+        if "group_id" not in context.message.target:
+            raise ValueError("表情工具仅群聊可用。")
         if request.keys() != {"action", "name"}:
             raise ValueError("表情工具只接受 name 参数。")
         name = request["name"]
