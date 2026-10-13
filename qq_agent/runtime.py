@@ -20,6 +20,7 @@ import image_tool
 from .images import IMAGE_INSTRUCTIONS
 from .logging import LOG, log_text
 from .profiles import MEMBER_INSTRUCTIONS
+from .stickers import load_stickers, sticker_instructions
 
 BUILTIN_SKILLS = Path(__file__).with_name("skills")
 
@@ -45,6 +46,7 @@ class Runtime:
         self.db = db
         self.codex = codex
         self.group_name = group_name
+        self.stickers = load_stickers()
         self.compactions = {}
         self.usage_ready = {}
 
@@ -212,6 +214,8 @@ class Runtime:
             "sandbox": Sandbox.workspace_write,
             "approval_mode": ApprovalMode.auto_review,
             "developer_instructions": IMAGE_INSTRUCTIONS
+            + "\n"
+            + sticker_instructions(self.stickers)
             + f"\n图片加工可使用已安装 Pillow 的 Python：{sys.executable}",
             "config": {
                 "model_reasoning_effort": "medium",

@@ -14,10 +14,51 @@ IMAGE_INSTRUCTIONS = """本会话通过 QQ 交付结果。用户无法直接访�
 
 
 class Images:
-    def __init__(self, db, bot, contexts):
+    def __init__(self, db, bot, contexts, stickers):
         self.db = db
         self.bot = bot
         self.contexts = contexts
+        self.stickers = stickers
+
+    async def deliver_sticker(self, context, request):
+        if request.keys() != {"action", "name"}:
+            raise ValueError("表情工具只接受 name 参数。")
+        name = request["name"]
+        if not isinstance(name, str) or name not in self.stickers:
+            raise ValueError("未知表情名称，请使用提示词列出的名称。")
+        async with context.lock:
+            if self.contexts.get(context.message.key) is not context:
+                raise ValueError("本轮已结束，请在当前轮重新调用工具。")
+            if context.sticker_used:
+                raise ValueError("本轮已调用表情发送，每 turn 最多一次，不要重试。")
+            data = self.stickers[name]
+            context.sticker_used = True
+            try:
+                receipt = await self.bot.send(context.message, image=data, sticker=True)
+            except Exception as error:
+                LOG.warning(
+                    "Sticker delivery failed chat=%s name=%s error=%s",
+                    context.message.key,
+                    log_text(name),
+                    log_text(error),
+                )
+                raise ValueError(
+                    "未取得 QQ 发送成功回执，发送结果未知；本轮不能重试，不要声称已发送。"
+                ) from error
+            LOG.info(
+                "Sticker sent chat=%s name=%s bytes=%d",
+                context.message.key,
+                log_text(name),
+                len(data),
+            )
+            return {
+                "ok": True,
+                "name": name,
+                "message": "表情已发送到当前 QQ 会话。",
+                "message_id": receipt.get("message_id")
+                if isinstance(receipt, dict)
+                else None,
+            }
 
     def list_images(self, context):
         rows = self.db.execute(

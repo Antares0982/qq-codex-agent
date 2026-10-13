@@ -35,6 +35,8 @@ class ToolServer:
                 context.tasks.add(task)
                 if request == {"action": "list_images"}:
                     response = self.images.list_images(context)
+                elif request.get("action") == "send_sticker":
+                    response = await self.images.deliver_sticker(context, request)
                 elif request.get("action") in {tool["name"] for tool in MEMBER_TOOLS}:
                     response = await self.profiles.member_request(context, request)
                     if request["action"] == "replace_profile" and any(

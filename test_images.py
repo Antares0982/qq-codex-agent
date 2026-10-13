@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import random
 import subprocess
 import sys
 import time
@@ -15,9 +16,10 @@ from openai_codex.generated.v2_all import ImageGenerationThreadItem
 from PIL import Image
 from PIL.GifImagePlugin import GifImageFile
 
+import compress_stickers
 import image_assets
 import image_tool
-from qq_agent import cleanup
+from qq_agent import cleanup, replies, stickers
 from qq_agent.agent import Agent
 from qq_agent.config import Settings
 from qq_agent.messages import ImageTurn, parse_message
@@ -62,6 +64,106 @@ class TestImages:
                 (self.folder.name, item, path, len(data)),
             )
         return path
+
+    async def test_sticker_limit(self):
+        request = {"action": "send_sticker", "name": "开心"}
+        results = await asyncio.gather(
+            *(
+                self.agent.turns.images.deliver_sticker(self.context, request)
+                for _ in range(2)
+            ),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, ValueError) for result in results) == 1
+        assert any(
+            isinstance(result, dict) and result.get("message_id") == 123
+            for result in results
+        )
+        self.bot.send.assert_awaited_once_with(
+            self.message, image=self.agent.runtime.stickers["开心"], sticker=True
+        )
+        self.save()
+        await self.agent.turns.images.deliver_image(
+            self.context, {"action": "send_image"}
+        )
+        with patch.object(
+            replies,
+            "GROUP_REMINDERS",
+            ((0, "thinking_30s.png"), (0, "thinking_too_long.png")),
+        ):
+            await self.agent.replies.remind_group(
+                self.message, asyncio.get_running_loop().time()
+            )
+        assert self.bot.send.await_count == 4
+        with pytest.raises(ValueError, match="最多一次"):
+            await self.agent.turns.images.deliver_sticker(self.context, request)
+        renewed = ImageTurn(self.message, self.folder)
+        self.agent.turns.contexts[self.message.key] = renewed
+        with pytest.raises(ValueError, match="已结束"):
+            await self.agent.turns.images.deliver_sticker(self.context, request)
+        await self.agent.turns.images.deliver_sticker(renewed, request)
+        assert self.bot.send.await_count == 5
+
+    @pytest.mark.parametrize(
+        "error", [TimeoutError(), RuntimeError(), asyncio.CancelledError()]
+    )
+    async def test_sticker_failure(self, error):
+        self.bot.send.side_effect = error
+        request = {"action": "send_sticker", "name": "开心"}
+        with pytest.raises(
+            asyncio.CancelledError
+            if isinstance(error, asyncio.CancelledError)
+            else ValueError
+        ):
+            await self.agent.turns.images.deliver_sticker(self.context, request)
+        with pytest.raises(ValueError, match="最多一次"):
+            await self.agent.turns.images.deliver_sticker(self.context, request)
+        self.bot.send.assert_awaited_once()
+
+    async def test_sticker_validation(self):
+        for arguments in (
+            {},
+            {"name": []},
+            {"name": "missing"},
+            {"name": "开心", "resend": True},
+        ):
+            with pytest.raises(ValueError):
+                await self.agent.turns.images.deliver_sticker(
+                    self.context, {"action": "send_sticker", **arguments}
+                )
+        assert not self.context.sticker_used
+        self.bot.send.assert_not_awaited()
+
+    async def test_sticker_socket(self):
+        socket_path = self.settings.state_dir / "stickers.sock"
+        server = await asyncio.start_unix_server(
+            self.agent.tools.send_image, path=socket_path
+        )
+        try:
+            result = await asyncio.to_thread(
+                image_tool.call,
+                str(socket_path),
+                self.folder.name,
+                "send_sticker",
+                {"name": "让我想想"},
+            )
+            assert result["structuredContent"]["ok"]
+            self.bot.send.assert_awaited_once_with(
+                self.message,
+                image=self.agent.runtime.stickers["让我想想"],
+                sticker=True,
+            )
+            result = await asyncio.to_thread(
+                image_tool.call,
+                str(socket_path),
+                self.folder.name,
+                "send_sticker",
+                {"name": "开心"},
+            )
+            assert result["isError"]
+        finally:
+            server.close()
+            await server.wait_closed()
 
     async def test_default_send_keeps_file_and_receipt(self):
         path = self.save()
@@ -514,6 +616,27 @@ class TestImages:
                 "method": "tools/call",
                 "params": {"name": "list_images", "arguments": {}},
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "send_sticker", "arguments": {"name": "开心"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "send_sticker", "arguments": {}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "send_sticker",
+                    "arguments": {"name": "开心", "path": "angry.png"},
+                },
+            },
         ]
         output = io.StringIO()
         with (
@@ -529,6 +652,7 @@ class TestImages:
         assert {tool["name"] for tool in responses[0]["result"]["tools"]} == {
             "list_images",
             "send_image",
+            "send_sticker",
         }
         assert call.call_args_list[0].args == (
             "socket",
@@ -537,3 +661,112 @@ class TestImages:
             {"path": "animation.gif"},
         )
         assert call.call_args_list[1].args == ("socket", "session", "list_images", {})
+        assert call.call_args_list[2].args == (
+            "socket",
+            "session",
+            "send_sticker",
+            {"name": "开心"},
+        )
+        assert call.call_count == 3
+        assert all("error" in response for response in responses[4:])
+
+
+def test_sticker_resources():
+    catalog = stickers.load_stickers()
+    assert catalog
+    for name, data in catalog.items():
+        assert len(data) <= compress_stickers.BYTE_LIMIT
+        with Image.open(io.BytesIO(data)) as picture:
+            assert picture.width * picture.height <= compress_stickers.PIXEL_LIMIT
+            if name in {"生气", "开心", "逗我呢", "让我想想"}:
+                assert picture.convert("RGBA").getchannel("A").getextrema() == (0, 255)
+            if name == "让我想想":
+                assert isinstance(picture, GifImageFile)
+                assert picture.n_frames == 8 and picture.info["loop"] == 0
+                for index in range(picture.n_frames):
+                    picture.seek(index)
+                    assert picture.info["duration"] == 120
+
+
+def test_sticker_config(tmp_path):
+    (tmp_path / "ok.png").write_bytes(PNG)
+    (tmp_path / "link.png").symlink_to(tmp_path / "ok.png")
+    (tmp_path / "bad.png").write_bytes(b"invalid")
+    config = tmp_path / "sticker_config.json"
+    with patch.object(stickers, "files", return_value=tmp_path):
+        for value in (
+            "[]",
+            '{"": "ok.png"}',
+            '{"x": "ok.png", "x": "ok.png"}',
+            '{"x": "missing.png"}',
+            '{"x": "../ok.png"}',
+            '{"x": "/ok.png"}',
+            '{"x": "link.png"}',
+            '{"x": "bad.png"}',
+            '{"x": 1}',
+            '{"x": "ok.png",}',
+        ):
+            config.write_text(value)
+            with pytest.raises(ValueError):
+                stickers.load_stickers()
+        config.write_text('{"新增表情": "ok.png"}')
+        loaded = stickers.load_stickers()
+        assert loaded == {"新增表情": PNG}
+        config.write_text("{}")
+        assert "新增表情" in stickers.sticker_instructions(loaded)
+
+
+@pytest.mark.parametrize("format", ["PNG", "JPEG", "WEBP", "GIF"])
+def test_compress_images(tmp_path, monkeypatch, format):
+    rng = random.Random(42)
+    frames = [
+        Image.frombytes("RGB", (80, 80), rng.randbytes(80 * 80 * 3)).convert("RGBA")
+        for _ in range(3 if format == "GIF" else 1)
+    ]
+    for frame in frames:
+        if format != "JPEG":
+            alpha = Image.new("L", frame.size, 255)
+            alpha.paste(0, (0, 0, 20, 80))
+            if format != "GIF":
+                alpha.paste(128, (20, 0, 40, 80))
+            frame.putalpha(alpha)
+    durations = [80, 120, 200] if format == "GIF" else [0]
+    data = compress_stickers.encode_frames(frames, format, durations, 0, None)
+    path = tmp_path / ("test." + format.lower())
+    path.write_bytes(data)
+    monkeypatch.setattr(compress_stickers, "BYTE_LIMIT", 5000)
+    monkeypatch.setattr(compress_stickers, "PIXEL_LIMIT", 3600)
+    before, after, _, size = compress_stickers.compress_image(path)
+    assert before == len(data) and after <= 5000
+    assert size[0] * size[1] <= 3600
+    with Image.open(io.BytesIO(data)) as source:
+        expected = []
+        for index in range(getattr(source, "n_frames", 1)):
+            source.seek(index)
+            expected.append(
+                compress_stickers.resize_frame(
+                    source.convert("RGBA"), size, format == "GIF"
+                )
+            )
+    compress_stickers.validate_output(
+        path.read_bytes(), format, expected, durations, 0 if format == "GIF" else None
+    )
+    compressed = path.read_bytes()
+    compress_stickers.compress_image(path)
+    assert path.read_bytes() == compressed
+
+
+def test_compress_failure(tmp_path):
+    path = tmp_path / "test.png"
+    Image.new("RGBA", (1000, 1000), (255, 0, 0, 128)).save(path)
+    original = path.read_bytes()
+    with patch.object(
+        compress_stickers, "validate_output", side_effect=ValueError("invalid output")
+    ):
+        with pytest.raises(ValueError, match="invalid output"):
+            compress_stickers.compress_image(path)
+    assert path.read_bytes() == original
+    link = tmp_path / "link.png"
+    link.symlink_to(path)
+    with pytest.raises(ValueError, match="regular"):
+        compress_stickers.compress_image(link)

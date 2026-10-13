@@ -40,7 +40,7 @@ class Turns:
         self.mark = mark
         self.contexts = {}
         self.profiles = Profiles(db, self.contexts, replies.safe_send, replies.bot)
-        self.images = Images(db, replies.bot, self.contexts)
+        self.images = Images(db, replies.bot, self.contexts, runtime.stickers)
 
     async def execute(self, message):
         turn = context = steering = reminder = reaction = None

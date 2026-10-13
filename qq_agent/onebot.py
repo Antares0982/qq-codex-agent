@@ -82,7 +82,7 @@ class OneBot:
                     "type": "image",
                     "data": {
                         "file": "base64://" + base64.b64encode(image).decode(),
-                        **({"sub_type": 1} if sticker else {}),
+                        "sub_type": 1 if sticker else 0,
                     },
                 }
             ]

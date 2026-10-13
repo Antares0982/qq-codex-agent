@@ -1750,6 +1750,7 @@ class TestAgent:
             assert {tool["name"] for tool in responses[1]["result"]["tools"]} == {
                 "send_image",
                 "list_images",
+                "send_sticker",
             }
             assert "isError" not in responses[2]["result"]
             assert responses[3]["result"]["structuredContent"]["already_sent"]
@@ -2162,6 +2163,7 @@ class TestAgent:
     async def test_steering_deadline(self):
         message = parse_message(event(), self.settings)
         context = ImageTurn(message, self.settings.workspace_dir)
+        context.sticker_used = True
         finished = asyncio.Event()
         self.agent.pending[message.key] = deque([message])
         self.agent.wake[message.key] = asyncio.Event()
@@ -2174,6 +2176,7 @@ class TestAgent:
             assert after > before + 800
             await asyncio.sleep(0.02)
         turn.steer.assert_awaited_once()
+        assert context.sticker_used
 
         finished.clear()
         self.agent.pending[message.key].append(message)
@@ -2323,7 +2326,7 @@ class TestAgent:
                 "message": [
                     {
                         "type": "image",
-                        "data": {**data, "sub_type": 1} if sticker else data,
+                        "data": {**data, "sub_type": 1 if sticker else 0},
                     }
                 ],
             },

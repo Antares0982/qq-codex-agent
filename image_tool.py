@@ -58,6 +58,21 @@ MEMBER_TOOLS = [
 
 TOOLS = [
     {
+        "name": "send_sticker",
+        "description": "当有合适场景的表情时，尽可能调用表情工具发送表情。使用提示词列出的表情名称，将应用内置表情发送到当前 QQ 会话。每 turn 最多一次，同轮追加消息不重置；失败或结果未知也不能重试。只有成功回执表示已发送。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "提示词中列出的完整表情名称。",
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "list_images",
         "description": "查询当前 QQ 会话已自动保存到工作区的生成图片，按生成顺序返回 ID、路径和大小（最近 100 张）。跨轮和重启后仍可查询。用真实路径加工中间帧或发送原图；无需自行解码 Base64。",
         "inputSchema": {
@@ -158,12 +173,22 @@ def main():
                         else set()
                     )
                     if members
-                    else ({"path", "resend"} if name == "send_image" else set())
+                    else (
+                        {"path", "resend"}
+                        if name == "send_image"
+                        else {"name"}
+                        if name == "send_sticker"
+                        else set()
+                    )
                 )
                 if (
                     name not in {tool["name"] for tool in tools}
                     or not isinstance(arguments, dict)
                     or arguments.keys() - allowed
+                    or (
+                        name == "send_sticker"
+                        and not isinstance(arguments.get("name"), str)
+                    )
                 ):
                     raise ValueError("Unknown tool or invalid arguments")
                 try:

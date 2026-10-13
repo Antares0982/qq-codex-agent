@@ -44,6 +44,7 @@ class ImageTurn:
     profiles: list = field(default_factory=list)
     blocked_members: set[str] = field(default_factory=set)
     group_writable: bool = True
+    sticker_used: bool = False
 
 
 def parse_parts(segments, group, bot=None):

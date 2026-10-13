@@ -17,7 +17,7 @@ dev = [
 ]
 
 [tool.pyright]
-include = ["*.py", "qq_agent", "pics"]
+include = ["*.py", "qq_agent", "pics", "stickers"]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.13"
@@ -37,8 +37,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["qq_codex_agent", "image_tool", "image_assets"]
-packages = ["pics", "qq_agent"]
+packages = ["pics", "qq_agent", "stickers"]
 
 [tool.setuptools.package-data]
 pics = ["*.png"]
+stickers = ["sticker_config.json", "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.webp"]
 qq_agent = ["skills/**/*"]

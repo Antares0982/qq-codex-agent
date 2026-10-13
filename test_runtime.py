@@ -284,12 +284,20 @@ async def test_runtime_prompts(tmp_path, mode):
                 "replace_group_profile",
             } <= {tool["name"] for tool in member_tools["tools"]}
             update_counts = []
+            image_tools = next(
+                tool
+                for tool in requests[0]["tools"]
+                if tool.get("name") == "mcp__qq_image"
+            )
+            assert "send_sticker" in {tool["name"] for tool in image_tools["tools"]}
             for request in requests:
                 assert request["instructions"] == GROUP_BASE_INSTRUCTIONS
                 content = json.dumps(request["input"], ensure_ascii=False)
                 assert "prompt-probe" in content
                 assert "harness-maintenance" in content
                 assert "qq_member" in content
+                assert "当有合适场景的表情时，尽可能调用表情工具发送表情" in content
+                assert all(name in content for name in runtime.stickers)
                 assert "CATALOG_MODE_MARKER" in content
                 assert "probe-0" in content
                 updates = [
