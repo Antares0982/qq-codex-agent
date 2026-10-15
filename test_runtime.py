@@ -42,6 +42,8 @@ async def test_skill_permissions(tmp_path, target):
     for name in (".git", ".codex"):
         (workspace / name).mkdir()
     config = CodexConfig(
+        # Legacy sandbox policies use the server cwd.
+        cwd=str(workspace),
         env={"CODEX_HOME": str(tmp_path / "codex")},
         config_overrides=(
             "features.shell_snapshot=false",
@@ -92,10 +94,13 @@ async def test_skill_permissions(tmp_path, target):
                         "command": [
                             "/bin/sh",
                             "-ec",
+                            "printf ok > workspace-probe; "
                             "mkdir -p .agents/skills/probe; "
                             "printf ok > .agents/skills/probe/SKILL.md; "
                             'test "$(cat .agents/skills/probe/SKILL.md)" = ok; '
-                            "test ! -w .agents; test ! -w .git; test ! -w .codex",
+                            "for path in .agents .git .codex; do "
+                            'if (printf probe > "$path/write-probe"); then '
+                            'echo "Unexpectedly writable: $path" >&2; exit 1; fi; done',
                         ],
                     },
                     response_model=CommandExecResponse,

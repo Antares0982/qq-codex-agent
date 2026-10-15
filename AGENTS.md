@@ -66,6 +66,23 @@ uv run --frozen python check_runtime.py
 uv run --frozen python check_runtime.py --sandbox
 ```
 
+还必须在本机运行 Nix 应用包构建，覆盖真实打包环境中的完整 pytest；仅运行 `uv` 测试或 `nix/check.nix` 不能替代。使用部署仓库锁定的依赖，但架构取 `builtins.currentSystem`，不得在本机构建异架构的 Pi 系统。以下部署仓库路径按实际位置调整：
+
+```sh
+nix build --impure --no-link --expr '
+  let
+    host = builtins.getFlake "/home/antares/Documents/GitHub/Nix/hosts/rpi5";
+    source = builtins.fetchGit { url = toString ./.; };
+  in import (source + "/nix/package.nix") {
+    inputs = host.inputs;
+    system = builtins.currentSystem;
+  }
+'
+```
+
+从本仓库根目录执行；本地 `fetchGit` 包含已跟踪文件的未提交修改，新增文件须先纳入 Git 跟踪。不要直接将含 `build/`、`.venv/` 等旧产物的工作目录作为源码，否则 setuptools 可能复用旧文件。
+`test_skill_permissions` 必须将 `CodexConfig.cwd` 设为测试工作区：锁定 runtime 的 `command/exec` 使用 app-server 启动目录解释 `sandboxPolicy`，请求中的 `cwd` 只设置命令目录。测试需实际验证工作区及 `.agents/skills/` 可写，而 `.agents`、`.git`、`.codex` 不可写。
+
 Pyright 必须达到 0 errors，覆盖业务代码、测试和自检脚本；不得通过忽略错误或排除源码绕过检查。
 
 `check_runtime.py` 使用临时、未登录的 Codex 状态目录，只验证启动和认证状态接口，不读取个人登录缓存，也不请求模型。
