@@ -236,6 +236,16 @@ class Runtime:
                 "model_reasoning_effort": "medium",
                 "model_auto_compact_token_limit": 200000,
                 "model_auto_compact_token_limit_scope": "total",
+                "include_collaboration_mode_instructions": False,
+                "features": {
+                    "recommended_plugins": False,
+                    "tool_suggest": False,
+                    "multi_agent_v2": {
+                        "enabled": True,
+                        "root_agent_usage_hint_text": "",
+                        "subagent_usage_hint_text": "",
+                    },
+                },
                 "projects": {str(folder): {"trust_level": "trusted"}},
                 "mcp_servers": {
                     "qq_image": {
@@ -258,7 +268,7 @@ class Runtime:
             options["base_instructions"] = GROUP_BASE_INSTRUCTIONS
             options["config"]["mcp_servers"]["qq_image"]["args"].append("--stickers")
             options["config"]["web_search"] = "live"
-            options["config"]["features"] = {"retain_client_developer_messages": True}
+            options["config"]["features"]["retain_client_developer_messages"] = True
         else:
             options["developer_instructions"] = await self.developer_instructions(
                 message

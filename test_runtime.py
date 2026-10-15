@@ -62,6 +62,8 @@ async def test_skill_permissions(tmp_path, target):
                 ("thread/resume", ThreadResumeResponse),
             ):
                 options, _ = await runtime.thread_options(message, workspace)
+                assert options["config"]["features"]["recommended_plugins"] is False
+                assert options["config"]["features"]["tool_suggest"] is False
                 options["config"]["mcp_servers"] = {}
                 params = {
                     "cwd": str(workspace),
@@ -412,6 +414,12 @@ async def test_runtime_prompts(tmp_path, mode):
                 content = json.dumps(request["input"], ensure_ascii=False)
                 assert "prompt-probe" in content
                 assert "harness-maintenance" in content
+                assert "<multi_agent_role>" not in content
+                assert "<collaboration_mode>" not in content
+                assert "<recommended_plugins>" not in content
+                assert "CATALOG_MODE_MARKER" not in content
+                assert "<multi_agent_mode>" in content
+                assert "<permissions instructions>" in content
                 if mode == "upgrade" and index == 0:
                     assert "LEGACY_APPLICATION_RULES" in content
                     assert "全部可用表情名称" not in content
@@ -419,7 +427,6 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert "qq_member" in content
                 assert "当有合适场景的表情时，尽可能调用表情工具发送表情" in content
                 assert all(name in content for name in runtime.stickers)
-                assert "CATALOG_MODE_MARKER" in content
                 assert "probe-0" in content
                 updates = [
                     part["text"]
