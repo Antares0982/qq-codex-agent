@@ -42,7 +42,11 @@ class TestImages:
         self.bot = NS(send=AsyncMock(return_value={"message_id": 123}))
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
         self.codex._client = NS(
-            request=AsyncMock(return_value={"status": "unsubscribed"})
+            request=AsyncMock(
+                return_value=NS(
+                    status="unsubscribed", config=NS(sandbox_workspace_write=None)
+                )
+            )
         )
         self.agent = Agent(self.settings, self.bot, self.codex)
         self.folder = self.settings.workspace_dir / "session"

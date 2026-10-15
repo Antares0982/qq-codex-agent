@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from aiohttp import web
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, TextInput
-from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
+from openai_codex.generated.v2_all import (
+    CommandExecResponse,
+    ReasoningEffort,
+    ThreadInjectItemsResponse,
+    ThreadResumeResponse,
+    ThreadStartResponse,
+    TurnStatus,
+)
 
 from qq_agent.config import Settings
 from qq_agent.logging import read_diagnostics
@@ -14,6 +21,100 @@ from qq_agent.messages import ImageTurn, Message
 from qq_agent.profiles import Profiles
 from qq_agent.runtime import GROUP_BASE_INSTRUCTIONS, Runtime, load_skills
 from qq_agent.storage import open_database
+
+
+@pytest.mark.parametrize("target", [{}, {"group_id": 10}])
+async def test_skill_permissions(tmp_path, target):
+    settings = Settings(
+        set(),
+        {},
+        "ws://127.0.0.1:3001",
+        tmp_path / "token",
+        tmp_path / "state",
+        tmp_path / "work",
+        tmp_path / "AGENTS.md",
+    )
+    db = open_database(settings)
+    workspace = settings.workspace_dir
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (tmp_path / "codex").mkdir()
+    for name in (".git", ".codex"):
+        (workspace / name).mkdir()
+    config = CodexConfig(
+        env={"CODEX_HOME": str(tmp_path / "codex")},
+        config_overrides=(
+            "features.shell_snapshot=false",
+            f"sandbox_workspace_write.writable_roots={json.dumps([str(cache)])}",
+            "sandbox_workspace_write.network_access=true",
+            "sandbox_workspace_write.exclude_slash_tmp=true",
+            "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+        ),
+    )
+    try:
+        async with AsyncCodex(config=config) as codex:
+            assert (await codex.account()).account is None
+            runtime = Runtime(settings, db, codex, AsyncMock())
+            message = NS(key="probe", target=target)
+            thread_id = None
+            for method, response in (
+                ("thread/start", ThreadStartResponse),
+                ("thread/resume", ThreadResumeResponse),
+            ):
+                options, _ = await runtime.thread_options(message, workspace)
+                options["config"]["mcp_servers"] = {}
+                params = {
+                    "cwd": str(workspace),
+                    "sandbox": "workspace-write",
+                    "config": options["config"],
+                }
+                if thread_id:
+                    params["threadId"] = thread_id
+                started = await codex._client.request(
+                    method, params, response_model=response
+                )
+                thread_id = started.thread.id
+                policy = started.sandbox.model_dump(mode="json", by_alias=True)
+                assert policy["networkAccess"] is True
+                assert policy["excludeSlashTmp"] is True
+                assert policy["excludeTmpdirEnvVar"] is True
+                assert set(policy["writableRoots"]) == {
+                    str(cache),
+                    str(workspace / ".agents/skills"),
+                }
+                result = await codex._client.request(
+                    "command/exec",
+                    {
+                        "cwd": str(workspace),
+                        "sandboxPolicy": policy,
+                        "command": [
+                            "/bin/sh",
+                            "-ec",
+                            "mkdir -p .agents/skills/probe; "
+                            "printf ok > .agents/skills/probe/SKILL.md; "
+                            'test "$(cat .agents/skills/probe/SKILL.md)" = ok; '
+                            "test ! -w .agents; test ! -w .git; test ! -w .codex",
+                        ],
+                    },
+                    response_model=CommandExecResponse,
+                )
+                assert result.exit_code == 0, result.stderr
+                await codex._client.request(
+                    "thread/inject_items",
+                    {
+                        "threadId": thread_id,
+                        "items": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": "probe"}],
+                            }
+                        ],
+                    },
+                    response_model=ThreadInjectItemsResponse,
+                )
+    finally:
+        db.close()
 
 
 @pytest.mark.parametrize(

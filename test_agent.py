@@ -105,7 +105,11 @@ class TestAgent:
         )
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
         self.codex._client = NS(
-            request=AsyncMock(return_value={"status": "unsubscribed"})
+            request=AsyncMock(
+                return_value=NS(
+                    status="unsubscribed", config=NS(sandbox_workspace_write=None)
+                )
+            )
         )
         self.read_history = AsyncMock()
         monkeypatch.setattr(AsyncThread, "read", self.read_history)
@@ -466,7 +470,13 @@ class TestAgent:
             self.agent.db.execute(
                 "INSERT INTO group_prompts VALUES ('10', 'changed', '1', 0)"
             )
-        self.codex._client.request.side_effect = RuntimeError("update failed")
+
+        def fail_injection(method, *args, **kwargs):
+            if method == "thread/inject_items":
+                raise RuntimeError("update failed")
+            return NS(config=NS(sandbox_workspace_write=None))
+
+        self.codex._client.request.side_effect = fail_injection
         await self.agent.turns.execute(message)
         assert thread.turn.await_count == 3
 
@@ -1269,6 +1279,20 @@ class TestAgent:
         assert all(
             (c.args[0] == "set_msg_emoji_like" for c in self.bot.call.call_args_list)
         )
+
+    @pytest.mark.parametrize("relative", [".agents", ".agents/skills"])
+    async def test_skill_symlinks(self, relative):
+        outside = self.root / "outside"
+        outside.mkdir()
+        link = self.settings.workspace_dir / relative
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(OSError):
+            await self.agent.runtime.thread_options(
+                parse_message(event(), self.settings), self.settings.workspace_dir
+            )
+        assert list(outside.iterdir()) == []
+        self.codex._client.request.assert_not_called()
 
     async def test_bot_nickname(self):
         group = self.settings.agents_file.parent / "group.md"
@@ -2243,7 +2267,10 @@ class TestAgent:
         assert "thread=test-thread" in output
         assert "turn=turn1" in output
         assert "model=alpha effort=medium context_tokens=191431" in output
-        self.codex._client.request.assert_awaited_once()
+        assert [call.args[0] for call in self.codex._client.request.call_args_list] == [
+            "config/read",
+            "thread/unsubscribe",
+        ]
 
     async def test_request_diagnostics(self, caplog):
         path = self.root / "runtime.sqlite"

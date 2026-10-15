@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import os
 import shutil
 import sys
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 from openai_codex import ApprovalMode, CodexConfig, Sandbox
 from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import (
+    ConfigReadResponse,
     SkillsExtraRootsSetResponse,
     ThreadInjectItemsResponse,
     ThreadUnsubscribeResponse,
@@ -16,6 +18,7 @@ from openai_codex.generated.v2_all import (
 )
 
 import image_tool
+from image_assets import workspace_directory
 
 from .images import IMAGE_INSTRUCTIONS
 from .logging import LOG, log_text
@@ -209,11 +212,27 @@ class Runtime:
         return row[0] if row else self.settings.model
 
     async def thread_options(self, message, folder):
+        with workspace_directory(folder) as root:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(".agents", mode=0o700, dir_fd=root)
+        with workspace_directory(folder, (".agents",)) as directory:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir("skills", mode=0o700, dir_fd=directory)
+        with workspace_directory(folder, (".agents", "skills")):
+            skills = str(folder / ".agents/skills")
+        config = await self.codex._client.request(
+            "config/read", {"cwd": str(folder)}, response_model=ConfigReadResponse
+        )
+        sandbox = config.config.sandbox_workspace_write
+        roots = (sandbox.writable_roots or []) if sandbox else []
+        sandbox_options = sandbox.model_dump(exclude_none=True) if sandbox else {}
+        sandbox_options["writable_roots"] = [*roots, skills]
         options = {
             "cwd": str(folder),
             "sandbox": Sandbox.workspace_write,
             "approval_mode": ApprovalMode.auto_review,
             "config": {
+                "sandbox_workspace_write": sandbox_options,
                 "model_reasoning_effort": "medium",
                 "model_auto_compact_token_limit": 200000,
                 "model_auto_compact_token_limit_scope": "total",
