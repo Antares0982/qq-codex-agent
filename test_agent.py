@@ -39,7 +39,7 @@ from qq_agent.logging import LOG, log_text, read_diagnostics, watch_diagnostics
 from qq_agent.messages import ImageTurn, parse_message
 from qq_agent.onebot import OneBot
 from qq_agent.profiles import MEMBER_INSTRUCTIONS
-from qq_agent.runtime import codex_config
+from qq_agent.runtime import HANDOFF_INSTRUCTIONS, HANDOFF_SCHEMA, codex_config
 
 _png = io.BytesIO()
 Image.new("RGB", (2, 2), "red").save(_png, format="PNG")
@@ -232,7 +232,7 @@ class TestAgent:
         assert "摄影" not in text
         assert "音乐" not in text
         await self.agent.commands.control(
-            parse_message(event(group=10, text="/new"), self.settings)
+            parse_message(event(group=10, text="/new blank"), self.settings)
         )
         self.agent.db.close()
         self.agent = Agent(self.settings, self.bot, self.codex)
@@ -556,7 +556,7 @@ class TestAgent:
         assert injections() == before + 1
         before = injections()
         await self.agent.commands.control(
-            parse_message(event(group=10, text="/new"), self.settings)
+            parse_message(event(group=10, text="/new blank"), self.settings)
         )
         thread.id = "new-thread"
         await self.agent.turns.execute(message)
@@ -732,7 +732,7 @@ class TestAgent:
             parse_message(event(group=10, text="/prompt set 测试群设定"), self.settings)
         )
         await self.agent.commands.control(
-            parse_message(event(group=10, text="/new"), self.settings)
+            parse_message(event(group=10, text="/new blank"), self.settings)
         )
         self.agent.db.close()
         self.agent = Agent(self.settings, self.bot, self.codex)
@@ -776,7 +776,7 @@ class TestAgent:
         assert len(thread.turn.call_args.args[0]) == 1
         assert args[-1] != options["config"]["mcp_servers"]["qq_member"]["args"][-1]
         await self.agent.commands.control(
-            parse_message(event(group=10, text="/new"), self.settings)
+            parse_message(event(group=10, text="/new blank"), self.settings)
         )
         self.codex.thread_start.reset_mock()
         self.codex.thread_resume.reset_mock()
@@ -1169,6 +1169,276 @@ class TestAgent:
         )
         assert self.agent.runtime.selected_model("private-1") == "alpha"
 
+    def setup_handoff(self, text='{"summary":"成员 1 想讨论 NixOS。"}'):
+        folder = self.settings.workspace_dir / "handoff"
+        folder.mkdir(exist_ok=True)
+        with self.agent.db:
+            self.agent.db.execute(
+                "INSERT OR REPLACE INTO sessions VALUES ('group-10', 'old-thread', 'handoff', 0)"
+            )
+            self.agent.db.execute(
+                "INSERT OR REPLACE INTO group_handoffs VALUES ('10', 'previous summary')"
+            )
+        answer = AgentMessageThreadItem(
+            type="agentMessage",
+            id="summary",
+            text=text,
+            phase=MessagePhase.final_answer,
+        )
+        return self.setup_turn([item_done(answer), turn_done()])
+
+    async def test_group_handoff(self):
+        thread, _ = self.setup_handoff()
+        with self.agent.db:
+            self.agent.db.execute("INSERT INTO models VALUES ('group-10', 'chosen')")
+        command = parse_message(event(group=10, text="/new"), self.settings)
+        await self.agent.commands.control(command)
+        assert self.codex.thread_resume.call_args.args[0] == "old-thread"
+        assert thread.turn.call_args.args == (HANDOFF_INSTRUCTIONS,)
+        assert thread.turn.call_args.kwargs["model"] == "chosen"
+        assert thread.turn.call_args.kwargs["effort"] == ReasoningEffort.medium
+        assert thread.turn.call_args.kwargs["output_schema"] == HANDOFF_SCHEMA
+        assert not self.agent.turns.contexts
+        assert self.agent.db.execute("SELECT renew FROM sessions").fetchone() == (1,)
+        assert self.agent.db.execute(
+            "SELECT summary FROM group_handoffs"
+        ).fetchone() == ("成员 1 想讨论 NixOS。",)
+        assert all("NixOS" not in str(call) for call in self.bot.send.call_args_list)
+        await self.agent.commands.control(command)
+        thread.turn.assert_awaited_once()
+        self.agent.db.close()
+        self.agent = Agent(self.settings, self.bot, self.codex)
+        thread, _ = self.setup_turn([turn_done()])
+        message = parse_message(event(group=10), self.settings)
+        with patch.object(
+            self.agent.runtime,
+            "update_group",
+            side_effect=RuntimeError("injection failed"),
+        ):
+            await self.agent.turns.execute(message)
+        thread.turn.assert_not_awaited()
+        assert self.agent.db.execute("SELECT summary FROM group_handoffs").fetchone()
+        await self.agent.turns.execute(message)
+        snapshot = json.loads(self.group_instructions().split("\n", 1)[1])
+        assert snapshot["历史聊天摘要"] == "成员 1 想讨论 NixOS。"
+        assert len(thread.turn.call_args.args[0]) == 1
+        self.setup_turn(
+            [
+                item_done(
+                    AgentMessageThreadItem(
+                        type="agentMessage",
+                        id="second",
+                        text='{"summary":"延续 NixOS 话题，新增音乐讨论。"}',
+                        phase=MessagePhase.final_answer,
+                    )
+                ),
+                turn_done(),
+            ]
+        )
+        await self.agent.commands.control(command)
+        assert self.agent.db.execute(
+            "SELECT summary FROM group_handoffs"
+        ).fetchone() == ("延续 NixOS 话题，新增音乐讨论。",)
+        await self.agent.commands.control(
+            parse_message(event(group=10, text="/new blank"), self.settings)
+        )
+        self.agent.db.close()
+        self.agent = Agent(self.settings, self.bot, self.codex)
+        await self.agent.turns.execute(message)
+        assert (
+            json.loads(self.group_instructions().split("\n", 1)[1])["历史聊天摘要"]
+            == ""
+        )
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "not json",
+            "[]",
+            "{}",
+            '{"summary":" "}',
+            json.dumps({"summary": "x" * 2001}),
+        ],
+        ids=["empty", "invalid-json", "array", "missing", "blank", "too-long"],
+    )
+    async def test_handoff_invalid(self, text):
+        self.setup_handoff(text)
+        await self.agent.commands.control(
+            parse_message(event(group=10, text="/new"), self.settings)
+        )
+        self.agent.db.close()
+        self.agent = Agent(self.settings, self.bot, self.codex)
+        assert self.agent.db.execute(
+            "SELECT thread, renew FROM sessions"
+        ).fetchone() == ("old-thread", 0)
+        assert self.agent.db.execute(
+            "SELECT summary FROM group_handoffs"
+        ).fetchone() == ("previous summary",)
+        assert "原会话保留" in self.bot.send.call_args.kwargs["text"]
+
+    @pytest.mark.parametrize("action", ["/stop", "/new blank", "timeout", "shutdown"])
+    async def test_handoff_cancel(self, action):
+        thread, turn = self.setup_handoff()
+        started = asyncio.Event()
+        events = asyncio.Queue()
+
+        async def stream():
+            started.set()
+            yield await events.get()
+
+        async def interrupt():
+            events.put_nowait(turn_done(TurnStatus.interrupted))
+
+        turn.stream = stream
+        turn.interrupt.side_effect = interrupt
+        if action == "timeout":
+            self.settings.task_timeout = 0.1
+        command = parse_message(event(group=10, text="/new"), self.settings)
+        task = asyncio.create_task(self.agent.commands.control(command))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            await self.agent.commands.control(command)
+            thread.turn.assert_awaited_once()
+            self.agent.receive(event(group=10, identifier=2))
+            self.agent.receive(event(group=11, identifier=3))
+            await asyncio.gather(*self.agent.controls)
+            assert self.agent.queue.qsize() == 1
+            assert self.agent.queue.get_nowait().key == "group-11"
+            await self.agent.commands.control(
+                parse_message(event(group=10, text="/status"), self.settings)
+            )
+            assert "执行中" in self.bot.send.call_args.kwargs["text"]
+            if action.startswith("/"):
+                await self.agent.commands.control(
+                    parse_message(event(group=10, text=action), self.settings)
+                )
+            elif action == "shutdown":
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2)
+            turn.interrupt.assert_awaited_once()
+            assert not self.agent.resetting
+            assert not self.agent.commands.summaries
+            assert not self.agent.turns.contexts
+            assert self.agent.db.execute("SELECT renew FROM sessions").fetchone() == (
+                int(action == "/new blank"),
+            )
+            assert bool(
+                self.agent.db.execute("SELECT summary FROM group_handoffs").fetchone()
+            ) == (action != "/new blank")
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_handoff_routing(self):
+        self.agent.receive(event(group=10, text="/new", identifier=1))
+        await asyncio.gather(*self.agent.controls)
+        self.codex.account.assert_not_awaited()
+        self.agent.receive(event(group=10, text="/new blank", identifier=2))
+        await asyncio.gather(*self.agent.controls)
+        assert self.agent.queue.empty()
+        self.agent.receive(event(text="/new blank", identifier=3))
+        assert self.agent.queue.get_nowait().target == {"user_id": 1}
+
+    @pytest.mark.parametrize(
+        "failure", ["failed", "error", "unlogged", "rejected", "unknown", "missing-end"]
+    )
+    async def test_handoff_failure(self, failure):
+        thread, turn = self.setup_handoff()
+        events = [turn_done(TurnStatus.failed)]
+        if failure == "error":
+            events = [
+                NS(method="error", payload=NS(will_retry=False)),
+                item_done(
+                    AgentMessageThreadItem(
+                        type="agentMessage",
+                        id="answer",
+                        text='{"summary":"must not save"}',
+                    )
+                ),
+                turn_done(),
+            ]
+        elif failure == "missing-end":
+            events = []
+
+        async def stream():
+            for event in events:
+                yield event
+
+        turn.stream = stream
+        if failure == "unlogged":
+            self.codex.account.return_value = NS(account=None)
+        elif failure == "rejected":
+            thread.turn.side_effect = JsonRpcError(-32600, "rejected")
+        elif failure == "unknown":
+            thread.turn.side_effect = ConnectionError("unknown outcome")
+        expected = SystemExit if failure in {"unknown", "missing-end"} else Exception
+        with pytest.raises(expected):
+            await self.agent.runtime.summarize(
+                parse_message(event(group=10, text="/new"), self.settings),
+                "old-thread",
+                self.settings.workspace_dir / "handoff",
+                self.agent.replies.safe_send,
+            )
+        assert self.agent.db.execute("SELECT renew FROM sessions").fetchone() == (0,)
+        assert self.codex._client.request.call_args.args[0] == "thread/unsubscribe"
+
+    async def test_handoff_race(self):
+        self.setup_handoff()
+        started = asyncio.Event()
+
+        async def summarize(*args):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return "late result"
+
+        with patch.object(self.agent.runtime, "summarize", side_effect=summarize):
+            task = asyncio.create_task(
+                self.agent.commands.control(
+                    parse_message(event(group=10, text="/new"), self.settings)
+                )
+            )
+            await asyncio.wait_for(started.wait(), 2)
+            await self.agent.commands.control(
+                parse_message(event(group=10, text="/stop"), self.settings)
+            )
+            await asyncio.gather(task, return_exceptions=True)
+        assert self.agent.db.execute("SELECT renew FROM sessions").fetchone() == (0,)
+        assert self.agent.db.execute(
+            "SELECT summary FROM group_handoffs"
+        ).fetchone() == ("previous summary",)
+
+    async def test_handoff_committed(self):
+        self.setup_handoff()
+        committed = asyncio.Event()
+        sent = []
+
+        async def send(message, text):
+            sent.append(text)
+            if text.startswith("总结完成"):
+                committed.set()
+                await asyncio.Event().wait()
+
+        with patch.object(self.agent.commands, "safe_send", side_effect=send):
+            task = asyncio.create_task(
+                self.agent.commands.control(
+                    parse_message(event(group=10, text="/new"), self.settings)
+                )
+            )
+            try:
+                await asyncio.wait_for(committed.wait(), 2)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        assert all("未切换" not in text for text in sent)
+        assert self.agent.db.execute("SELECT renew FROM sessions").fetchone() == (1,)
+        assert self.agent.db.execute(
+            "SELECT summary FROM group_handoffs"
+        ).fetchone() == ("成员 1 想讨论 NixOS。",)
+
     async def test_reset_scope(self):
         with self.agent.db:
             self.agent.db.execute(
@@ -1176,7 +1446,7 @@ class TestAgent:
             )
         self.agent.receive(event(group=10, identifier=1))
         self.agent.receive(event(group=11, identifier=2))
-        command = parse_message(event(group=10, text="/new"), self.settings)
+        command = parse_message(event(group=10, text="/new blank"), self.settings)
         await self.agent.commands.control(command)
         assert self.agent.queue.qsize() == 1
         assert self.agent.queue.get_nowait().key == "group-11"
@@ -1189,7 +1459,7 @@ class TestAgent:
             for item in events:
                 yield item
 
-        turn = NS(stream=stream, interrupt=AsyncMock())
+        turn = NS(id="turn1", stream=stream, interrupt=AsyncMock())
         thread = NS(id="test-thread", turn=AsyncMock(return_value=turn))
         self.codex.thread_start = AsyncMock(return_value=thread)
         self.codex.thread_resume = AsyncMock(return_value=thread)
@@ -1873,7 +2143,7 @@ class TestAgent:
             assert "暂时无法读取" in self.bot.send.call_args.kwargs["text"]
             assert "上下文：约 12,345 tokens" in self.bot.send.call_args.kwargs["text"]
             await self.agent.commands.control(
-                parse_message(event(group=10, text="/new"), self.settings)
+                parse_message(event(group=10, text="/new blank"), self.settings)
             )
             read.reset_mock()
             await self.agent.commands.control(message)
@@ -2209,7 +2479,10 @@ class TestAgent:
                 "SELECT folder FROM sessions WHERE key=?", (message.key,)
             ).fetchone()[0]
             await self.agent.commands.control(
-                parse_message(event(group=group, text="/new"), self.settings)
+                parse_message(
+                    event(group=group, text="/new blank" if group else "/new"),
+                    self.settings,
+                )
             )
             await self.agent.turns.execute(message)
             assert self.codex.thread_start.call_args.kwargs["cwd"] == str(
@@ -2622,7 +2895,7 @@ class TestAgent:
                 assert output[0]["ok"]
                 assert self.bot.send.call_args.args[0].key == context.message.key
             await self.agent.commands.control(
-                parse_message(event(group=10, text="/new"), self.settings)
+                parse_message(event(group=10, text="/new blank"), self.settings)
             )
             turns["group-10"].interrupt.assert_awaited_once()
             turns["private-1"].interrupt.assert_not_awaited()

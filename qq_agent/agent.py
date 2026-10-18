@@ -85,9 +85,13 @@ class Agent:
             message.reply,
         )
         command = message.text if not message.images and not message.unsupported else ""
-        if command in {"/new", "/stop", "/status", "/help", "/compact"} or (
-            command.split(maxsplit=1)[:1]
-            in (["/model"], ["/profile"], ["/prompt"], ["/group-profile"])
+        if (
+            ("group_id" in message.target and command == "/new blank")
+            or command in {"/new", "/stop", "/status", "/help", "/compact"}
+            or (
+                command.split(maxsplit=1)[:1]
+                in (["/model"], ["/profile"], ["/prompt"], ["/group-profile"])
+            )
         ):
             if len(self.controls) < 8:
                 task = asyncio.create_task(self.commands.control(message))

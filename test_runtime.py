@@ -19,7 +19,13 @@ from qq_agent.config import Settings
 from qq_agent.logging import read_diagnostics
 from qq_agent.messages import ImageTurn, Message
 from qq_agent.profiles import Profiles
-from qq_agent.runtime import GROUP_BASE_INSTRUCTIONS, Runtime, load_skills
+from qq_agent.runtime import (
+    GROUP_BASE_INSTRUCTIONS,
+    HANDOFF_INSTRUCTIONS,
+    HANDOFF_SCHEMA,
+    Runtime,
+    load_skills,
+)
 from qq_agent.storage import open_database
 
 
@@ -133,6 +139,7 @@ async def test_runtime_prompts(tmp_path, mode):
     local_compact = False
     tool_sent = False
     diagnose_failure = False
+    handoff_response = False
 
     async def respond(request):
         nonlocal tool_sent
@@ -178,7 +185,26 @@ async def test_runtime_prompts(tmp_path, mode):
                 },
             },
         ]
-        if compacting and mode != "local":
+        if handoff_response and not compacting:
+            events.insert(
+                1,
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "handoff-answer",
+                        "phase": "final_answer",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"summary":"HANDOFF_BACKGROUND"}',
+                            }
+                        ],
+                    },
+                },
+            )
+        elif compacting and mode != "local":
             events.insert(
                 1,
                 {
@@ -493,6 +519,44 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert failure["request_id"] == "req_failure"
                 assert failure["thread"] == thread.id
                 assert failure["turn"] == turn.id
+                diagnose_failure = False
+                handoff_response = True
+                previous_thread = thread.id
+                send = AsyncMock()
+                with patch.object(
+                    codex, "account", AsyncMock(return_value=NS(account=object()))
+                ):
+                    summary = await runtime.summarize(
+                        message, previous_thread, workspace, send
+                    )
+                assert summary == "HANDOFF_BACKGROUND"
+                send.assert_not_awaited()
+                assert any(
+                    part.get("text") == HANDOFF_INSTRUCTIONS
+                    for item in requests[-1]["input"]
+                    for part in item.get("content", [])
+                )
+                assert requests[-1]["text"]["format"]["schema"] == HANDOFF_SCHEMA
+                with db:
+                    db.execute(
+                        "INSERT INTO group_handoffs VALUES ('10', ?)", (summary,)
+                    )
+                options, _ = await runtime.thread_options(message, workspace)
+                thread = await runtime.prepare_thread(
+                    message, None, ImageTurn(message, workspace), options
+                )
+                assert thread.id != previous_thread
+                await runtime.update_group(thread, message, profiles)
+                handoff_response = False
+                result = await thread.run([TextInput("fresh-handoff-turn")])
+                assert result.status == TurnStatus.completed
+                content = json.dumps(requests[-1]["input"], ensure_ascii=False)
+                assert "HANDOFF_BACKGROUND" in content
+                assert "fresh-handoff-turn" in content
+                assert "probe-0" not in content
+                assert "请根据当前可见上下文" not in content
+                assert "probe-compact" not in content
+                await runtime.release_thread(thread.id)
     finally:
         await codex.close()
         db.close()

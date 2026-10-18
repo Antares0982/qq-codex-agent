@@ -14,7 +14,8 @@ HELP = """直接发送文字或图片，可提问、执行代码或请求生成�
 /model <模型ID> 切换本会话模型，下一轮请求生效
 /status 查看登录、任务状态、上下文长度及用户消息数
 /stop 停止本会话任务并清空队列
-/new 开启空白会话，保留工作文件、图片索引、模型选择及聊天偏好
+/new 群聊先总结再开启新会话；私聊开启空白会话，保留工作文件等
+/new blank 仅群聊：不总结，清除交接摘要并开启空白会话
 /compact 压缩当前会话上下文，执行任务时请稍后重试
 /profile 在当前群公开查看本人聊天偏好
 /profile forget 删除本人当前群偏好，后续仍可自动学习
@@ -55,6 +56,92 @@ class Commands:
         self.resetting = resetting
         self.mark = mark
         self.cancel_chat = cancel_chat
+        self.summaries = {}
+
+    async def stop_summary(self, key):
+        task = self.summaries.get(key)
+        if task is not None:
+            if not task.cancelling():
+                task.cancel()
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+
+    async def reset_group(self, message):
+        blank = message.text == "/new blank"
+        if blank:
+            await self.stop_summary(message.key)
+        if message.key in self.resetting:
+            await self.safe_send(message, "会话正在重置，请稍后重试。")
+            return
+        self.resetting.add(message.key)
+        task = asyncio.current_task()
+        assert task is not None
+        try:
+            await self.cancel_chat(message.key)
+            row = self.db.execute(
+                "SELECT folder, thread, renew FROM sessions WHERE key=?", (message.key,)
+            ).fetchone()
+            if row and row[2] and not blank:
+                await self.safe_send(message, "已准备切换会话，下条消息将开启新会话。")
+                return
+            group = str(message.target["group_id"])
+            summary = None
+            if row and row[1] and not blank:
+                self.summaries[message.key] = task
+                await self.safe_send(
+                    message, "正在总结群聊，完成后下条消息将开启新会话……"
+                )
+                summary = await self.runtime.summarize(
+                    message,
+                    row[1],
+                    self.runtime.settings.workspace_dir / row[0],
+                    self.safe_send,
+                )
+                if self.summaries.get(message.key) is not task or task.cancelling():
+                    raise asyncio.CancelledError
+            elif row and row[1]:
+                await self.runtime.release_thread(row[1])
+            with self.db:
+                if summary is not None:
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO group_handoffs VALUES (?, ?)",
+                        (group, summary),
+                    )
+                else:
+                    self.db.execute(
+                        "DELETE FROM group_handoffs WHERE group_id=?", (group,)
+                    )
+                self.db.execute(
+                    "UPDATE sessions SET renew=1 WHERE key=?", (message.key,)
+                )
+            if self.summaries.get(message.key) is task:
+                self.summaries.pop(message.key)
+            LOG.info(
+                "Group reset chat=%s summary_chars=%d", message.key, len(summary or "")
+            )
+            await self.safe_send(
+                message,
+                "总结完成，下条消息将携带摘要开启新会话。"
+                if summary is not None
+                else "已停止当前任务，下条消息将开启空白会话，工作文件和图片索引保留。",
+            )
+        except asyncio.CancelledError:
+            if self.summaries.get(message.key) is task:
+                await self.safe_send(message, "总结已取消，未切换会话。")
+            raise
+        except Exception as error:
+            LOG.warning(
+                "Group reset failed chat=%s error=%s", message.key, log_text(error)
+            )
+            await self.safe_send(message, "群聊重置失败，原会话保留，未自动重试。")
+        finally:
+            if self.summaries.get(message.key) is task:
+                self.summaries.pop(message.key)
+            self.resetting.discard(message.key)
 
     async def group_control(self, message):
         if "group_id" not in message.target:
@@ -173,6 +260,12 @@ class Commands:
 
     async def control(self, message):
         try:
+            if "group_id" in message.target:
+                if message.text in {"/new", "/new blank"}:
+                    await self.reset_group(message)
+                    return
+                if message.text == "/stop":
+                    await self.stop_summary(message.key)
             if message.text.split(maxsplit=1)[:1] in (["/prompt"], ["/group-profile"]):
                 await self.group_control(message)
                 return
@@ -209,7 +302,7 @@ class Commands:
                     if account.account is not None
                     else "未登录，请管理员完成设备码登录"
                 )
-                busy = message.key in self.jobs
+                busy = message.key in self.jobs or message.key in self.summaries
                 row = self.db.execute(
                     "SELECT thread FROM sessions WHERE key=? AND renew=0",
                     (message.key,),
