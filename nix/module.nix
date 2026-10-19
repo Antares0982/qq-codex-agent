@@ -68,6 +68,7 @@ let
       resources_dir = resources;
       group_prompt_allow_members = cfg.groupPromptAllowMembers;
     }
+    // lib.optionalAttrs (cfg.agentAdminQQ != null) { agent_admin_qq = cfg.agentAdminQQ; }
     // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
   );
   requirements = (pkgs.formats.toml { }).generate "qq-codex-requirements.toml" {
@@ -169,6 +170,11 @@ in
       type = lib.types.bool;
       default = false;
       description = "Allow all authorized group members to change group prompts and clear group memory.";
+    };
+    agentAdminQQ = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Agent administrator QQ identity for new group threads; grants no additional permissions.";
     };
     authSocket = lib.mkOption {
       type = lib.types.str;

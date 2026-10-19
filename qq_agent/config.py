@@ -30,6 +30,7 @@ class Settings:
     auth_socket: Path | None = None
     resources_dir: Path | None = None
     group_prompt_allow_members: bool = False
+    agent_admin_qq: str | None = None
 
     def check_prompts(self, required=False):
         for key in ("agents_file", "private_agents_file", "group_agents_file"):
@@ -91,6 +92,8 @@ class Settings:
                 raw[key] = Path(raw[key])
                 if not raw[key].is_absolute():
                     raise ValueError(f"{key} must be absolute")
+        if "agent_admin_qq" in raw:
+            raw["agent_admin_qq"] = qq_id(raw["agent_admin_qq"])
         settings = cls(**raw)
         if type(settings.group_prompt_allow_members) is not bool:
             raise ValueError("group_prompt_allow_members must be boolean")

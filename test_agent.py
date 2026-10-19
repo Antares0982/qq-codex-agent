@@ -383,6 +383,7 @@ class TestAgent:
         [("owner", True), ("admin", True), ("member", False), (None, False)],
     )
     async def test_prompt_permissions(self, role, allowed):
+        self.settings.agent_admin_qq = "1"
         self.bot.call.return_value = {"group_id": 10, "user_id": 1, "role": role}
         self.agent.receive(event(group=10, text="/prompt set 多行\n群设定"))
         await asyncio.gather(*self.agent.controls)
@@ -463,13 +464,37 @@ class TestAgent:
             )
             assert self.codex._client.request.await_count == before
             await self.agent.turns.execute(message)
-            dynamic = json.loads(self.group_instructions().split("\n", 1)[1])
-            assert dynamic["群设定"] == prompt
-        assert thread.turn.await_count == 3
-        with self.agent.db:
-            self.agent.db.execute(
-                "INSERT INTO group_prompts VALUES ('10', 'changed', '1', 0)"
+            assert "群设定" not in json.loads(
+                self.group_instructions().split("\n", 1)[1]
             )
+            if prompt == "first":
+                assert (
+                    "first"
+                    in self.codex.thread_start.call_args.kwargs["base_instructions"]
+                )
+            else:
+                assert (
+                    "base_instructions" not in self.codex.thread_resume.call_args.kwargs
+                )
+        assert thread.turn.await_count == 3
+        for prompt in ("latest", ""):
+            await self.agent.commands.control(
+                parse_message(
+                    event(
+                        group=10,
+                        text="/prompt set " + prompt if prompt else "/prompt clear",
+                    ),
+                    self.settings,
+                )
+            )
+            await self.agent.commands.control(
+                parse_message(event(group=10, text="/new blank"), self.settings)
+            )
+            await self.agent.turns.execute(message)
+            instructions = self.codex.thread_start.call_args.kwargs["base_instructions"]
+            assert ("latest" in instructions) == bool(prompt)
+            assert "first" not in instructions
+        self.settings.agents_file.write_text("changed application rules")
 
         def fail_injection(method, *args, **kwargs):
             if method == "thread/inject_items":
@@ -478,7 +503,28 @@ class TestAgent:
 
         self.codex._client.request.side_effect = fail_injection
         await self.agent.turns.execute(message)
-        assert thread.turn.await_count == 3
+        assert thread.turn.await_count == 5
+
+    @pytest.mark.parametrize("admin", [None, "123456789"])
+    async def test_admin_instructions(self, admin):
+        self.settings.agent_admin_qq = admin
+        self.setup_turn([turn_done()])
+        self.settings.groups["11"] = {"1"}
+        for group in (10, 11, None):
+            message = parse_message(event(group=group), self.settings)
+            await self.agent.turns.execute(message)
+            options = self.codex.thread_start.call_args.kwargs
+            instructions = options.get("base_instructions", "")
+            assert ("管理员 QQ 号为 123456789" in instructions) == (
+                group is not None and admin is not None
+            )
+            if group is None:
+                assert "base_instructions" not in options
+                assert "123456789" not in options["developer_instructions"]
+            else:
+                assert "123456789" not in self.group_instructions()
+            await self.agent.turns.execute(message)
+            assert "base_instructions" not in self.codex.thread_resume.call_args.kwargs
 
     async def test_snapshot_dedup(self):
         thread, _ = self.setup_turn([turn_done()])
@@ -530,7 +576,7 @@ class TestAgent:
             before = injections()
             await self.agent.turns.execute(message)
             await self.agent.turns.execute(message)
-            assert injections() == before + 1
+            assert injections() == before
         for statement in (
             "INSERT INTO group_profiles VALUES ('10', '音乐', 0)",
             "INSERT INTO member_profiles VALUES ('10', '2', 'Other', '{}', 0)",
@@ -545,7 +591,9 @@ class TestAgent:
             assert injections() == before + 1
         before = injections()
         with self.agent.db:
-            self.agent.db.execute("UPDATE group_prompts SET prompt='retry'")
+            self.agent.db.execute(
+                "INSERT INTO group_profiles VALUES ('10', 'retry', 0)"
+            )
         old = self.agent.db.execute("SELECT * FROM group_snapshots").fetchall()
         with patch.object(
             self.codex._client, "request", side_effect=RuntimeError("failed")
@@ -962,7 +1010,15 @@ class TestAgent:
         assert settings.private_users == set()
         assert settings.groups == {}
         assert settings.group_prompt_allow_members is False
+        assert settings.agent_admin_qq is None
         original = path.read_text()
+        for value in ('"00123"', "123"):
+            path.write_text(original + f"agent_admin_qq={value}\n")
+            assert Settings.load(path).agent_admin_qq == "123"
+        for value in ('""', '"all"', '"１２３"', "0", "-1", "true", "1.5", "[]"):
+            path.write_text(original + f"agent_admin_qq={value}\n")
+            with pytest.raises(ValueError, match="QQ IDs"):
+                Settings.load(path)
         for value in ('"false"', "1", "[]"):
             path.write_text(original + f"group_prompt_allow_members={value}\n")
             with pytest.raises(ValueError, match="must be boolean"):

@@ -1,6 +1,8 @@
 private_users = []
 groups = {}
 group_prompt_allow_members = false
+# 可选：仅提示管理员身份，新建群会话生效。
+# agent_admin_qq = "123456789"
 napcat_url = "ws://127.0.0.1:3001"
 token_file = "/etc/qq-codex-agent/napcat-token"
 state_dir = "/var/lib/qq-codex-agent"

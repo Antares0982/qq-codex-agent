@@ -249,6 +249,7 @@ async def test_runtime_prompts(tmp_path, mode):
         tmp_path / "state",
         tmp_path / "work",
         tmp_path / "AGENTS.md",
+        agent_admin_qq="123456789",
     )
     db = open_database(settings)
     home = tmp_path / "codex"
@@ -330,6 +331,8 @@ async def test_runtime_prompts(tmp_path, mode):
                 if mode == "upgrade"
                 else ("PROMPT_ALPHA", "PROMPT_BETA", "PROMPT_BETA", "", "")
             ):
+                if index == 1:
+                    settings.agent_admin_qq = "987654321"
                 if index == 2:
                     await codex.close()
                     db.close()
@@ -348,7 +351,7 @@ async def test_runtime_prompts(tmp_path, mode):
                     )
                     db.execute(
                         "INSERT OR REPLACE INTO group_profiles VALUES ('10', ?, 0)",
-                        ("GROUP_MEMORY" if prompt else "",),
+                        (f"GROUP_MEMORY_{min(index, 1)}" if prompt else "",),
                     )
                     db.execute("DELETE FROM member_profiles")
                     if prompt:
@@ -359,6 +362,9 @@ async def test_runtime_prompts(tmp_path, mode):
                 options, model = await runtime.thread_options(message, workspace)
                 if mode == "upgrade" and index == 0:
                     options["developer_instructions"] = "LEGACY_APPLICATION_RULES"
+                    settings.agent_admin_qq = None
+                    with db:
+                        db.execute("DELETE FROM group_prompts WHERE group_id='10'")
                 context = ImageTurn(message, workspace)
                 if index != 1:
                     thread = await runtime.prepare_thread(
@@ -441,8 +447,19 @@ async def test_runtime_prompts(tmp_path, mode):
             )
             assert "send_sticker" in {tool["name"] for tool in image_tools["tools"]}
             for index, request in enumerate(requests):
-                assert request["instructions"] == GROUP_BASE_INSTRUCTIONS
+                assert request["instructions"].startswith(GROUP_BASE_INSTRUCTIONS)
+                assert ("PROMPT_ALPHA" in request["instructions"]) == (
+                    mode != "upgrade"
+                )
+                assert "PROMPT_BETA" not in request["instructions"]
+                assert ("管理员 QQ 号为 123456789" in request["instructions"]) == (
+                    mode != "upgrade"
+                )
+                assert "987654321" not in request["instructions"]
                 content = json.dumps(request["input"], ensure_ascii=False)
+                assert "PROMPT_ALPHA" not in content
+                assert "PROMPT_BETA" not in content
+                assert "管理员 QQ 号为" not in content
                 assert "prompt-probe" in content
                 assert "harness-maintenance" in content
                 assert "<multi_agent_role>" not in content
@@ -464,20 +481,17 @@ async def test_runtime_prompts(tmp_path, mode):
                     for item in request["input"]
                     if item.get("role") == "developer"
                     for part in item.get("content", [])
-                    if "以下是本轮最新群设定" in part.get("text", "")
+                    if "以下是本轮最新应用提示词" in part.get("text", "")
                 ]
                 assert updates
                 update_counts.append(len(updates))
                 snapshot = json.loads(updates[-1].split("\n", 1)[1])
                 cleared = "probe-3" in content
-                assert snapshot["群设定"] == (
-                    ""
-                    if cleared
-                    else "PROMPT_BETA"
-                    if "probe-1" in content and mode != "upgrade"
-                    else "PROMPT_ALPHA"
+                assert "群设定" not in snapshot
+                assert "基础提示词" not in snapshot
+                assert snapshot["群共同记录"] == (
+                    "" if cleared else f"GROUP_MEMORY_{int('probe-1' in content)}"
                 )
-                assert snapshot["群共同记录"] == ("" if cleared else "GROUP_MEMORY")
                 assert bool(snapshot["成员记录"]) != cleared
                 assert ("MEMBER_MEMORY" in updates[-1]) != cleared
             if mode == "plain":
@@ -530,6 +544,8 @@ async def test_runtime_prompts(tmp_path, mode):
                         message, previous_thread, workspace, send
                     )
                 assert summary == "HANDOFF_BACKGROUND"
+                assert "PROMPT_ALPHA" in requests[-1]["instructions"]
+                assert "管理员 QQ 号为 123456789" in requests[-1]["instructions"]
                 send.assert_not_awaited()
                 assert any(
                     part.get("text") == HANDOFF_INSTRUCTIONS
@@ -556,7 +572,29 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert "probe-0" not in content
                 assert "请根据当前可见上下文" not in content
                 assert "probe-compact" not in content
+                assert "PROMPT_ALPHA" not in requests[-1]["instructions"]
+                assert "管理员 QQ 号为 987654321" in requests[-1]["instructions"]
                 await runtime.release_thread(thread.id)
+                for prompt in ("PROMPT_BETA", ""):
+                    with db:
+                        db.execute(
+                            "UPDATE group_prompts SET prompt=? WHERE group_id='10'",
+                            (prompt,),
+                        )
+                    settings.agent_admin_qq = None
+                    options, _ = await runtime.thread_options(message, workspace)
+                    thread = await runtime.prepare_thread(
+                        message, None, ImageTurn(message, workspace), options
+                    )
+                    await runtime.update_group(thread, message, profiles)
+                    result = await thread.run([TextInput("new-system-probe")])
+                    assert result.status == TurnStatus.completed
+                    instructions = requests[-1]["instructions"]
+                    assert ("PROMPT_BETA" in instructions) == bool(prompt)
+                    assert "PROMPT_ALPHA" not in instructions
+                    assert "管理员 QQ 号为" not in instructions
+                    assert "PROMPT_BETA" not in json.dumps(requests[-1]["input"])
+                    await runtime.release_thread(thread.id)
     finally:
         await codex.close()
         db.close()

@@ -53,11 +53,12 @@ RPi 的共享服务和一次性 `codex-auth-import` 由 Nix 仓库维护；令�
 `agentsFile`、`privateAgentsFile`、`groupAgentsFile` 可分别指定覆盖文件的绝对路径。
 私聊继续在新建/恢复 thread 时传入公共及私聊模板，不提供表情工具。
 私聊和群聊关闭 runtime 的 `multi_agent_role` 与 `collaboration_mode` 提示词注入，其他 developer 提示词保留。同时关闭 `recommended_plugins` 和 `tool_suggest`，停用插件推荐上下文与安装推荐工具，保留已安装插件。已有历史中的旧提示词不会被删除，部署后可用 `/new` 创建不含这些提示词的新上下文。
-群聊在每个独立 turn 前重读公共及群聊模板，将应用规则、表情名称、群设定与记忆纳入完整快照；与上次成功注入内容相同则跳过，否则显式注入并持久保存。群聊升级无需 `/new`，压缩后下一轮补注入；表情 JSON 仍仅启动时加载。
+群聊在每个独立 turn 前重读公共及群聊模板，将应用规则、表情名称与记忆纳入完整快照；与上次成功注入内容相同则跳过，否则显式注入并持久保存。应用规则更新无需 `/new`，压缩后下一轮补注入；表情 JSON 仍仅启动时加载。
 `services.qq-codex-agent.groupPromptAllowMembers` 默认 `false`，对应主配置
 `group_prompt_allow_members`：仅可交互用户中的群主、管理员能修改群设定或清除群共同记录；
 设为 `true` 后，所有可交互用户均可操作。查看仍对所有可交互用户开放。
-群提示词通过 `/prompt set <内容>` 设置，`/prompt clear` 恢复默认，下个独立 turn 生效。
+群提示词通过 `/prompt set <内容>` 设置，`/prompt clear` 恢复默认，仅在新建群 thread 时通过 `base_instructions` 写入 system；可用 `/new` 或 `/new blank` 切换。恢复、总结和压缩不覆盖已保存的 system，旧 thread 不自动迁移。
+可选 `services.qq-codex-agent.agentAdminQQ = "123456789"` 对应主配置 `agent_admin_qq`，默认 `null` 时省略该字段。配置的 QQ 仅作为 agent 管理员身份写入所有新群 thread 的 system，不增加应用权限、不影响私聊；变更配置后重新部署并新建群 thread 生效。
 启动自检要求三份文件可读且非空，登录流程不要求 NapCat token 已准备完成。
 
 首次迁移前比较 Pi 上原有 `/etc/qq-codex-agent/AGENTS*.md` 与本仓库模板。

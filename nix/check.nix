@@ -25,6 +25,7 @@ let
       privateAgentsFile = "/custom/private.md";
       groupAgentsFile = "/custom/group.md";
       groupPromptAllowMembers = true;
+      agentAdminQQ = "123456789";
     };
   };
   mounts = config.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
@@ -38,6 +39,13 @@ let
     builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-agent/config.toml" path) mounts
   );
   configFile = builtins.head (pkgs.lib.splitString ":" configMount);
+  customConfigFile = builtins.head (
+    pkgs.lib.splitString ":" (
+      builtins.head (
+        builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-agent/config.toml" path) customMounts
+      )
+    )
+  );
   requirementsMount = builtins.head (
     builtins.filter (path: pkgs.lib.hasSuffix ":/etc/codex/requirements.toml" path) mounts
   );
@@ -45,6 +53,8 @@ let
 in
 assert !config.services.qq-codex-agent.groupPromptAllowMembers;
 assert custom.services.qq-codex-agent.groupPromptAllowMembers;
+assert config.services.qq-codex-agent.agentAdminQQ == null;
+assert custom.services.qq-codex-agent.agentAdminQQ == "123456789";
 assert builtins.all (
   name:
   builtins.elem "${pkgs.emptyDirectory}/share/qq-codex-agent/${name}:/etc/qq-codex-agent/${name}" mounts
@@ -67,7 +77,7 @@ pkgs.runCommand "qq-codex-deployment-check"
     ];
   }
   ''
-    python - ${configFile} ${requirementsFile} <<'PY'
+    python - ${configFile} ${requirementsFile} ${customConfigFile} <<'PY'
     import sys
     import tomllib
     from pathlib import Path
@@ -81,6 +91,9 @@ pkgs.runCommand "qq-codex-deployment-check"
         assert config[key] == f"/etc/qq-codex-agent/{name}"
     assert config["auth_socket"] == "/run/codex-auth/auth.sock"
     assert config["group_prompt_allow_members"] is False
+    assert "agent_admin_qq" not in config
+    custom = tomllib.loads(Path(sys.argv[3]).read_text())
+    assert custom["agent_admin_qq"] == "123456789"
     requirements = tomllib.loads(Path(sys.argv[2]).read_text())
     assert requirements["allowed_approval_policies"] == ["on-request"]
     assert requirements["allowed_approvals_reviewers"] == ["auto_review"]
