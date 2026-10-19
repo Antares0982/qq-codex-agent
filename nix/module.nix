@@ -55,22 +55,26 @@ let
     } cfg.codexSettings
   );
   nsswitch = pkgs.writeText "qq-codex-nsswitch.conf" "hosts: files dns\n";
-  configFile = (pkgs.formats.toml { }).generate "qq-codex-config.toml" (
-    {
-      allowlist_file = "/etc/qq-codex-private/allowlist.toml";
-      napcat_url = cfg.napcatUrl;
-      token_file = "/etc/qq-codex-private/napcat-token";
-      state_dir = state;
-      workspace_dir = work;
-      queue_limit = 8;
-      task_timeout = 3600;
-      auth_socket = cfg.authSocket;
-      resources_dir = resources;
-      group_prompt_allow_members = cfg.groupPromptAllowMembers;
-    }
-    // lib.optionalAttrs (cfg.agentAdminQQ != null) { agent_admin_qq = cfg.agentAdminQQ; }
-    // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
-  );
+  configFile =
+    if cfg.configFile != null then
+      cfg.configFile
+    else
+      (pkgs.formats.toml { }).generate "qq-codex-config.toml" (
+        {
+          allowlist_file = "/etc/qq-codex-private/allowlist.toml";
+          napcat_url = cfg.napcatUrl;
+          token_file = "/etc/qq-codex-private/napcat-token";
+          state_dir = state;
+          workspace_dir = work;
+          queue_limit = 8;
+          task_timeout = 3600;
+          auth_socket = cfg.authSocket;
+          resources_dir = resources;
+          group_prompt_allow_members = cfg.groupPromptAllowMembers;
+        }
+        // lib.optionalAttrs (cfg.agentAdminQQ != null) { agent_admin_qq = cfg.agentAdminQQ; }
+        // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
+      );
   requirements = (pkgs.formats.toml { }).generate "qq-codex-requirements.toml" {
     allowed_approval_policies = [ "on-request" ];
     allowed_approvals_reviewers = [ "auto_review" ];
@@ -115,8 +119,7 @@ let
     StateDirectoryMode = "0700";
     UMask = "0077";
     BindReadOnlyPaths = [
-      "${configFile}:/etc/qq-codex-agent/config.toml"
-      "${cfg.allowlistFile}:/etc/qq-codex-private/allowlist.toml"
+      "${configFile}:/etc/qq-codex-private/config.toml"
       "${pkgs.emptyDirectory}:${state}/codex/tmp/arg0"
       "${codexConfig}:${state}/codex/config.toml"
       "${requirements}:/etc/codex/requirements.toml"
@@ -126,6 +129,9 @@ let
       "/etc/resolv.conf:/etc/resolv.conf"
       "/etc/hosts:/etc/hosts"
     ]
+    ++ lib.optional (
+      cfg.configFile == null && cfg.allowlistFile != null
+    ) "${cfg.allowlistFile}:/etc/qq-codex-private/allowlist.toml"
     ++ lib.mapAttrsToList (_: prompt: "${prompt.file}:/etc/qq-codex-agent/${prompt.name}") prompts;
     BindPaths = [
       state
@@ -164,7 +170,16 @@ in
   options.services.qq-codex-agent = {
     enable = lib.mkEnableOption "personal QQ Codex agent";
     package = lib.mkOption { type = lib.types.package; };
-    allowlistFile = lib.mkOption { type = lib.types.str; };
+    configFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Absolute runtime path to a complete application TOML file, such as an agenix secret. Replaces generated configuration; application settings options are ignored.";
+    };
+    allowlistFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "External allowlist used only when configFile is unset.";
+    };
     tokenFile = lib.mkOption { type = lib.types.str; };
     groupPromptAllowMembers = lib.mkOption {
       type = lib.types.bool;
@@ -210,6 +225,16 @@ in
     };
   };
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.configFile != null || cfg.allowlistFile != null;
+        message = "qq-codex-agent requires configFile or allowlistFile.";
+      }
+      {
+        assertion = cfg.configFile == null || lib.hasPrefix "/" cfg.configFile;
+        message = "qq-codex-agent configFile must be absolute.";
+      }
+    ];
     systemd.packages = [ runtimeMounts ];
     users.groups.${user} = { };
     users.users.${user} = {
@@ -246,7 +271,7 @@ in
         ExecStartPre = [
           "${app}/bin/qq-codex-check"
         ];
-        ExecStart = "${app}/bin/qq-codex-agent";
+        ExecStart = "${app}/bin/qq-codex-agent --config /etc/qq-codex-private/config.toml";
         BindReadOnlyPaths = serviceConfig.BindReadOnlyPaths ++ [
           "${cfg.tokenFile}:/etc/qq-codex-private/napcat-token"
           "/run/codex-auth"

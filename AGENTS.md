@@ -54,7 +54,7 @@
 允许记录游戏、音乐、专业方向和本人主动提供、用于共同游戏的 Steam 公开标识；不记录真实姓名、私密联系方式、住址、证件、登录账号、凭据及其他敏感信息，不拼接现实身份线索。语义由模型规则约束，结构校验不能保证消除提示词注入或敏感内容。
 `/profile` 查看本人记录，`/profile forget` 删除并禁止当前活动任务写回该成员，不论其是否为任务发起者。`/group-profile` 查看群共同记录，`/group-profile forget` 清除并禁止当前任务写回，清除权限与群设定修改一致。后续独立轮次仍可重新学习；删除不清除旧 Codex 历史、旧提示词快照或 journal。不提供永久关闭记忆、跨群记忆或后台总结。
 `/prompt` 查看群设定，`/prompt set <内容>` 完整替换（允许多行，最多 4000 字符），`/prompt clear` 恢复默认。设置和清除成功只回复“保存成功”，新建群 thread 时生效，可用 `/new` 或 `/new blank` 切换。主配置 `group_prompt_allow_members` 必须为 bool，默认 false：仅可交互用户中的群主、管理员能修改；true 时所有可交互用户均可修改。NapCat 群角色查询失败时拒绝修改。SQLite 的 `group_prompts` 按群保存设定、修改者和时间；所有设定及记录在重启、压缩和 `/new` 后保留。
-仅新建群 thread 时组装 `base_instructions`，作为 system 指令包含基础规则与当前保存的群设定；可选主配置 `agent_admin_qq` 指定单个全局管理员 QQ，接受正整数或数字字符串并复用 QQ 号校验，缺省不注入、非法值阻止启动。配置存在时在所有新群 thread 的 system 中说明该 QQ 的 agent 管理员身份，不增加白名单、群设定修改或工具权限，私聊不注入。Nix 对应 `services.qq-codex-agent.agentAdminQQ`，默认 null。管理员变更在重新加载配置后创建的新群 thread 生效。恢复、总结和压缩沿用 runtime 保存的 system，不覆盖 `base_instructions`；旧 thread 不补写 system、不清理历史。基础规则保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。群聊在每个独立 turn 开始前重新读取公共及群聊提示词文件、替换 bot 昵称，并组装完整提示词快照：应用规则、QQ 图片交付说明、Pillow 路径、表情规则与全部可用名称、公共/群聊模板、最新全群记忆和交接摘要。与 SQLite `group_snapshots` 按 thread 保存的上次成功注入内容比较；相同则跳过，不同才通过 `thread/inject_items` 显式注入 developer 消息，成功后保存完整快照。表情 JSON 仍仅在进程启动时加载一次，其名称列表参与轮前快照比较。旧群 thread 的应用规则与记忆也按内容差异补注入，不需要 `/new`，群设定及管理员 system 需新建 thread 生效。私聊保留原有新建/恢复时传入提示词的机制，不参与本次轮前快照逻辑，也不提供表情功能。最新应用规则与记忆快照替代旧快照，不包含群设定和管理员身份。去重跨重启保留，新 thread（包括 `/new`）首次必注入；手动、空闲及自动压缩完成后使去重记录失效，下次独立 turn 补注入，轮前空闲压缩则在本轮启动前补注入。不能借用 `collaborationMode.settings.developer_instructions`：模型目录中的协作模板会优先覆盖该字段。群 thread 开启 `features.retain_client_developer_messages`，使远程 v2 手动、轮前及轮中自动压缩保留客户端 developer 消息。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前规则；应用规则与记忆变更下个独立 turn 生效，群设定变更新建 thread 生效，历史保留。普通消息及 steering 不附加偏好文本。
+仅新建群 thread 时组装 `base_instructions`，作为 system 指令包含基础规则与当前保存的群设定；可选主配置 `agent_admin_qq` 指定单个全局管理员 QQ，接受正整数或数字字符串并复用 QQ 号校验，缺省不注入、非法值阻止启动。配置存在时在所有新群 thread 的 system 中说明该 QQ 的 agent 管理员身份，不增加白名单、群设定修改或工具权限，私聊不注入。RPi 在完整配置 age 文件中填写该字段；旧 Nix 生成模式对应 `services.qq-codex-agent.agentAdminQQ`，默认 null。管理员变更在重新加载配置后创建的新群 thread 生效。恢复、总结和压缩沿用 runtime 保存的 system，不覆盖 `base_instructions`；旧 thread 不补写 system、不清理历史。基础规则保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。群聊在每个独立 turn 开始前重新读取公共及群聊提示词文件、替换 bot 昵称，并组装完整提示词快照：应用规则、QQ 图片交付说明、Pillow 路径、表情规则与全部可用名称、公共/群聊模板、最新全群记忆和交接摘要。与 SQLite `group_snapshots` 按 thread 保存的上次成功注入内容比较；相同则跳过，不同才通过 `thread/inject_items` 显式注入 developer 消息，成功后保存完整快照。表情 JSON 仍仅在进程启动时加载一次，其名称列表参与轮前快照比较。旧群 thread 的应用规则与记忆也按内容差异补注入，不需要 `/new`，群设定及管理员 system 需新建 thread 生效。私聊保留原有新建/恢复时传入提示词的机制，不参与本次轮前快照逻辑，也不提供表情功能。最新应用规则与记忆快照替代旧快照，不包含群设定和管理员身份。去重跨重启保留，新 thread（包括 `/new`）首次必注入；手动、空闲及自动压缩完成后使去重记录失效，下次独立 turn 补注入，轮前空闲压缩则在本轮启动前补注入。不能借用 `collaborationMode.settings.developer_instructions`：模型目录中的协作模板会优先覆盖该字段。群 thread 开启 `features.retain_client_developer_messages`，使远程 v2 手动、轮前及轮中自动压缩保留客户端 developer 消息。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前规则；应用规则与记忆变更下个独立 turn 生效，群设定变更新建 thread 生效，历史保留。普通消息及 steering 不附加偏好文本。
 
 需要 Python 3.13、uv，以及 PATH 中的 Node.js（供 Pyright 使用）。提交 `uv.lock`，使用配套锁定的官方 SDK 和 runtime。
 
@@ -108,7 +108,7 @@ Nix 仓库的 `rpi/qq-codex-agent.nix` 只负责 agenix、代理、NapCat 启动
 services.qq-codex-agent.enable = true;
 ```
 
-QQ 用户和群白名单放在 Nix 仓库的 `secrets/qq-codex-allowlist.age` 中。
+完整应用配置放在 Nix 仓库的 `secrets/qq-codex-allowlist.age` 中；保留历史文件名，内容已不限于白名单。
 在 Nix 仓库根目录编辑加密文件：
 
 ```sh
@@ -116,9 +116,22 @@ cd secrets
 sudo agenix -e qq-codex-allowlist.age -i /etc/ssh/agenix
 ```
 
-文件内容为 TOML（将示例数字替换为自己的 QQ 号和群号）：
+文件内容为完整 TOML（将示例数字替换为自己的 QQ 号和群号，顶层字段放在群表之前）：
 
 ```toml
+napcat_url = "ws://127.0.0.1:3001"
+token_file = "/etc/qq-codex-private/napcat-token"
+state_dir = "/var/lib/qq-codex-agent"
+workspace_dir = "/var/lib/qq-codex-work"
+resources_dir = "/var/lib/qq-codex-resources"
+auth_socket = "/run/codex-auth/auth.sock"
+agents_file = "/etc/qq-codex-agent/AGENTS.md"
+private_agents_file = "/etc/qq-codex-agent/AGENTS.private.md"
+group_agents_file = "/etc/qq-codex-agent/AGENTS.group.md"
+queue_limit = 8
+task_timeout = 3600
+group_prompt_allow_members = false
+# agent_admin_qq = "123456789"
 private_users = ["123456789"]
 
 [groups."987654321"]
@@ -129,10 +142,14 @@ users = ["all"]
 ```
 
 解密文件位于 `/run/agenix/qqCodexAllowlist`，仅专用服务用户可读。
-它在服务内只读挂载为 `/etc/qq-codex-private/allowlist.toml`，禁止 Codex 工具读取。
-主配置通过 `allowlist_file` 指向该文件，不将 QQ 号写入公开 Nix 配置或 Nix store。
+Nix 设置 `services.qq-codex-agent.configFile = config.age.secrets.qqCodexAllowlist.path`，
+直接只读挂载为 `/etc/qq-codex-private/config.toml`，启动命令显式传入该路径；
+整个目录禁止 Codex 工具读取。完整配置不合并 Nix 默认值、不设置 `allowlist_file`，
+不将 QQ 号或配置明文写入公开 Nix 配置、Git 或 Nix store。
+`configFile` 模式忽略用于生成应用字段的 `allowlistFile`、`napcatUrl`、`groupPromptAllowMembers`、`agentAdminQQ`、`authSocket`。
+提示词资源、Codex runtime 配置、token、共享认证和服务挂载仍由 Nix 管理；配置中的路径须匹配挂载。
 空名单不放行任何用户；文件缺失或格式错误会阻止启动。修改后重新部署，服务自动重启读取。
-独立运行仍可使用 `config.example.toml` 中的内联名单；设置 `allowlist_file` 时以外部文件为准。
+独立运行仍可使用 `config.example.toml`；CLI 默认配置路径保持兼容。Nix 不设置 `configFile` 时保留原生成方式，要求 `allowlistFile`，主配置也挂载到新的受保护路径；应用设置 `allowlist_file` 时仍仅接受外部白名单字段。
 上述示例中 `234567890` 只能在指定群使用，不能私聊；`"all"` 不开放其他群或私聊。
 不接受 `allowed_users` / `allowed_groups` 字段。按实际需要分别配置私聊及各群权限。
 
@@ -228,6 +245,6 @@ Codex 0.159.2 的多个文件级 deny-read 会触发 bubblewrap 文件描述符�
 `CODEX_HOME/tmp/arg0` 只读，让官方 runtime 使用自身可执行文件回退入口。
 PATH aliases 的只读警告是预期现象；必须以实际 thread、沙箱和资源读取自检为准。
 不要开放私有状态或关闭沙箱。详情见 `nix/README.md`。
-遇到 `Unknown allowlist fields`，核对加密文件格式和实际运行的源码版本；重启服务不会更新 flake 锁定的旧代码。
+遇到 `Unknown allowlist fields`，确认完整配置已通过新模块的 `configFile` 接入而非旧白名单入口，并核对实际运行的源码版本；重启服务不会更新 flake 锁定的旧代码。
 登录失败检查登录 unit 日志和本地代理；不要输出或分享 token、设备码及认证文件。
 推送源码后必须更新 Nix input、同步锁文件并在 Pi 切换系统；只更新应用仓库不会更新运行中的服务。

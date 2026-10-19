@@ -64,12 +64,16 @@ async def check_skills(codex, root, workspace):
 
 
 def check_permissions(root, settings):
+    private = root / "private"
+    private.mkdir()
+    config = private / "config.toml"
+    config.write_text('private_users=[]\nagent_admin_qq="123456789"\n')
     requirements = root / "requirements.toml"
     requirements.write_text(
         'allowed_approval_policies = ["on-request"]\n'
         'allowed_approvals_reviewers = ["auto_review"]\n'
         'allowed_sandbox_modes = ["workspace-write", "read-only"]\n'
-        f'[permissions.filesystem]\ndeny_read = ["{settings.state_dir}"]\n'
+        f'[permissions.filesystem]\ndeny_read = ["{settings.state_dir}", "{private}"]\n'
     )
     canary = settings.state_dir / "canary"
     canary.write_text("test fixture")
@@ -109,9 +113,10 @@ def check_permissions(root, settings):
         "--",
         "/bin/sh",
         "-ec",
-        'test ! -r "$1"; printf ok > probe; test "$(cat probe)" = ok',
+        'test ! -r "$1"; test ! -r "$2"; printf ok > probe; test "$(cat probe)" = ok',
         "check",
         str(canary),
+        str(config),
     ]
     subprocess.run(command, cwd=settings.workspace_dir, env=env, check=True, timeout=30)
     # Reuse the same mount restrictions for the app-server path, without a model call.
@@ -174,7 +179,9 @@ if __name__ == "__main__":
             root / "AGENTS.md",
         )
         check_app_server_sandbox(
-            settings, settings.workspace_dir, [settings.state_dir / "canary"]
+            settings,
+            settings.workspace_dir,
+            [settings.state_dir / "canary", root / "private/config.toml"],
         )
     else:
         asyncio.run(main(args.sandbox))

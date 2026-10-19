@@ -15,13 +15,34 @@
     package = import (inputs.qq-codex-agent + "/nix/package.nix") {
       inherit inputs system;
     };
-    allowlistFile = "/run/agenix/qqCodexAllowlist";
+    configFile = "/run/agenix/qqCodexAllowlist";
     tokenFile = "/run/qq-codex-auth/token";
   };
 }
 ```
 
-这两个秘密文件必须由宿主部署配置准备，并允许 `qq-codex-agent` 用户读取。
+`configFile` 指向运行时完整应用 TOML（通常为 `config.age.secrets.qqCodexAllowlist.path`），
+以字符串路径传入；不在 Nix 求值时读取内容，也不合并生成配置。
+它只读挂载为 `/etc/qq-codex-private/config.toml`，启动命令显式使用该路径，
+目录级 managed deny-read 阻止模型工具读取。`tokenFile` 继续指向单独的 NapCat token。
+这两个文件必须由宿主准备，并允许 `qq-codex-agent` 用户读取。
+
+RPi 沿用 `secrets/qq-codex-allowlist.age` 文件名，但内容已升级为完整配置，
+可同时填写 `private_users`、`groups`、`agent_admin_qq`、`model` 等字段。
+完整示例见仓库维护指南；`config.example.toml` 是独立运行示例，Nix 部署还须启用其中
+`auth_socket`、`resources_dir` 两行。顶层字段放在 `[groups."群号"]` 等表声明之前。
+必需字段缺失、格式错误或文件不可读会阻止启动；空名单仍不放行任何用户。
+
+设置 `configFile` 后，`allowlistFile`、`napcatUrl`、`groupPromptAllowMembers`、
+`agentAdminQQ`、`authSocket` 不再生成应用字段；也不再挂载单独白名单。
+提示词资源、`codexSettings`、token、共享认证和其他服务挂载仍由 Nix 管理。
+完整配置内的目录和路径必须匹配现有挂载，填写新路径不会增加宿主访问权限。
+不设置 `configFile` 时保留原生成模式，此时必须设置 `allowlistFile`；
+生成配置也使用新的受保护路径，应用 CLI 默认路径仍保留供独立运行兼容使用。
+
+迁移时通过 `agenix -e` 在原密文上补齐字段，保留原白名单和已有管理员配置，
+不修改加密接收者。先发布本仓库的模块与应用，再更新 RPi 的源码 input 和部署接线；
+不可只迁移密文便部署旧版模块。共享登录凭据和 NapCat token 不迁入该配置。
 模块不依赖 agenix；宿主负责秘密文件更新时的重启触发和准备服务的依赖关系。
 当前 Pi 的 dotfile 还负责代理、GitHub 凭据、NapCat 启动顺序、禁用 WebSocket
 的 provider 配置，以及 Nix daemon 和完整 store 的额外访问授权。
@@ -58,7 +79,7 @@ RPi 的共享服务和一次性 `codex-auth-import` 由 Nix 仓库维护；令�
 `group_prompt_allow_members`：仅可交互用户中的群主、管理员能修改群设定或清除群共同记录；
 设为 `true` 后，所有可交互用户均可操作。查看仍对所有可交互用户开放。
 群提示词通过 `/prompt set <内容>` 设置，`/prompt clear` 恢复默认，仅在新建群 thread 时通过 `base_instructions` 写入 system；可用 `/new` 或 `/new blank` 切换。恢复、总结和压缩不覆盖已保存的 system，旧 thread 不自动迁移。
-可选 `services.qq-codex-agent.agentAdminQQ = "123456789"` 对应主配置 `agent_admin_qq`，默认 `null` 时省略该字段。配置的 QQ 仅作为 agent 管理员身份写入所有新群 thread 的 system，不增加应用权限、不影响私聊；变更配置后重新部署并新建群 thread 生效。
+完整配置模式直接在 age 文件内设置 `agent_admin_qq`。旧生成模式的可选 `services.qq-codex-agent.agentAdminQQ = "123456789"` 对应主配置 `agent_admin_qq`，默认 `null` 时省略该字段。配置的 QQ 仅作为 agent 管理员身份写入所有新群 thread 的 system，不增加应用权限、不影响私聊；变更配置后重新部署并新建群 thread 生效。
 启动自检要求三份文件可读且非空，登录流程不要求 NapCat token 已准备完成。
 
 首次迁移前比较 Pi 上原有 `/etc/qq-codex-agent/AGENTS*.md` 与本仓库模板。

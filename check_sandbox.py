@@ -93,7 +93,7 @@ def check_thread_start(settings, directory):
 
 
 def main():
-    settings = Settings.load("/etc/qq-codex-agent/config.toml")
+    settings = Settings.load("/etc/qq-codex-private/config.toml")
     settings.check_prompts(required=True)
     prepare_home(settings)
     if settings.resources_dir is None:
@@ -147,6 +147,7 @@ def main():
                     'test ! -r "$1"; '
                     "test ! -r /var/lib/qq-codex-agent/codex/auth.json; "
                     "test ! -r /etc/qq-codex-private/napcat-token; "
+                    "test ! -r /etc/qq-codex-private/config.toml; "
                     "test ! -r /run/codex-auth/auth.sock; "
                     'printf ok > probe; test "$(cat probe)" = ok'
                 ),
@@ -174,6 +175,7 @@ def main():
                 plugin_canary.name,
                 state / "codex/auth.json",
                 settings.token_file,
+                "/etc/qq-codex-private/config.toml",
                 "/etc/qq-codex-private/allowlist.toml",
             ],
             [

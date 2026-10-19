@@ -16,13 +16,13 @@
 - 群聊会从本人明确偏好和反复出现的交流习惯记录聊天偏好，按群隔离，可更新当前群任意已确认成员，并记录群共同兴趣和互动习惯。每个独立任务开始前计算最新应用提示词及全群记录，仅在与上次成功注入的完整快照不同时更新 developer 提示词，agent 尽可能遵守；普通消息和 steering 不附加偏好文本。重启、换 thread 和 `/new` 后数据库记录保留；不监听未 @ bot 的聊天，不增加后台模型调用。
 - `/profile` 在当前群公开显示本人偏好；`/profile forget` 删除本人当前群偏好，当前任务不能写回该成员，旧聊天历史和 journal 仍保留，后续独立任务可能重新学习。`/group-profile` 查看群共同记录，`/group-profile forget` 清除。所有命令均须获该群授权并 @ bot。
 - `/prompt` 查看群设定，`/prompt set <内容>` 替换，`/prompt clear` 恢复默认；最多 4000 字符，允许多行，新建群 thread 时通过 system 指令生效（可用 `/new` 或 `/new blank` 切换），保存成功只回复“保存成功”。`group_prompt_allow_members` 默认 false，仅可交互用户中的群主、管理员能修改群设定或清除群记录；设为 true 后全部可交互用户可操作。
-- 本仓库维护 Nix 包、服务模块及默认提示词；dotfile 维护宿主配置和版本锁，使用 agenix 管理白名单，Pi 无需单独 clone 本仓库。
+- 本仓库维护 Nix 包、服务模块及默认提示词；dotfile 维护宿主配置和版本锁，使用 agenix 管理完整应用配置（含白名单），Pi 无需单独 clone 本仓库。
 
 两仓库接入、提示词覆盖及部署检查见 [nix/README.md](nix/README.md)。
 
 开发、部署、登录及排障方法见 [AGENTS.md](AGENTS.md)。公共运行时模板见 [AGENTS.runtime.md](AGENTS.runtime.md)，私聊和群聊模板分别见 [AGENTS.private.runtime.md](AGENTS.private.runtime.md) 与 [AGENTS.group.runtime.md](AGENTS.group.runtime.md)。
 
-可选主配置 `agent_admin_qq = "123456789"` 指定单个全局 agent 管理员，接受正整数或数字字符串；缺省不提示身份，非法值阻止启动。所有新群 thread 的 system 指令说明该 QQ 的管理员身份，不增加白名单、群设定修改或工具权限；私聊不注入。修改后重新加载配置，并创建新群 thread 生效。Nix 对应 `services.qq-codex-agent.agentAdminQQ`，默认 `null`。
+可选主配置 `agent_admin_qq = "123456789"` 指定单个全局 agent 管理员，接受正整数或数字字符串；缺省不提示身份，非法值阻止启动。所有新群 thread 的 system 指令说明该 QQ 的管理员身份，不增加白名单、群设定修改或工具权限；私聊不注入。修改后重新加载配置，并创建新群 thread 生效。RPi 直接在 `qq-codex-allowlist.age` 完整配置的顶层填写该字段。Nix 通过 `services.qq-codex-agent.configFile` 读取整份解密文件，不合并默认值；旧生成模式才使用 `agentAdminQQ` 选项。
 
 成员记录保留现有 SQLite 表和字段，每人最多 500 字符，全群不做 2000 字符截断；群共同摘要最多 1000 字符，群设定单独保存。记录用于推进聊天，可保存本人明确表达的游戏、音乐、专业方向及主动提供、用于共同游戏的 Steam 公开标识；不记录真实姓名、私密联系方式、住址、证件、登录账号或凭据，不把第三方转述、玩笑或猜测写成事实，不把个人偏好推成全群共识。记录可在当前群公开查看，当前个人要求优先于旧记忆。
 

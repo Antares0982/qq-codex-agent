@@ -1098,6 +1098,44 @@ class TestAgent:
             with pytest.raises(ValueError):
                 Settings.load(path)
 
+    def test_full_config(self):
+        path = self.root / "config.toml"
+        original = (
+            'private_users=["1"]\nagent_admin_qq="00123"\nmodel="chosen-model"\n'
+            'napcat_url="ws://127.0.0.1:3001"\ntoken_file="/private/token"\n'
+            'state_dir="/state"\nworkspace_dir="/work"\nresources_dir="/resources"\n'
+            'auth_socket="/auth/socket"\nagents_file="/common.md"\n'
+            'private_agents_file="/private.md"\ngroup_agents_file="/group.md"\n'
+            "group_prompt_allow_members=true\nqueue_limit=4\ntask_timeout=900\n"
+            '[groups."10"]\nusers=["all"]\n'
+        )
+        path.write_text(original)
+        settings = Settings.load(path)
+        assert settings.private_users == {"1"}
+        assert settings.groups == {"10": {"all"}}
+        assert settings.agent_admin_qq == "123"
+        assert settings.model == "chosen-model"
+        assert settings.auth_socket == Path("/auth/socket")
+        assert settings.resources_dir == Path("/resources")
+        assert settings.group_prompt_allow_members is True
+        assert (settings.queue_limit, settings.task_timeout) == (4, 900)
+        for line in original.splitlines():
+            if line.split("=", 1)[0] in {
+                "napcat_url",
+                "token_file",
+                "state_dir",
+                "workspace_dir",
+                "agents_file",
+            }:
+                path.write_text(original.replace(line + "\n", ""))
+                with pytest.raises((KeyError, TypeError)):
+                    Settings.load(path)
+        path.write_text(
+            original.replace('agent_admin_qq="00123"', 'agent_admin_qq="all"')
+        )
+        with pytest.raises(ValueError, match="QQ IDs"):
+            Settings.load(path)
+
     @pytest.mark.parametrize(
         "user, group, allowed",
         (

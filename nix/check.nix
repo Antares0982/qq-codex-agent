@@ -28,21 +28,30 @@ let
       agentAdminQQ = "123456789";
     };
   };
+  external = evaluate {
+    services.qq-codex-agent = {
+      configFile = "/run/agenix/full-config";
+      allowlistFile = pkgs.lib.mkForce null;
+    };
+  };
+  missing = evaluate { services.qq-codex-agent.allowlistFile = pkgs.lib.mkForce null; };
+  relative = evaluate { services.qq-codex-agent.configFile = "relative.toml"; };
   mounts = config.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
   customMounts = custom.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
+  externalMounts = external.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
   promptNames = [
     "AGENTS.md"
     "AGENTS.private.md"
     "AGENTS.group.md"
   ];
   configMount = builtins.head (
-    builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-agent/config.toml" path) mounts
+    builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-private/config.toml" path) mounts
   );
   configFile = builtins.head (pkgs.lib.splitString ":" configMount);
   customConfigFile = builtins.head (
     pkgs.lib.splitString ":" (
       builtins.head (
-        builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-agent/config.toml" path) customMounts
+        builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-private/config.toml" path) customMounts
       )
     )
   );
@@ -55,6 +64,26 @@ assert !config.services.qq-codex-agent.groupPromptAllowMembers;
 assert custom.services.qq-codex-agent.groupPromptAllowMembers;
 assert config.services.qq-codex-agent.agentAdminQQ == null;
 assert custom.services.qq-codex-agent.agentAdminQQ == "123456789";
+assert config.services.qq-codex-agent.configFile == null;
+assert builtins.elem "/run/test-allowlist:/etc/qq-codex-private/allowlist.toml" mounts;
+assert
+  builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-private/config.toml" path) externalMounts
+  == [
+    "/run/agenix/full-config:/etc/qq-codex-private/config.toml"
+  ];
+assert
+  !(builtins.any (
+    path: pkgs.lib.hasSuffix ":/etc/qq-codex-private/allowlist.toml" path
+  ) externalMounts);
+assert
+  external.systemd.services.qq-codex-agent.serviceConfig.ExecStart
+  == "${pkgs.emptyDirectory}/bin/qq-codex-agent --config /etc/qq-codex-private/config.toml";
+assert builtins.any (
+  entry: !entry.assertion && entry.message == "qq-codex-agent requires configFile or allowlistFile."
+) missing.assertions;
+assert builtins.any (
+  entry: !entry.assertion && entry.message == "qq-codex-agent configFile must be absolute."
+) relative.assertions;
 assert builtins.all (
   name:
   builtins.elem "${pkgs.emptyDirectory}/share/qq-codex-agent/${name}:/etc/qq-codex-agent/${name}" mounts

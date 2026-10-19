@@ -4,7 +4,7 @@ group_prompt_allow_members = false
 # 可选：仅提示管理员身份，新建群会话生效。
 # agent_admin_qq = "123456789"
 napcat_url = "ws://127.0.0.1:3001"
-token_file = "/etc/qq-codex-agent/napcat-token"
+token_file = "/etc/qq-codex-private/napcat-token"
 state_dir = "/var/lib/qq-codex-agent"
 workspace_dir = "/var/lib/qq-codex-work"
 agents_file = "/etc/qq-codex-agent/AGENTS.md"
@@ -12,3 +12,6 @@ private_agents_file = "/etc/qq-codex-agent/AGENTS.private.md"
 group_agents_file = "/etc/qq-codex-agent/AGENTS.group.md"
 queue_limit = 8
 task_timeout = 3600
+# Nix 部署需启用以下两项。
+# auth_socket = "/run/codex-auth/auth.sock"
+# resources_dir = "/var/lib/qq-codex-resources"
