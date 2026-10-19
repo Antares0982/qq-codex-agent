@@ -250,7 +250,10 @@ async def test_runtime_prompts(tmp_path, mode):
         tmp_path / "work",
         tmp_path / "AGENTS.md",
         agent_admin_qq="123456789",
+        group_agents_file=tmp_path / "group.md",
     )
+    group_template = tmp_path / "group.md"
+    group_template.write_text("GROUP_TEMPLATE_ALPHA {nickname}")
     db = open_database(settings)
     home = tmp_path / "codex"
     home.mkdir()
@@ -333,6 +336,8 @@ async def test_runtime_prompts(tmp_path, mode):
             ):
                 if index == 1:
                     settings.agent_admin_qq = "987654321"
+                    settings.group_agents_file = group_template
+                    group_template.write_text("GROUP_TEMPLATE_BETA {nickname}")
                 if index == 2:
                     await codex.close()
                     db.close()
@@ -363,6 +368,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 if mode == "upgrade" and index == 0:
                     options["developer_instructions"] = "LEGACY_APPLICATION_RULES"
                     settings.agent_admin_qq = None
+                    settings.group_agents_file = None
                     with db:
                         db.execute("DELETE FROM group_prompts WHERE group_id='10'")
                 context = ImageTurn(message, workspace)
@@ -456,7 +462,13 @@ async def test_runtime_prompts(tmp_path, mode):
                     mode != "upgrade"
                 )
                 assert "987654321" not in request["instructions"]
+                assert ("GROUP_TEMPLATE_ALPHA bot" in request["instructions"]) == (
+                    mode != "upgrade"
+                )
+                assert "GROUP_TEMPLATE_BETA" not in request["instructions"]
+                assert "{nickname}" not in request["instructions"]
                 content = json.dumps(request["input"], ensure_ascii=False)
+                assert "GROUP_TEMPLATE_" not in content
                 assert "PROMPT_ALPHA" not in content
                 assert "PROMPT_BETA" not in content
                 assert "管理员 QQ 号为" not in content
@@ -546,6 +558,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert summary == "HANDOFF_BACKGROUND"
                 assert "PROMPT_ALPHA" in requests[-1]["instructions"]
                 assert "管理员 QQ 号为 123456789" in requests[-1]["instructions"]
+                assert "GROUP_TEMPLATE_ALPHA bot" in requests[-1]["instructions"]
                 send.assert_not_awaited()
                 assert any(
                     part.get("text") == HANDOFF_INSTRUCTIONS
@@ -574,6 +587,8 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert "probe-compact" not in content
                 assert "PROMPT_ALPHA" not in requests[-1]["instructions"]
                 assert "管理员 QQ 号为 987654321" in requests[-1]["instructions"]
+                assert "GROUP_TEMPLATE_BETA bot" in requests[-1]["instructions"]
+                assert "GROUP_TEMPLATE_" not in content
                 await runtime.release_thread(thread.id)
                 for prompt in ("PROMPT_BETA", ""):
                     with db:

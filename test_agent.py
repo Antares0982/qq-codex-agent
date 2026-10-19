@@ -556,11 +556,14 @@ class TestAgent:
             before = injections()
             await self.agent.turns.execute(message)
             await self.agent.turns.execute(message)
-            assert injections() == before + 1
+            assert injections() == before + int(path != group_file)
             rules = json.loads(self.group_instructions().split("\n", 1)[1])[
                 "应用提示词"
             ]
-            assert text in rules
+            if path != group_file:
+                assert text in rules
+            elif text:
+                assert text not in rules
         before = injections()
         self.agent.runtime.stickers["新增表情"] = PNG
         await self.agent.turns.execute(message)
@@ -1630,13 +1633,17 @@ class TestAgent:
             await self.agent.turns.execute(parse_message(incoming, self.settings))
             options = self.codex.thread_start.call_args.kwargs
             instructions = (
-                json.loads(self.group_instructions().split("\n", 1)[1])["应用提示词"]
+                options["base_instructions"]
                 if incoming.get("group_id")
                 else options["developer_instructions"]
             )
             assert expected in instructions
             assert excluded not in instructions
-            assert ("send_sticker" in instructions) == bool(incoming.get("group_id"))
+            if incoming.get("group_id"):
+                assert expected not in self.group_instructions()
+                assert "send_sticker" in self.group_instructions()
+            else:
+                assert "send_sticker" not in instructions
             assert (
                 "--stickers" in options["config"]["mcp_servers"]["qq_image"]["args"]
             ) == bool(incoming.get("group_id"))
@@ -1677,18 +1684,29 @@ class TestAgent:
             self.bot.call.side_effect = info if isinstance(info, Exception) else None
             self.bot.call.return_value = info
             group_id = 11 if index == 1 else 10
+            await self.agent.commands.control(
+                parse_message(event(group=group_id, text="/new blank"), self.settings)
+            )
             await self.agent.turns.execute(
                 parse_message(event(group=group_id), self.settings)
             )
             assert (
                 f"你的昵称：{expected}，再说一次：{expected}。{{other}}"
-                in json.loads(self.group_instructions().split("\n", 1)[1])["应用提示词"]
+                in self.codex.thread_start.call_args.kwargs["base_instructions"]
             )
             self.bot.call.assert_any_await(
                 "get_group_member_info", {"group_id": group_id, "user_id": 99}
             )
         assert (
             group.read_text() == "你的昵称：{nickname}，再说一次：{nickname}。{other}"
+        )
+        group.unlink()
+        self.bot.call.reset_mock()
+        await self.agent.turns.execute(parse_message(event(group=10), self.settings))
+        assert "base_instructions" not in self.codex.thread_resume.call_args.kwargs
+        assert all(
+            call.args[0] != "get_group_member_info"
+            for call in self.bot.call.call_args_list
         )
 
     async def test_reply_image(self):

@@ -45,7 +45,7 @@
 - 引用自己发送的消息时，将原消息与当前消息的全部文本、图片按消息顺序合并为一次输入；引用他人消息时，标明其名称和 QQ 号，将其文本及图片放在明确的引用区块中，再附当前发送者的消息。带图消息的配文保留，发送者身份无效时拒绝处理。群聊回复仍需 @ bot；合计最多 5 张图片，每张 10 MiB，沿用现有格式限制，不递归展开引用。
 - 群聊不发送开始处理及普通工具进度，发送图片、全部模型文字回复（每条完成后按顺序发送，包括过程说明和最终回复）、压缩提示及记录聊天偏好时的“📝正在给{nickname}记进小本本……”提示；nickname 使用被记录成员群名片，缺失时回退到 QQ 昵称及 QQ 号。记录群共同偏好时提示“📝正在给本群记进小本本……”。查询、删除偏好和失败调用不发送该提示。启动 turn 后未完成时，30 秒发送 `pics/thinking_30s.png`，5 分钟发送 `pics/thinking_too_long.png`，均以透明底自定义表情（image `sub_type=1`）发送，各一次；追加消息不重置计时，完成、失败或中断后取消。图片压缩后随 Python 包安装。群聊 turn 未成功完成的兜底文本为“哎呀！宕机了……”，slash command 保留直接回复。私聊仍显示进度。
 - 普通群聊任务通过登录检查后、处理引用和图片前，通过 NapCat `set_msg_emoji_like` 给触发消息添加一次“OK”表情（`emoji_id="124"`）。表情请求不阻塞任务或定时发图，失败只记日志，不重试；任务退出时取消并回收未完成请求。私聊、slash command、未登录和同轮追加消息不添加表情；定时提醒仍从启动 turn 时计时。
-- 群聊发送者及 @ 成员优先使用群名片，未设置时使用 QQ 昵称，再回退到 QQ 号。群聊模板中的 `{nickname}` 在新建及恢复 thread 时替换为 bot 在当前群的名称，遵循同样的回退规则；查询失败使用 bot QQ 号，没有占位符时不查询。
+- 群聊发送者及 @ 成员优先使用群名片，未设置时使用 QQ 昵称，再回退到 QQ 号。群聊模板中的 `{nickname}` 仅在新建群 thread 时替换为 bot 在当前群的名称，遵循同样的回退规则；查询失败使用 bot QQ 号，没有占位符时不查询。
 
 ## 本地检查
 
@@ -54,7 +54,7 @@
 允许记录游戏、音乐、专业方向和本人主动提供、用于共同游戏的 Steam 公开标识；不记录真实姓名、私密联系方式、住址、证件、登录账号、凭据及其他敏感信息，不拼接现实身份线索。语义由模型规则约束，结构校验不能保证消除提示词注入或敏感内容。
 `/profile` 查看本人记录，`/profile forget` 删除并禁止当前活动任务写回该成员，不论其是否为任务发起者。`/group-profile` 查看群共同记录，`/group-profile forget` 清除并禁止当前任务写回，清除权限与群设定修改一致。后续独立轮次仍可重新学习；删除不清除旧 Codex 历史、旧提示词快照或 journal。不提供永久关闭记忆、跨群记忆或后台总结。
 `/prompt` 查看群设定，`/prompt set <内容>` 完整替换（允许多行，最多 4000 字符），`/prompt clear` 恢复默认。设置和清除成功只回复“保存成功”，新建群 thread 时生效，可用 `/new` 或 `/new blank` 切换。主配置 `group_prompt_allow_members` 必须为 bool，默认 false：仅可交互用户中的群主、管理员能修改；true 时所有可交互用户均可修改。NapCat 群角色查询失败时拒绝修改。SQLite 的 `group_prompts` 按群保存设定、修改者和时间；所有设定及记录在重启、压缩和 `/new` 后保留。
-仅新建群 thread 时组装 `base_instructions`，作为 system 指令包含基础规则与当前保存的群设定；可选主配置 `agent_admin_qq` 指定单个全局管理员 QQ，接受正整数或数字字符串并复用 QQ 号校验，缺省不注入、非法值阻止启动。配置存在时在所有新群 thread 的 system 中说明该 QQ 的 agent 管理员身份，不增加白名单、群设定修改或工具权限，私聊不注入。RPi 在完整配置 age 文件中填写该字段；旧 Nix 生成模式对应 `services.qq-codex-agent.agentAdminQQ`，默认 null。管理员变更在重新加载配置后创建的新群 thread 生效。恢复、总结和压缩沿用 runtime 保存的 system，不覆盖 `base_instructions`；旧 thread 不补写 system、不清理历史。基础规则保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。群聊在每个独立 turn 开始前重新读取公共及群聊提示词文件、替换 bot 昵称，并组装完整提示词快照：应用规则、QQ 图片交付说明、Pillow 路径、表情规则与全部可用名称、公共/群聊模板、最新全群记忆和交接摘要。与 SQLite `group_snapshots` 按 thread 保存的上次成功注入内容比较；相同则跳过，不同才通过 `thread/inject_items` 显式注入 developer 消息，成功后保存完整快照。表情 JSON 仍仅在进程启动时加载一次，其名称列表参与轮前快照比较。旧群 thread 的应用规则与记忆也按内容差异补注入，不需要 `/new`，群设定及管理员 system 需新建 thread 生效。私聊保留原有新建/恢复时传入提示词的机制，不参与本次轮前快照逻辑，也不提供表情功能。最新应用规则与记忆快照替代旧快照，不包含群设定和管理员身份。去重跨重启保留，新 thread（包括 `/new`）首次必注入；手动、空闲及自动压缩完成后使去重记录失效，下次独立 turn 补注入，轮前空闲压缩则在本轮启动前补注入。不能借用 `collaborationMode.settings.developer_instructions`：模型目录中的协作模板会优先覆盖该字段。群 thread 开启 `features.retain_client_developer_messages`，使远程 v2 手动、轮前及轮中自动压缩保留客户端 developer 消息。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前规则；应用规则与记忆变更下个独立 turn 生效，群设定变更新建 thread 生效，历史保留。普通消息及 steering 不附加偏好文本。
+仅新建群 thread 时组装 `base_instructions`，作为 system 指令包含基础规则、替换 `{nickname}` 后的群聊模板与当前保存的群设定；可选主配置 `agent_admin_qq` 指定单个全局管理员 QQ，接受正整数或数字字符串并复用 QQ 号校验，缺省不注入、非法值阻止启动。配置存在时在所有新群 thread 的 system 中说明该 QQ 的 agent 管理员身份，不增加白名单、群设定修改或工具权限，私聊不注入。RPi 在完整配置 age 文件中填写该字段；旧 Nix 生成模式对应 `services.qq-codex-agent.agentAdminQQ`，默认 null。管理员变更在重新加载配置后创建的新群 thread 生效。恢复、总结和压缩沿用 runtime 保存的 system，不覆盖 `base_instructions`；旧 thread 不补写 system、不清理历史。基础规则保留文件读取、修改、创建、执行、网页搜索及 QQ 工具使用说明，runtime 继续提供工具定义、技能和权限信息。群聊在每个独立 turn 开始前重新读取公共提示词文件，并组装完整提示词快照：应用规则、QQ 图片交付说明、Pillow 路径、表情规则与全部可用名称、公共模板、最新全群记忆和交接摘要。与 SQLite `group_snapshots` 按 thread 保存的上次成功注入内容比较；相同则跳过，不同才通过 `thread/inject_items` 显式注入 developer 消息，成功后保存完整快照。表情 JSON 仍仅在进程启动时加载一次，其名称列表参与轮前快照比较。旧群 thread 的应用规则与记忆也按内容差异补注入，不需要 `/new`，群模板、群设定及管理员 system 需新建 thread 生效。私聊保留原有新建/恢复时传入提示词的机制，不参与本次轮前快照逻辑，也不提供表情功能。最新应用规则与记忆快照替代旧快照，不包含群模板、群设定和管理员身份。去重跨重启保留，新 thread（包括 `/new`）首次必注入；手动、空闲及自动压缩完成后使去重记录失效，下次独立 turn 补注入，轮前空闲压缩则在本轮启动前补注入。不能借用 `collaborationMode.settings.developer_instructions`：模型目录中的协作模板会优先覆盖该字段。群 thread 开启 `features.retain_client_developer_messages`，使远程 v2 手动、轮前及轮中自动压缩保留客户端 developer 消息。不依赖 resume 刷新已加载 thread，不把动态快照重复放入初始化指令。更新失败不提交新 turn。当前 turn 的 steering 沿用当前规则；应用规则与记忆变更下个独立 turn 生效，群模板及群设定变更新建 thread 生效，历史保留。普通消息及 steering 不附加偏好文本。
 
 需要 Python 3.13、uv，以及 PATH 中的 Node.js（供 Pyright 使用）。提交 `uv.lock`，使用配套锁定的官方 SDK 和 runtime。
 
@@ -87,7 +87,7 @@ Pyright 必须达到 0 errors，覆盖业务代码、测试和自检脚本；不
 
 `check_runtime.py` 使用临时、未登录的 Codex 状态目录，只验证启动和认证状态接口，不读取个人登录缓存，也不请求模型。
 `--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。
-测试模拟 OneBot、模型事件和图片响应。`test_runtime.py` 另用锁定 runtime、临时未登录状态目录及本地模拟 Responses 端点检查实际请求的提示词、历史、工具和技能，覆盖模型目录协作模板、system 群设定及管理员身份的新建/恢复/重启/压缩行为、设定替换和清除后新 thread 生效、相同快照去重、跨重启去重、远程手动及自动压缩、本地手动压缩后重新注入，以及旧群 thread 升级后补入完整提示词和表情名称，不调用真实模型。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
+测试模拟 OneBot、模型事件和图片响应。`test_runtime.py` 另用锁定 runtime、临时未登录状态目录及本地模拟 Responses 端点检查实际请求的提示词、历史、工具和技能，覆盖模型目录协作模板、system 群模板（含昵称替换）、群设定及管理员身份的新建/恢复/重启/压缩行为、设定替换和清除后新 thread 生效、相同快照去重、跨重启去重、远程手动及自动压缩、本地手动压缩后重新注入，以及旧群 thread 升级后补入完整提示词和表情名称，不调用真实模型。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
 
 Codex 执行沙箱可能禁止测试所需的本地 Unix socket，导致 `test_member_socket`、`test_image_tool` 报 `PermissionError: [Errno 1] Operation not permitted`；跨线程异步测试也可能停在等待状态。遇到这些症状，应通过执行工具的提权审批在沙箱外重跑 pytest，或在本机终端运行上述命令，不要跳过测试或修改应用沙箱策略。若 uv 默认缓存目录只读，可设置 `UV_CACHE_DIR=/tmp/qq-pytest-uv`。
 
@@ -195,8 +195,8 @@ sudo systemctl start codex-auth qq-codex-agent antares-agent
 
 ## 提示词和目录边界
 
-默认修改本仓库的三份 `AGENTS*.runtime.md`，随应用重新部署。需要本机定制时，在 Nix 配置中设置 `services.qq-codex-agent.agentsFile`、`privateAgentsFile`、`groupAgentsFile` 为自定义文件的绝对路径；不要让秘密内容进入 Nix store。群聊每个独立 turn 前重读已挂载的提示词文件并按完整快照去重；文件更新或应用升级后，下个独立 turn 生效，无需 `/new`。Nix store 提示词或挂载目标变化仍需重新部署；私聊沿用重启 agent 后 `/new` 的更新方式。首次迁移前比较 Pi 上原有三份 `/etc/qq-codex-agent/AGENTS*.md`，将需要保留的手工修改显式配置为覆盖文件；迁移不删除旧文件。
-公共文件与私聊模板沿用新建和恢复 thread 的 `developer_instructions`；公共文件与群聊模板通过上述轮前完整快照显式注入。`agents_file`、`private_agents_file`、`group_agents_file`
+默认修改本仓库的三份 `AGENTS*.runtime.md`，随应用重新部署。需要本机定制时，在 Nix 配置中设置 `services.qq-codex-agent.agentsFile`、`privateAgentsFile`、`groupAgentsFile` 为自定义文件的绝对路径；不要让秘密内容进入 Nix store。群聊每个独立 turn 前重读公共提示词文件并按完整快照去重，公共模板更新下个独立 turn 生效。群聊模板仅在新建 thread 时读入 system，更新后需 `/new` 或 `/new blank`；恢复、总结和压缩不重读群模板或替换昵称。Nix store 提示词或挂载目标变化仍需重新部署；私聊沿用重启 agent 后 `/new` 的更新方式。首次迁移前比较 Pi 上原有三份 `/etc/qq-codex-agent/AGENTS*.md`，将需要保留的手工修改显式配置为覆盖文件；迁移不删除旧文件。
+公共文件与私聊模板沿用新建和恢复 thread 的 `developer_instructions`；群聊的公共文件通过上述轮前 developer 快照显式注入，群聊模板仅在新建 thread 时写入 system。`agents_file`、`private_agents_file`、`group_agents_file`
 由 Nix 模块统一生成并只读挂载；启动校验三份文件可读且非空。应用同时注入 QQ 文件交付
 规则和 Pillow Python 路径。工作区内 AGENTS.md 保持原生层级加载。
 会话工作目录会被显式标记为可信项目。工作目录下新建的 AGENTS.md 遵循 Codex 自身规则，不能改变应用 allowlist 或宿主挂载。

@@ -402,21 +402,12 @@ class Runtime:
         )
         if self.settings.agents_file.is_file():
             rules += "\n" + self.settings.agents_file.read_text()
-        agents_file = (
-            self.settings.group_agents_file
-            if "group_id" in message.target
-            else self.settings.private_agents_file
-        )
-        if agents_file:
-            instructions = agents_file.read_text()
-            if "group_id" in message.target and "{nickname}" in instructions:
-                nickname = await self.group_name(message.target, message.bot_id)
-                instructions = instructions.replace("{nickname}", nickname)
-            rules += "\n" + instructions
         if "group_id" in message.target:
             rules += (
                 "\n" + MEMBER_INSTRUCTIONS + "\n" + sticker_instructions(self.stickers)
             )
+        elif self.settings.private_agents_file:
+            rules += "\n" + self.settings.private_agents_file.read_text()
         return rules
 
     async def prepare_thread(self, message, thread_id, context, options):
@@ -438,6 +429,12 @@ class Runtime:
             return await self.codex.thread_resume(thread_id, **options)
         if "group_id" in message.target:
             instructions = GROUP_BASE_INSTRUCTIONS
+            if self.settings.group_agents_file:
+                template = self.settings.group_agents_file.read_text()
+                if "{nickname}" in template:
+                    nickname = await self.group_name(message.target, message.bot_id)
+                    template = template.replace("{nickname}", nickname)
+                instructions += "\n" + template
             prompt = self.db.execute(
                 "SELECT prompt FROM group_prompts WHERE group_id=?",
                 (str(message.target["group_id"]),),
