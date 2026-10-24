@@ -7,6 +7,7 @@ from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
 
 from .images import Images
+from .group_turns import GroupTurn
 from .logging import LOG, log_text
 from .messages import ImageTurn
 from .profiles import Profiles
@@ -27,6 +28,7 @@ class Turns:
         wake,
         resetting,
         mark,
+        groups,
     ):
         self.settings = settings
         self.db = db
@@ -38,12 +40,22 @@ class Turns:
         self.wake = wake
         self.resetting = resetting
         self.mark = mark
+        self.groups = groups
         self.contexts = {}
         self.profiles = Profiles(db, self.contexts, replies.safe_send, replies.bot)
-        self.images = Images(db, replies.bot, self.contexts, runtime.stickers)
+        self.images = Images(db, replies.bot, self.contexts)
 
     async def execute(self, message):
-        turn = context = steering = reminder = reaction = None
+        if "group_id" in message.target and (
+            message.batch or message.text != "/compact"
+        ):
+            if message.batch is None:
+                self.groups.record(message)
+                await self.groups.prepare(message)
+                message = self.groups.freeze(message)
+            await GroupTurn(self, message).run()
+            return
+        turn = context = steering = reminder = None
         thread = None
         started = time.monotonic()
         finished = asyncio.Event()
@@ -64,9 +76,6 @@ class Turns:
                     )
                     self.mark(message, "failed")
                     return
-                if "group_id" in message.target and not manual:
-                    reaction = asyncio.create_task(self.replies.react_message(message))
-                    await asyncio.sleep(0)
                 session = await self.prepare_session(message, manual)
                 if session is None:
                     return
@@ -154,9 +163,6 @@ class Turns:
                 message, "任务失败，未自动重试。请检查登录状态、图片格式或服务日志。"
             )
         finally:
-            if reaction:
-                reaction.cancel()
-                await asyncio.gather(reaction, return_exceptions=True)
             if reminder:
                 reminder.cancel()
                 await asyncio.gather(reminder, return_exceptions=True)
@@ -202,7 +208,13 @@ class Turns:
         if requested and thread_id:
             await self.runtime.release_thread(thread_id)
             thread_id = None
-        inputs = [] if manual else await self.inputs.prepare_input(message, folder)
+        inputs = (
+            []
+            if manual
+            else self.groups.input(message)
+            if message.batch
+            else await self.inputs.prepare_input(message, folder)
+        )
         if inputs is None:
             self.mark(message, "failed")
             return
@@ -231,16 +243,13 @@ class Turns:
     async def compact_idle(self, message, thread):
         tokens = await self.runtime.context_tokens(thread.id)
         if tokens is not None and tokens > IDLE_COMPACT_LIMIT:
-            await self.replies.safe_send(message, "正在压缩上下文……")
+            if "group_id" not in message.target:
+                await self.replies.safe_send(message, "正在压缩上下文……")
             await self.runtime.compact(thread)
 
     async def start_notices(self, context):
         message = context.message
         await self.replies.safe_send(message, "开始处理……", intermediate=True)
-        if "group_id" in message.target:
-            return asyncio.create_task(
-                self.replies.remind_group(message, asyncio.get_running_loop().time())
-            )
 
     async def stream_turn(
         self, turn, context, thread, finished, steering, reminder, notices, started

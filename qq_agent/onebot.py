@@ -57,6 +57,7 @@ class OneBot:
         self.settings = settings
         self.ws = None
         self.pending = {}
+        self.on_sent = None
 
     async def call(self, action, params):
         ws = self.ws
@@ -75,7 +76,7 @@ class OneBot:
             self.pending.pop(echo, None)
 
     async def send(self, message, text=None, image=None, *, sticker=False):
-        receipt = None
+        receipts = []
         if image is not None:
             segments = [
                 {
@@ -89,9 +90,12 @@ class OneBot:
             receipt = await self.call(
                 "send_msg", {**message.target, "message": segments}
             )
+            receipts.append(receipt)
+            if self.on_sent:
+                self.on_sent(message, receipt, [("image", "outgoing")], image)
         if text:
             for offset in range(0, len(text), 1500):
-                await self.call(
+                receipt = await self.call(
                     "send_msg",
                     {
                         **message.target,
@@ -103,7 +107,12 @@ class OneBot:
                         ],
                     },
                 )
-        return receipt
+                receipts.append(receipt)
+                if self.on_sent:
+                    self.on_sent(
+                        message, receipt, [("text", text[offset : offset + 1500])]
+                    )
+        return receipts
 
     async def image(self, file):
         result = await self.call("get_image", {"file": file})
@@ -151,7 +160,7 @@ class OneBot:
         image_suffix(data)
         return data
 
-    async def reply_content(self, identifier, target):
+    async def reply_record(self, identifier, target):
         result = await self.call("get_msg", {"message_id": identifier})
         expected = "group" if "group_id" in target else "private"
         if result.get("message_type") != expected:
@@ -168,9 +177,15 @@ class OneBot:
         sender = result.get("sender")
         if not isinstance(sender, dict):
             raise ValueError("Invalid replied sender")
-        sender_id = qq_id(sender.get("user_id"))
-        parts, images, _, _ = parse_parts(segments, expected == "group")
-        return parts, images, sender_id, display_name(sender, expected == "group")
+        sender["user_id"] = qq_id(sender.get("user_id"))
+        return result
+
+    async def reply_content(self, identifier, target):
+        result = await self.reply_record(identifier, target)
+        group = "group_id" in target
+        parts, images, _, _ = parse_parts(result["message"], group)
+        sender = result["sender"]
+        return parts, images, sender["user_id"], display_name(sender, group)
 
     async def listen(self, receive):
         token = self.settings.token_file.read_text().strip()

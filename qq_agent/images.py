@@ -1,5 +1,9 @@
 import base64
 import hashlib
+import io
+import time
+
+from PIL import Image
 
 from image_assets import OUTPUT_LIMIT, read_image, save_image
 
@@ -14,52 +18,64 @@ IMAGE_INSTRUCTIONS = """本会话通过 QQ 交付结果。用户无法直接访�
 
 
 class Images:
-    def __init__(self, db, bot, contexts, stickers):
+    def __init__(self, db, bot, contexts):
         self.db = db
         self.bot = bot
         self.contexts = contexts
-        self.stickers = stickers
 
-    async def deliver_sticker(self, context, request):
-        if "group_id" not in context.message.target:
-            raise ValueError("表情工具仅群聊可用。")
-        if request.keys() != {"action", "name"}:
-            raise ValueError("表情工具只接受 name 参数。")
-        name = request["name"]
-        if not isinstance(name, str) or name not in self.stickers:
-            raise ValueError("未知表情名称，请使用提示词列出的名称。")
+    async def view_image(self, context, request):
+        if (
+            request.keys() != {"action", "image_id", "token"}
+            or "group_id" not in context.message.target
+        ):
+            raise ValueError("查看群图片需要 image_id 和当前任务 token。")
+        if not isinstance(request["image_id"], str):
+            raise ValueError("image_id 必须是字符串。")
         async with context.lock:
-            if self.contexts.get(context.message.key) is not context:
-                raise ValueError("本轮已结束，请在当前轮重新调用工具。")
-            if context.sticker_used:
-                raise ValueError("本轮已调用表情发送，每 turn 最多一次，不要重试。")
-            data = self.stickers[name]
-            context.sticker_used = True
-            try:
-                receipt = await self.bot.send(context.message, image=data, sticker=True)
-            except Exception as error:
-                LOG.warning(
-                    "Sticker delivery failed chat=%s name=%s error=%s",
-                    context.message.key,
-                    log_text(name),
-                    log_text(error),
-                )
-                raise ValueError(
-                    "未取得 QQ 发送成功回执，发送结果未知；本轮不能重试，不要声称已发送。"
-                ) from error
-            LOG.info(
-                "Sticker sent chat=%s name=%s bytes=%d",
-                context.message.key,
-                log_text(name),
-                len(data),
-            )
+            if (
+                self.contexts.get(context.message.key) is not context
+                or request["token"] != context.token
+            ):
+                raise ValueError("图片工具不属于当前群任务。")
+            row = self.db.execute(
+                "SELECT source,folder,path,created FROM received_images WHERE id=? AND key=?",
+                (request["image_id"], context.message.key),
+            ).fetchone()
+            if not row:
+                raise ValueError("图片索引不存在或不属于当前群。")
+            source, folder, path, created = row
+            if path:
+                if folder != context.folder.name:
+                    raise ValueError("图片不属于当前工作区。")
+                path, data = read_image(context.folder, path)
+            else:
+                if not source or time.time() - created > 14 * 86400:
+                    raise ValueError("图片索引已过期。")
+                data = await self.bot.image(source)
+                if self.contexts.get(context.message.key) is not context:
+                    raise ValueError("任务已结束。")
+                path = save_image(context.folder, data)
+                with self.db:
+                    self.db.execute(
+                        "UPDATE received_images SET folder=?,path=? WHERE id=?",
+                        (context.folder.name, path, request["image_id"]),
+                    )
+            preview = io.BytesIO()
+            with Image.open(io.BytesIO(data)) as picture:
+                animated = getattr(picture, "n_frames", 1) > 1
+                picture.seek(0)
+                picture.thumbnail((1600, 1600))
+                picture.convert("RGBA").save(preview, format="PNG")
             return {
                 "ok": True,
-                "name": name,
-                "message": "表情已发送到当前 QQ 会话。",
-                "message_id": receipt.get("message_id")
-                if isinstance(receipt, dict)
-                else None,
+                "path": path,
+                "image_id": request["image_id"],
+                "first_frame": animated,
+                "image": {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "data": base64.b64encode(preview.getvalue()).decode(),
+                },
             }
 
     def list_images(self, context):
@@ -149,9 +165,7 @@ class Images:
                 "ok": True,
                 "path": path,
                 "message": "图片已发送到当前 QQ 会话。",
-                "message_id": receipt.get("message_id")
-                if isinstance(receipt, dict)
-                else None,
+                "message_ids": [item.get("message_id") for item in receipt],
             }
 
     def save_generated(self, folder, item):

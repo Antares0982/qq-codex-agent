@@ -8,7 +8,7 @@ from openai_codex.generated.v2_all import ReasoningEffort
 from .logging import LOG, log_text
 
 HELP = """直接发送文字或图片，可提问、执行代码或请求生成图片。
-群聊可先发送图片，再回复该图片并 @ bot 提问。
+群聊自动积累消息并自主接话；@ bot 要求文本回复，命令仍需 @ bot。
 /help 查看用法
 /model 列出可选模型及本会话设置
 /model <模型ID> 切换本会话模型，下一轮请求生效
@@ -27,9 +27,9 @@ HELP = """直接发送文字或图片，可提问、执行代码或请求生成�
 群设定修改和群记录清除默认仅授权群主、管理员可用，管理员可配置开放给全部授权成员。
 删除记录不清除旧聊天历史及 journal；/new 保留群设定和记录。
 推理强度固定为 medium。模型选择在重启后保留。
-群聊发送图片、全部模型文字回复、压缩提示及记录聊天偏好时的小本本提示，不发送其他工具进度通知。
-私聊与各群权限独立；群聊须获该群授权并 @ bot。同群共享会话和模型设置。
-不同聊天独立执行；处理中继续发送消息会追加到当前任务。"""
+群聊按模型 JSON 选择沉默、文本或表情。发言后等待 30 秒/5 分钟可发送提醒，后续 assistant 消息重置计时。
+私聊与各群权限独立；已启用群允许全员参与，命令须 @ bot。同群共享会话和模型设置。
+不同聊天独立执行；群聊积累的消息按批次追加，私聊逐条追加。"""
 
 
 class Commands:
@@ -45,6 +45,7 @@ class Commands:
         resetting,
         mark,
         cancel_chat,
+        flush_group,
     ):
         self.db = db
         self.codex = codex
@@ -56,6 +57,7 @@ class Commands:
         self.resetting = resetting
         self.mark = mark
         self.cancel_chat = cancel_chat
+        self.flush_group = flush_group
         self.summaries = {}
 
     async def stop_summary(self, key):
@@ -81,7 +83,7 @@ class Commands:
         task = asyncio.current_task()
         assert task is not None
         try:
-            await self.cancel_chat(message.key)
+            await self.cancel_chat(message.key, message.identifier)
             row = self.db.execute(
                 "SELECT folder, thread, renew FROM sessions WHERE key=?", (message.key,)
             ).fetchone()
@@ -99,7 +101,6 @@ class Commands:
                     message,
                     row[1],
                     self.runtime.settings.workspace_dir / row[0],
-                    self.safe_send,
                 )
                 if self.summaries.get(message.key) is not task or task.cancelling():
                     raise asyncio.CancelledError
@@ -142,6 +143,7 @@ class Commands:
             if self.summaries.get(message.key) is task:
                 self.summaries.pop(message.key)
             self.resetting.discard(message.key)
+            self.flush_group(message.key)
 
     async def group_control(self, message):
         if "group_id" not in message.target:
@@ -335,14 +337,14 @@ class Commands:
                 await self.safe_send(
                     message,
                     f"{text}；本会话{'执行中' if busy else '空闲'}。\n"
-                    f"上下文：{context}\n用户消息：{messages}",
+                    f"上下文：{context}\n{'已提交消息批次' if 'group_id' in message.target else '用户消息'}：{messages}",
                 )
                 return
             if message.key in self.resetting:
                 return
             self.resetting.add(message.key)
             try:
-                await self.cancel_chat(message.key)
+                await self.cancel_chat(message.key, message.identifier)
                 if message.text == "/new":
                     row = self.db.execute(
                         "SELECT folder, thread FROM sessions WHERE key=?",
@@ -362,6 +364,7 @@ class Commands:
                 )
             finally:
                 self.resetting.discard(message.key)
+                self.flush_group(message.key)
         except Exception as error:
             LOG.warning("Control failed chat=%s error=%s", message.key, log_text(error))
             await self.safe_send(message, "操作失败，请查看服务日志中的错误类型。")

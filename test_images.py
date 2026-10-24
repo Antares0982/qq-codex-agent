@@ -21,7 +21,7 @@ import image_assets
 import image_tool
 from qq_agent import cleanup, replies, stickers
 from qq_agent.agent import Agent
-from qq_agent.config import Settings
+from qq_agent.config import GroupSettings, Settings
 from qq_agent.messages import ImageTurn, parse_message
 from test_agent import PNG, event, item_done, turn_done
 
@@ -32,14 +32,14 @@ class TestImages:
         self.root = root = tmp_path
         self.settings = Settings(
             {"1"},
-            {"10": {"1"}},
+            {"10": GroupSettings()},
             "ws://127.0.0.1:3001",
             root / "token",
             root / "state",
             root / "work",
             root / "AGENTS.md",
         )
-        self.bot = NS(send=AsyncMock(return_value={"message_id": 123}))
+        self.bot = NS(send=AsyncMock(return_value=[{"message_id": 123}]))
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))
         self.codex._client = NS(
             request=AsyncMock(
@@ -69,130 +69,18 @@ class TestImages:
             )
         return path
 
-    async def test_sticker_limit(self):
-        self.group_context()
-        request = {"action": "send_sticker", "name": "开心"}
-        results = await asyncio.gather(
-            *(
-                self.agent.turns.images.deliver_sticker(self.context, request)
-                for _ in range(2)
-            ),
-            return_exceptions=True,
-        )
-        assert sum(isinstance(result, ValueError) for result in results) == 1
-        assert any(
-            isinstance(result, dict) and result.get("message_id") == 123
-            for result in results
-        )
-        self.bot.send.assert_awaited_once_with(
-            self.message, image=self.agent.runtime.stickers["开心"], sticker=True
-        )
-        self.save()
-        await self.agent.turns.images.deliver_image(
-            self.context, {"action": "send_image"}
-        )
-        with patch.object(
-            replies,
-            "GROUP_REMINDERS",
-            ((0, "thinking_30s.png"), (0, "thinking_too_long.png")),
-        ):
-            await self.agent.replies.remind_group(
-                self.message, asyncio.get_running_loop().time()
-            )
-        assert self.bot.send.await_count == 4
-        with pytest.raises(ValueError, match="最多一次"):
-            await self.agent.turns.images.deliver_sticker(self.context, request)
-        renewed = ImageTurn(self.message, self.folder)
-        self.agent.turns.contexts[self.message.key] = renewed
-        with pytest.raises(ValueError, match="已结束"):
-            await self.agent.turns.images.deliver_sticker(self.context, request)
-        await self.agent.turns.images.deliver_sticker(renewed, request)
-        assert self.bot.send.await_count == 5
-
-    @pytest.mark.parametrize(
-        "error", [TimeoutError(), RuntimeError(), asyncio.CancelledError()]
-    )
-    async def test_sticker_failure(self, error):
-        self.group_context()
-        self.bot.send.side_effect = error
-        request = {"action": "send_sticker", "name": "开心"}
-        with pytest.raises(
-            asyncio.CancelledError
-            if isinstance(error, asyncio.CancelledError)
-            else ValueError
-        ):
-            await self.agent.turns.images.deliver_sticker(self.context, request)
-        with pytest.raises(ValueError, match="最多一次"):
-            await self.agent.turns.images.deliver_sticker(self.context, request)
-        self.bot.send.assert_awaited_once()
-
-    async def test_sticker_validation(self):
-        self.group_context()
-        for arguments in (
-            {},
-            {"name": []},
-            {"name": "missing"},
-            {"name": "开心", "resend": True},
-        ):
-            with pytest.raises(ValueError):
-                await self.agent.turns.images.deliver_sticker(
-                    self.context, {"action": "send_sticker", **arguments}
-                )
-        assert not self.context.sticker_used
-        self.bot.send.assert_not_awaited()
-
-    async def test_sticker_socket(self):
-        self.group_context()
-        socket_path = self.settings.state_dir / "stickers.sock"
-        server = await asyncio.start_unix_server(
-            self.agent.tools.send_image, path=socket_path
-        )
-        try:
-            result = await asyncio.to_thread(
-                image_tool.call,
-                str(socket_path),
-                self.folder.name,
-                "send_sticker",
-                {"name": "让我想想"},
-            )
-            assert result["structuredContent"]["ok"]
-            self.bot.send.assert_awaited_once_with(
-                self.message,
-                image=self.agent.runtime.stickers["让我想想"],
-                sticker=True,
-            )
-            result = await asyncio.to_thread(
-                image_tool.call,
-                str(socket_path),
-                self.folder.name,
-                "send_sticker",
-                {"name": "开心"},
-            )
-            assert result["isError"]
-        finally:
-            server.close()
-            await server.wait_closed()
-
     def group_context(self):
         self.agent.turns.contexts.clear()
         self.message = parse_message(event(group=10), self.settings)
         self.context = ImageTurn(self.message, self.folder)
         self.agent.turns.contexts[self.message.key] = self.context
 
-    async def test_private_sticker(self):
-        with pytest.raises(ValueError, match="仅群聊"):
-            await self.agent.turns.images.deliver_sticker(
-                self.context, {"action": "send_sticker", "name": "开心"}
-            )
-        self.bot.send.assert_not_awaited()
-        assert not self.context.sticker_used
-
     async def test_default_send_keeps_file_and_receipt(self):
         path = self.save()
         result = await self.agent.turns.images.deliver_image(
             self.context, {"action": "send_image"}
         )
-        assert result["message_id"] == 123
+        assert result["message_ids"] == [123]
         assert (self.folder / path).read_bytes() == PNG
         self.bot.send.assert_awaited_once_with(self.message, image=PNG)
         assert (
@@ -545,6 +433,7 @@ class TestImages:
         async def send(*args, **kwargs):
             self.save(item="second")
             await asyncio.sleep(0)
+            return [{"message_id": 123}]
 
         self.bot.send.side_effect = send
         result = await self.agent.turns.images.deliver_image(
@@ -643,21 +532,21 @@ class TestImages:
                 "jsonrpc": "2.0",
                 "id": 4,
                 "method": "tools/call",
-                "params": {"name": "send_sticker", "arguments": {"name": "开心"}},
+                "params": {"name": "view_image", "arguments": {"image_id": "image-id"}},
             },
             {
                 "jsonrpc": "2.0",
                 "id": 5,
                 "method": "tools/call",
-                "params": {"name": "send_sticker", "arguments": {}},
+                "params": {"name": "view_image", "arguments": {}},
             },
             {
                 "jsonrpc": "2.0",
                 "id": 6,
                 "method": "tools/call",
                 "params": {
-                    "name": "send_sticker",
-                    "arguments": {"name": "开心", "path": "angry.png"},
+                    "name": "view_image",
+                    "arguments": {"image_id": "image-id", "path": "angry.png"},
                 },
             },
         ]
@@ -667,7 +556,7 @@ class TestImages:
                 sys,
                 "argv",
                 ["image_tool.py", "socket", "session"]
-                + (["--stickers"] if group else []),
+                + (["--group", "token"] if group else []),
             ),
             patch.object(
                 sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)))
@@ -680,7 +569,7 @@ class TestImages:
         assert {tool["name"] for tool in responses[0]["result"]["tools"]} == {
             "list_images",
             "send_image",
-        } | ({"send_sticker"} if group else set())
+        } | ({"view_image"} if group else set())
         assert call.call_args_list[0].args == (
             "socket",
             "session",
@@ -692,8 +581,8 @@ class TestImages:
             assert call.call_args_list[2].args == (
                 "socket",
                 "session",
-                "send_sticker",
-                {"name": "开心"},
+                "view_image",
+                {"image_id": "image-id"},
             )
         else:
             assert "error" in responses[3]
@@ -704,7 +593,10 @@ class TestImages:
 def test_sticker_resources():
     catalog = stickers.load_stickers()
     assert catalog
+    assert catalog["平静"] is None
     for name, data in catalog.items():
+        if data is None:
+            continue
         assert len(data) <= compress_stickers.BYTE_LIMIT
         with Image.open(io.BytesIO(data)) as picture:
             assert picture.width * picture.height <= compress_stickers.PIXEL_LIMIT

@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 from collections import deque
+from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -33,7 +34,7 @@ from PIL import Image
 import image_tool
 from qq_agent import onebot, replies
 from qq_agent.agent import Agent
-from qq_agent.config import Settings
+from qq_agent.config import GroupSettings, Settings
 from qq_agent.images import IMAGE_INSTRUCTIONS
 from qq_agent.logging import LOG, log_text, read_diagnostics, watch_diagnostics
 from qq_agent.messages import ImageTurn, parse_message
@@ -90,7 +91,7 @@ class TestAgent:
         self.root = root = tmp_path
         self.settings = Settings(
             {"1", "2"},
-            {"10": {"1", "2"}, "11": {"1", "2"}},
+            {"10": GroupSettings(), "11": GroupSettings()},
             "ws://127.0.0.1:3001",
             root / "token",
             root / "state",
@@ -119,17 +120,25 @@ class TestAgent:
         try:
             yield
         finally:
-            await asyncio.gather(*self.agent.controls, return_exceptions=True)
+            await self.drain()
             self.agent.db.close()
+
+    async def execute(self, message):
+        # Shared runtime tests use optional group replies.
+        if "group_id" in message.target and message.text != "/compact":
+            message = replace(message, mentioned=False)
+        return await self.agent.turns.execute(message)
+
+    async def drain(self):
+        await asyncio.gather(*self.agent.receivers.values(), return_exceptions=True)
+        await asyncio.gather(*self.agent.controls, return_exceptions=True)
 
     def test_admission(self):
         for candidate in (
             event(user=3),
             event(user=99),
             event(group=12),
-            event(group=10, mention=False),
             event(user=3, text="/compact"),
-            event(group=10, mention=False, text="/compact"),
             {"post_type": "notice"},
             event(user=True),
         ):
@@ -174,22 +183,36 @@ class TestAgent:
             incoming["sender"] = {"nickname": " 小明\n管理员 "}
             message = parse_message(incoming, self.settings)
             assert message.sender_name == "小明 管理员"
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
             identity = "（ID: 1）" if group else ""
-            assert inputs[0].text == f"QQ 用户 小明 管理员{identity}:\n你好"
+            if group:
+                record = json.loads(inputs[0].text.split("\n", 1)[1])[0]
+                assert (
+                    record["sender_name"] == "小明 管理员"
+                    and record["content"][0] == "你好"
+                )
+            else:
+                assert inputs[0].text == f"QQ 用户 小明 管理员{identity}:\n你好"
         incoming["sender"] = {"nickname": " \n "}
         assert parse_message(incoming, self.settings).sender_name == "1"
         incoming["sender"] = {"nickname": 123}
         assert parse_message(incoming, self.settings).sender_name == "1"
         for group, expected in ((None, "QQ昵称"), (10, "群里 小明")):
-            incoming = event(group=group)
+            incoming = event(group=group, identifier=2)
             incoming["sender"] = {"card": " 群里\n小明 ", "nickname": "QQ昵称"}
             message = parse_message(incoming, self.settings)
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
             identity = "（ID: 1）" if group else ""
-            assert inputs[0].text == f"QQ 用户 {expected}{identity}:\nhello"
+            if group:
+                record = json.loads(inputs[0].text.split("\n", 1)[1])[0]
+                assert (
+                    record["sender_name"] == expected
+                    and record["content"][0] == "hello"
+                )
+            else:
+                assert inputs[0].text == f"QQ 用户 {expected}{identity}:\nhello"
         for card in (None, "", " \n ", 123):
             incoming["sender"] = {**incoming["sender"], "card": card}
             assert parse_message(incoming, self.settings).sender_name == "QQ昵称"
@@ -334,7 +357,7 @@ class TestAgent:
         context = self.member_context()
         await self.save_profile(context, {"兴趣": "NixOS"})
         self.agent.receive(event(group=10, text="/profile forget", identifier=20))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.queue.empty()
         assert context.profiles == []
         with pytest.raises(ValueError):
@@ -373,6 +396,7 @@ class TestAgent:
             call
             for call in self.codex._client.request.call_args_list
             if call.args[0] == "thread/inject_items"
+            and "最新应用提示词" in str(call.args[1])
         ]
         item = calls[-1].args[1]["items"][0]
         assert item["role"] == "developer"
@@ -386,7 +410,7 @@ class TestAgent:
         self.settings.agent_admin_qq = "1"
         self.bot.call.return_value = {"group_id": 10, "user_id": 1, "role": role}
         self.agent.receive(event(group=10, text="/prompt set 多行\n群设定"))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         row = self.agent.db.execute(
             "SELECT prompt, updated_by FROM group_prompts"
         ).fetchone()
@@ -403,7 +427,7 @@ class TestAgent:
             self.agent.receive(
                 event(user=2, group=10, identifier=identifier, text=text)
             )
-            await asyncio.gather(*self.agent.controls)
+            await self.drain()
         assert [call.kwargs["text"] for call in self.bot.send.call_args_list] == [
             "保存成功",
             "A\nB",
@@ -421,20 +445,20 @@ class TestAgent:
             20,
         ):
             self.agent.receive(event(group=10, identifier=identifier, text=text))
-            await asyncio.gather(*self.agent.controls)
+            await self.drain()
             assert self.bot.send.call_args.kwargs["text"] != "保存成功"
         for incoming in (
             event(user=3, group=10, text="/prompt set denied"),
             event(group=10, mention=False, text="/prompt set denied"),
         ):
             self.agent.receive(incoming)
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert not self.agent.db.execute("SELECT * FROM group_prompts").fetchall()
-        self.settings.groups["10"] = {"all"}
+        self.settings.groups["10"] = GroupSettings()
         self.agent.receive(
             event(user=3, group=10, identifier=100, text="/prompt set 全员设定")
         )
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert (
             self.agent.db.execute("SELECT prompt FROM group_prompts").fetchone()[0]
             == "全员设定"
@@ -463,7 +487,7 @@ class TestAgent:
                 parse_message(event(group=10, text=command), self.settings)
             )
             assert self.codex._client.request.await_count == before
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             assert "群设定" not in json.loads(
                 self.group_instructions().split("\n", 1)[1]
             )
@@ -490,7 +514,7 @@ class TestAgent:
             await self.agent.commands.control(
                 parse_message(event(group=10, text="/new blank"), self.settings)
             )
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             instructions = self.codex.thread_start.call_args.kwargs["base_instructions"]
             assert ("latest" in instructions) == bool(prompt)
             assert "first" not in instructions
@@ -502,17 +526,17 @@ class TestAgent:
             return NS(config=NS(sandbox_workspace_write=None))
 
         self.codex._client.request.side_effect = fail_injection
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         assert thread.turn.await_count == 5
 
     @pytest.mark.parametrize("admin", [None, "123456789"])
     async def test_admin_instructions(self, admin):
         self.settings.agent_admin_qq = admin
         self.setup_turn([turn_done()])
-        self.settings.groups["11"] = {"1"}
+        self.settings.groups["11"] = GroupSettings()
         for group in (10, 11, None):
             message = parse_message(event(group=group), self.settings)
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             options = self.codex.thread_start.call_args.kwargs
             instructions = options.get("base_instructions", "")
             assert ("管理员 QQ 号为 123456789" in instructions) == (
@@ -523,7 +547,7 @@ class TestAgent:
                 assert "123456789" not in options["developer_instructions"]
             else:
                 assert "123456789" not in self.group_instructions()
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             assert "base_instructions" not in self.codex.thread_resume.call_args.kwargs
 
     async def test_snapshot_dedup(self):
@@ -533,15 +557,16 @@ class TestAgent:
         def injections():
             return sum(
                 call.args[0] == "thread/inject_items"
+                and "最新应用提示词" in str(call.args[1])
                 for call in self.codex._client.request.call_args_list
             )
 
         for _ in range(2):
-            await self.agent.turns.execute(message)
+            await self.execute(message)
         assert injections() == 1
         self.agent.db.close()
         self.agent = Agent(self.settings, self.bot, self.codex)
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         assert injections() == 1
         group_file = self.root / "group-runtime.md"
         group_file.write_text("")
@@ -554,8 +579,8 @@ class TestAgent:
         ):
             path.write_text(text)
             before = injections()
-            await self.agent.turns.execute(message)
-            await self.agent.turns.execute(message)
+            await self.execute(message)
+            await self.execute(message)
             assert injections() == before + int(path != group_file)
             rules = json.loads(self.group_instructions().split("\n", 1)[1])[
                 "应用提示词"
@@ -566,8 +591,8 @@ class TestAgent:
                 assert text not in rules
         before = injections()
         self.agent.runtime.stickers["新增表情"] = PNG
-        await self.agent.turns.execute(message)
-        await self.agent.turns.execute(message)
+        await self.execute(message)
+        await self.execute(message)
         assert injections() == before + 1
         assert "新增表情" in self.group_instructions()
         for prompt in ("first", "second", "first", ""):
@@ -577,8 +602,8 @@ class TestAgent:
                     (prompt,),
                 )
             before = injections()
-            await self.agent.turns.execute(message)
-            await self.agent.turns.execute(message)
+            await self.execute(message)
+            await self.execute(message)
             assert injections() == before
         for statement in (
             "INSERT INTO group_profiles VALUES ('10', '音乐', 0)",
@@ -590,7 +615,7 @@ class TestAgent:
             with self.agent.db:
                 self.agent.db.execute(statement)
             before = injections()
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             assert injections() == before + 1
         before = injections()
         with self.agent.db:
@@ -601,16 +626,16 @@ class TestAgent:
         with patch.object(
             self.codex._client, "request", side_effect=RuntimeError("failed")
         ):
-            await self.agent.turns.execute(message)
+            await self.execute(message)
         assert self.agent.db.execute("SELECT * FROM group_snapshots").fetchall() == old
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         assert injections() == before + 1
         before = injections()
         await self.agent.commands.control(
             parse_message(event(group=10, text="/new blank"), self.settings)
         )
         thread.id = "new-thread"
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         assert injections() == before + 1
         assert self.agent.db.execute(
             "SELECT COUNT(*) FROM group_snapshots"
@@ -623,7 +648,7 @@ class TestAgent:
         self.codex._client._sync = NS(_router=router)
         self.setup_turn([turn_done()])
         message = parse_message(event(group=10), self.settings)
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         with self.agent.db:
             self.agent.db.execute(
                 "INSERT INTO group_snapshots VALUES ('other', 'keep')"
@@ -640,7 +665,7 @@ class TestAgent:
         ]
         self.agent.db.close()
         self.agent = Agent(self.settings, self.bot, self.codex)
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         assert (
             len(self.agent.db.execute("SELECT * FROM group_snapshots").fetchall()) == 2
         )
@@ -697,10 +722,7 @@ class TestAgent:
             )
             await self.agent.tools.send_image(reader, writer)
             assert output[0]["ok"]
-        assert [call.kwargs["text"] for call in self.bot.send.call_args_list] == [
-            "📝正在给被记录者记进小本本……",
-            "📝正在给本群记进小本本……",
-        ]
+        self.bot.send.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "info", [{}, {"group_id": 11, "user_id": 2}, {"group_id": 10, "user_id": 3}]
@@ -801,7 +823,7 @@ class TestAgent:
         thread, _ = self.setup_turn([turn_done()])
         message = parse_message(event(group=10), self.settings)
         message.sender_id = "3"
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         options = self.codex.thread_start.call_args.kwargs
         recalled = self.group_instructions()
         assert "NixOS" in recalled
@@ -818,7 +840,7 @@ class TestAgent:
         context = self.member_context()
         await self.save_profile(context, {"兴趣": "代码"})
         self.agent.turns.contexts.clear()
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         options = self.codex.thread_resume.call_args.kwargs
         recalled = self.group_instructions()
         assert "代码" in recalled
@@ -831,7 +853,7 @@ class TestAgent:
         )
         self.codex.thread_start.reset_mock()
         self.codex.thread_resume.reset_mock()
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         self.codex.thread_start.assert_awaited_once()
         self.codex.thread_resume.assert_not_awaited()
         instructions = self.group_instructions()
@@ -845,11 +867,9 @@ class TestAgent:
             in json.loads(instructions.split("\n", 1)[1])["应用提示词"]
         )
         assert len(thread.turn.call_args.args[0]) == 1
-        await self.agent.turns.execute(
-            parse_message(event(user=2, group=10), self.settings)
-        )
+        await self.execute(parse_message(event(user=2, group=10), self.settings))
         assert len(thread.turn.call_args.args[0]) == 1
-        await self.agent.turns.execute(parse_message(event(), self.settings))
+        await self.execute(parse_message(event(), self.settings))
         assert "base_instructions" not in self.codex.thread_start.call_args.kwargs
         assert (
             "qq_member"
@@ -948,59 +968,16 @@ class TestAgent:
                 assert "error" in json.loads(await reader.readline())
                 writer.close()
                 await writer.wait_closed()
-            self.bot.send.assert_awaited_once_with(
-                context.message, text="📝正在给小明记进小本本……"
-            )
+            self.bot.send.assert_not_awaited()
         finally:
             server.close()
             await server.wait_closed()
 
-    async def test_group_mentions(self):
-        self.setup_turn([turn_done()])
-        incoming = event(group=10, text="请问 ")
-        incoming["message"] = [
-            {"type": "text", "data": {"text": "请问 "}},
-            {"type": "at", "data": {"qq": "2"}},
-            {"type": "text", "data": {"text": " 和 "}},
-            {"type": "at", "data": {"qq": 2}},
-            {"type": "text", "data": {"text": " 呢"}},
-            {"type": "at", "data": {"qq": "99"}},
-        ]
-        self.bot.call = AsyncMock(
-            return_value={"card": " 小明\n同学 ", "nickname": "QQ昵称"}
-        )
-        message = parse_message(incoming, self.settings)
-        await self.agent.turns.execute(message)
-        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert (
-            inputs[0].text
-            == "QQ 用户 1（ID: 1）:\n请问 @小明 同学（ID: 2） 和 @小明 同学（ID: 2） 呢"
-        )
-        self.bot.call.assert_any_await(
-            "get_group_member_info", {"group_id": 10, "user_id": 2}
-        )
-        self.bot.call.side_effect = RuntimeError("lookup failed")
-        incoming["message_id"] = 2
-        await self.agent.turns.execute(parse_message(incoming, self.settings))
-        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert (
-            inputs[0].text == "QQ 用户 1（ID: 1）:\n请问 @2（ID: 2） 和 @2（ID: 2） 呢"
-        )
-        incoming["message"] = [
-            {"type": "at", "data": {"qq": "99"}},
-            {"type": "at", "data": {"qq": "all"}},
-        ]
-        incoming["message_id"] = 3
-        message = parse_message(incoming, self.settings)
-        assert message.text == "@all"
-        await self.agent.turns.execute(message)
-        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert inputs[0].text == "QQ 用户 1（ID: 1）:\n@全体成员"
-
-    def test_reply_admission(self):
+    async def test_reply_admission(self):
         message = parse_message(event(group=10, text="", reply="42"), self.settings)
         assert message.reply == "42"
         self.agent.receive(event(group=10, text="", reply="42"))
+        await self.drain()
         assert self.agent.queue.qsize() == 1
 
     def test_invalid_config(self):
@@ -1058,10 +1035,11 @@ class TestAgent:
         self.settings.queue_limit = 1
         self.agent.receive(event(identifier=1))
         self.agent.receive(event(identifier=2))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.queue.qsize() == 1
         assert "已满" in self.bot.send.call_args.kwargs["text"]
         self.agent.receive(event(group=10, identifier=3))
+        await self.drain()
         assert self.agent.queue.qsize() == 2
 
     def test_external_allowlist(self):
@@ -1075,9 +1053,11 @@ class TestAgent:
         )
         with pytest.raises(FileNotFoundError):
             Settings.load(path)
-        allowlist.write_text('private_users=["1"]\n[groups."10"]\nusers=["2", "all"]\n')
+        allowlist.write_text(
+            'private_users=["1"]\n[groups."10"]\nrequest_message_count=20\n'
+        )
         assert Settings.load(path).private_users == {"1"}
-        assert Settings.load(path).groups == {"10": {"2", "all"}}
+        assert Settings.load(path).groups == {"10": GroupSettings()}
         allowlist.write_text("")
         assert Settings.load(path).private_users == set()
         assert Settings.load(path).groups == {}
@@ -1110,12 +1090,12 @@ class TestAgent:
             'auth_socket="/auth/socket"\nagents_file="/common.md"\n'
             'private_agents_file="/private.md"\ngroup_agents_file="/group.md"\n'
             "group_prompt_allow_members=true\nqueue_limit=4\ntask_timeout=900\n"
-            '[groups."10"]\nusers=["all"]\n'
+            '[groups."10"]\nrequest_message_count=20\n'
         )
         path.write_text(original)
         settings = Settings.load(path)
         assert settings.private_users == {"1"}
-        assert settings.groups == {"10": {"all"}}
+        assert settings.groups == {"10": GroupSettings()}
         assert settings.agent_admin_qq == "123"
         assert settings.model == "chosen-model"
         assert settings.auth_socket == Path("/auth/socket")
@@ -1145,28 +1125,32 @@ class TestAgent:
             (1, None, True),
             (2, None, False),
             (3, None, False),
-            (1, 10, False),
+            (1, 10, True),
             (2, 10, True),
-            (3, 10, False),
+            (3, 10, True),
             (1, 11, True),
             (2, 11, True),
             (3, 11, True),
-            (2, 12, False),
+            (2, 12, True),
             (3, 13, False),
-            (99, 11, False),
+            (99, 11, True),
         ),
     )
     def test_scoped_permissions(self, user, group, allowed):
         self.settings.private_users = {"1"}
-        self.settings.groups = {"10": {"2"}, "11": {"all"}, "12": set()}
+        self.settings.groups = {
+            "10": GroupSettings(),
+            "11": GroupSettings(),
+            "12": GroupSettings(),
+        }
         assert (
             parse_message(event(user=user, group=group), self.settings) is not None
         ) == allowed
-        assert parse_message(event(group=11, mention=False), self.settings) is None
+        assert parse_message(event(group=11, mention=False), self.settings) is not None
 
     async def test_scoped_commands(self):
         self.settings.private_users = set()
-        self.settings.groups = {"10": {"2"}, "11": {"all"}}
+        self.settings.groups = {"10": GroupSettings(), "11": GroupSettings()}
         for command in (
             "/help",
             "/status",
@@ -1179,9 +1163,7 @@ class TestAgent:
         ):
             for candidate in (
                 event(user=2, text=command),
-                event(user=1, group=10, text=command),
                 event(user=2, group=12, text=command),
-                event(user=3, group=11, mention=False, text=command),
             ):
                 self.agent.receive(candidate)
         assert not self.agent.controls
@@ -1190,12 +1172,12 @@ class TestAgent:
         self.codex.account.assert_not_called()
         for user, group in ((2, 10), (3, 11)):
             self.agent.receive(event(user=user, group=group, text="/help"))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.bot.send.call_count == 2
 
     async def test_help_dispatch(self):
         self.agent.receive(event(text="/help"))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.queue.empty()
         assert "/model" in self.bot.send.call_args.kwargs["text"]
         self.codex.account.assert_not_called()
@@ -1233,7 +1215,7 @@ class TestAgent:
         )
         self.codex.models = AsyncMock(return_value=response)
         self.agent.receive(event(text="/model"))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.queue.empty()
         text = self.bot.send.call_args.kwargs["text"]
         assert "alpha" in text
@@ -1243,14 +1225,14 @@ class TestAgent:
             ("/model hidden", "/model low-only", "/model alpha extra"), 2
         ):
             self.agent.receive(event(text=text, identifier=index))
-            await asyncio.gather(*self.agent.controls)
+            await self.drain()
             assert self.agent.runtime.selected_model("private-1") is None
         self.agent.receive(event(text="/model\talpha", identifier=5))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.runtime.selected_model("private-1") == "alpha"
         assert self.agent.runtime.selected_model("private-2") is None
         self.agent.receive(event(text="/model beta", group=10, identifier=6))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.runtime.selected_model("group-10") == "beta"
         assert self.agent.runtime.selected_model("group-11") is None
         self.agent.db.close()
@@ -1312,10 +1294,10 @@ class TestAgent:
             "update_group",
             side_effect=RuntimeError("injection failed"),
         ):
-            await self.agent.turns.execute(message)
+            await self.execute(message)
         thread.turn.assert_not_awaited()
         assert self.agent.db.execute("SELECT summary FROM group_handoffs").fetchone()
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         snapshot = json.loads(self.group_instructions().split("\n", 1)[1])
         assert snapshot["历史聊天摘要"] == "成员 1 想讨论 NixOS。"
         assert len(thread.turn.call_args.args[0]) == 1
@@ -1341,7 +1323,7 @@ class TestAgent:
         )
         self.agent.db.close()
         self.agent = Agent(self.settings, self.bot, self.codex)
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         assert (
             json.loads(self.group_instructions().split("\n", 1)[1])["历史聊天摘要"]
             == ""
@@ -1399,7 +1381,7 @@ class TestAgent:
             thread.turn.assert_awaited_once()
             self.agent.receive(event(group=10, identifier=2))
             self.agent.receive(event(group=11, identifier=3))
-            await asyncio.gather(*self.agent.controls)
+            await self.drain()
             assert self.agent.queue.qsize() == 1
             assert self.agent.queue.get_nowait().key == "group-11"
             await self.agent.commands.control(
@@ -1430,10 +1412,10 @@ class TestAgent:
 
     async def test_handoff_routing(self):
         self.agent.receive(event(group=10, text="/new", identifier=1))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         self.codex.account.assert_not_awaited()
         self.agent.receive(event(group=10, text="/new blank", identifier=2))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.queue.empty()
         self.agent.receive(event(text="/new blank", identifier=3))
         assert self.agent.queue.get_nowait().target == {"user_id": 1}
@@ -1476,7 +1458,6 @@ class TestAgent:
                 parse_message(event(group=10, text="/new"), self.settings),
                 "old-thread",
                 self.settings.workspace_dir / "handoff",
-                self.agent.replies.safe_send,
             )
         assert self.agent.db.execute("SELECT renew FROM sessions").fetchone() == (0,)
         assert self.codex._client.request.call_args.args[0] == "thread/unsubscribe"
@@ -1543,6 +1524,7 @@ class TestAgent:
             )
         self.agent.receive(event(group=10, identifier=1))
         self.agent.receive(event(group=11, identifier=2))
+        await self.drain()
         command = parse_message(event(group=10, text="/new blank"), self.settings)
         await self.agent.commands.control(command)
         assert self.agent.queue.qsize() == 1
@@ -1582,7 +1564,7 @@ class TestAgent:
             self.agent.db.execute("INSERT INTO models VALUES ('private-1', 'alpha')")
         message = parse_message(event(), self.settings)
         message.images = ["image-id"]
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         inputs = thread.turn.call_args.args[0]
         assert thread.turn.call_args.kwargs["effort"] == ReasoningEffort.medium
         assert thread.turn.call_args.kwargs["model"] == "alpha"
@@ -1606,7 +1588,7 @@ class TestAgent:
             self.agent.db.execute(
                 "UPDATE models SET model='beta' WHERE key='private-1'"
             )
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         self.codex.thread_resume.assert_awaited_once()
         assert (
             IMAGE_INSTRUCTIONS
@@ -1624,13 +1606,13 @@ class TestAgent:
         group.write_text("当前是群聊")
         self.settings.private_agents_file = private
         self.settings.group_agents_file = group
-        self.bot.call = AsyncMock()
+        self.bot.call = AsyncMock(return_value={})
         self.setup_turn([turn_done()])
         for incoming, expected, excluded in (
             (event(), "当前是私聊 {nickname}", "当前是群聊"),
             (event(group=10), "当前是群聊", "当前是私聊"),
         ):
-            await self.agent.turns.execute(parse_message(incoming, self.settings))
+            await self.execute(parse_message(incoming, self.settings))
             options = self.codex.thread_start.call_args.kwargs
             instructions = (
                 options["base_instructions"]
@@ -1641,14 +1623,14 @@ class TestAgent:
             assert excluded not in instructions
             if incoming.get("group_id"):
                 assert expected not in self.group_instructions()
-                assert "send_sticker" in self.group_instructions()
+                assert "sticker" in self.group_instructions()
             else:
                 assert "send_sticker" not in instructions
             assert (
-                "--stickers" in options["config"]["mcp_servers"]["qq_image"]["args"]
+                "--group" in options["config"]["mcp_servers"]["qq_image"]["args"]
             ) == bool(incoming.get("group_id"))
-        assert all(
-            (c.args[0] == "set_msg_emoji_like" for c in self.bot.call.call_args_list)
+        assert not any(
+            c.args[0] == "set_msg_emoji_like" for c in self.bot.call.call_args_list
         )
 
     @pytest.mark.parametrize("relative", [".agents", ".agents/skills"])
@@ -1687,11 +1669,9 @@ class TestAgent:
             await self.agent.commands.control(
                 parse_message(event(group=group_id, text="/new blank"), self.settings)
             )
-            await self.agent.turns.execute(
-                parse_message(event(group=group_id), self.settings)
-            )
+            await self.execute(parse_message(event(group=group_id), self.settings))
             assert (
-                f"你的昵称：{expected}，再说一次：{expected}。{{other}}"
+                f"你的 QQ 号是 99，当前群昵称是 {expected}。"
                 in self.codex.thread_start.call_args.kwargs["base_instructions"]
             )
             self.bot.call.assert_any_await(
@@ -1702,74 +1682,28 @@ class TestAgent:
         )
         group.unlink()
         self.bot.call.reset_mock()
-        await self.agent.turns.execute(parse_message(event(group=10), self.settings))
+        await self.execute(parse_message(event(group=10), self.settings))
         assert "base_instructions" not in self.codex.thread_resume.call_args.kwargs
         assert all(
             call.args[0] != "get_group_member_info"
             for call in self.bot.call.call_args_list
         )
 
-    async def test_reply_image(self):
-        self.setup_turn([turn_done()])
-        self.bot.reply_content.return_value = (
-            [("text", "caption")],
-            ["quoted-image"],
-            "1",
-            "1",
-        )
-        message = parse_message(
-            event(group=10, text="解释图片", reply="42"), self.settings
-        )
-        await self.agent.turns.execute(message)
-        self.bot.reply_content.assert_awaited_once_with("42", {"group_id": 10})
-        self.bot.image.assert_awaited_once_with("quoted-image")
-        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert inputs[0].text == "QQ 用户 1（ID: 1）:\n先前消息：\ncaption"
-        assert inputs[2].text == "当前消息：\n解释图片"
-        assert isinstance(inputs[1], LocalImageInput)
-
     async def test_reply_text(self):
         self.setup_turn([turn_done()])
-        self.bot.reply_content.return_value = (
-            [("text", "第一行\n"), ("at", "2"), ("text", " 第二行")],
-            [],
-            "1",
-            "1",
-        )
-        self.bot.call = AsyncMock(return_value={"card": "小明", "nickname": "QQ昵称"})
-        message = parse_message(
-            event(group=10, text="你怎么看？", reply="42"), self.settings
-        )
-        await self.agent.turns.execute(message)
-        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert (
-            inputs[0].text
-            == "QQ 用户 1（ID: 1）:\n先前消息：\n第一行\n@小明（ID: 2） 第二行"
-        )
-        self.bot.call.assert_any_await(
-            "get_group_member_info", {"group_id": 10, "user_id": 2}
-        )
-        self.bot.reply_content.return_value = ([("text", "只有引用")], [], "1", "1")
-        await self.agent.turns.execute(
-            parse_message(event(group=10, text="", reply="42"), self.settings)
-        )
-        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert inputs[0].text == "QQ 用户 1（ID: 1）:\n先前消息：\n只有引用"
         self.bot.reply_content.return_value = ([("text", "私聊引用")], [], "1", "1")
-        await self.agent.turns.execute(
-            parse_message(event(text="继续", reply="42"), self.settings)
-        )
+        await self.execute(parse_message(event(text="继续", reply="42"), self.settings))
         inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
         assert inputs[0].text == "QQ 用户 1:\n先前消息：\n私聊引用"
         assert inputs[1].text == "当前消息：\n继续"
 
     async def test_empty_reply(self):
-        message = parse_message(event(group=10, text="", reply="42"), self.settings)
-        await self.agent.turns.execute(message)
+        message = parse_message(event(text="", reply="42"), self.settings)
+        await self.execute(message)
         assert "没有可读取" in self.bot.send.call_args.kwargs["text"]
         assert not hasattr(self.codex, "thread_start")
 
-    @pytest.mark.parametrize("group", (10, None))
+    @pytest.mark.parametrize("group", (None,))
     @pytest.mark.parametrize("own", (True, False))
     @pytest.mark.parametrize("pictures", (0, 2, 3))
     async def test_reply_blocks(self, group, own, pictures):
@@ -1827,7 +1761,7 @@ class TestAgent:
         assert isinstance(inputs[1], LocalImageInput)
         assert "引用结束" in inputs[2].text
 
-    @pytest.mark.parametrize("group", (10, None))
+    @pytest.mark.parametrize("group", (None,))
     async def test_idle_notice(self, group):
         self.setup_turn([turn_done()])
         message = parse_message(event(group=group), self.settings)
@@ -1844,7 +1778,7 @@ class TestAgent:
 
         self.agent.runtime.compact = AsyncMock(side_effect=compact)
         message.generation = 1
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         self.agent.runtime.compact.assert_awaited_once()
         self.codex.thread_start.assert_not_awaited()
         texts = [call.kwargs["text"] for call in self.bot.send.call_args_list]
@@ -1852,7 +1786,7 @@ class TestAgent:
             ["开始处理……"] if group is None else []
         ) + ["任务完成。"]
 
-    @pytest.mark.parametrize("group", (10, None))
+    @pytest.mark.parametrize("group", (None,))
     async def test_all_texts(self, group):
         image = ImageGenerationThreadItem(
             id="image1",
@@ -1899,7 +1833,7 @@ class TestAgent:
         self.agent.receive(event(group=group))
         message = self.agent.queue.get_nowait()
         self.agent.mark(message, "running")
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         texts = [call.kwargs["text"] for call in self.bot.send.call_args_list]
         expected = ["thinking", "first", "last", "unphased"]
         if group is None:
@@ -1916,98 +1850,6 @@ class TestAgent:
             == "completed"
         )
 
-    @pytest.mark.parametrize(
-        "group, end, count",
-        (
-            (10, "completed", 0),
-            (10, "failed", 0),
-            (10, "error", 0),
-            (10, "cancel", 0),
-            (10, "after_first", 1),
-            (10, "slow", 2),
-            (None, "slow", 0),
-        ),
-    )
-    async def test_group_reminders(self, group, end, count):
-        assert replies.GROUP_REMINDERS == (
-            (30, "thinking_30s.png"),
-            (300, "thinking_too_long.png"),
-        )
-        images = [
-            files("pics").joinpath(name).read_bytes()
-            for _, name in replies.GROUP_REMINDERS
-        ]
-        for data in images:
-            assert len(data) <= 110000
-            with Image.open(io.BytesIO(data)) as picture:
-                assert picture.format == "PNG"
-                alpha = picture.convert("RGBA").getchannel("A").histogram()
-                assert alpha[0] and sum(alpha[1:250]) and sum(alpha[250:])
-        self.bot.send.reset_mock()
-        _, turn = self.setup_turn([])
-
-        async def stream():
-            await asyncio.sleep(
-                0.06 if end == "slow" else 0.02 if end == "after_first" else 0
-            )
-            if end == "error":
-                raise RuntimeError("stream failed")
-            if end == "cancel":
-                raise asyncio.CancelledError
-            yield turn_done(
-                TurnStatus.failed if end == "failed" else TurnStatus.completed
-            )
-
-        turn.stream = stream
-        with patch.object(
-            replies,
-            "GROUP_REMINDERS",
-            ((0.01, "thinking_30s.png"), (0.03, "thinking_too_long.png")),
-        ):
-            message = parse_message(event(group=group), self.settings)
-            if end == "cancel":
-                with pytest.raises(asyncio.CancelledError):
-                    await self.agent.turns.execute(message)
-            else:
-                await self.agent.turns.execute(message)
-            await asyncio.sleep(0.04)
-        assert [
-            c.kwargs for c in self.bot.send.call_args_list if "image" in c.kwargs
-        ] == [{"image": data, "sticker": True} for data in images[:count]]
-        if end == "failed":
-            assert self.bot.send.call_args.kwargs["text"] == "哎呀！宕机了……"
-
-    @pytest.mark.parametrize(
-        "group, outcome", ((None, "ok"), (10, "ok"), (10, "failed"), (10, "slow"))
-    )
-    async def test_group_reaction(self, group, outcome):
-        self.bot.call.reset_mock()
-        cancelled = asyncio.Event()
-
-        async def call(action, params):
-            if outcome == "failed":
-                raise RuntimeError("unsupported")
-            if outcome == "slow":
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    cancelled.set()
-
-        self.bot.call.side_effect = call
-        self.setup_turn([turn_done()])
-        message = parse_message(event(group=group, identifier=-42), self.settings)
-        await asyncio.wait_for(self.agent.turns.execute(message), 2)
-        if group:
-            self.bot.call.assert_awaited_once_with(
-                "set_msg_emoji_like",
-                {"message_id": "-42", "emoji_id": "124", "set": True},
-            )
-        else:
-            self.bot.call.assert_not_awaited()
-        assert self.bot.send.call_args.kwargs["text"] == "任务完成。"
-        if outcome == "slow":
-            assert cancelled.is_set()
-
     async def test_reminder_failure(self):
         message = parse_message(event(group=10), self.settings)
         self.bot.send.side_effect = [ConnectionError("offline"), None]
@@ -2021,62 +1863,7 @@ class TestAgent:
             )
         assert self.bot.send.await_count == 2
 
-    @pytest.mark.parametrize(
-        "stage, outcome",
-        (
-            ("prepare_input", "ok"),
-            ("prepare_input", "invalid"),
-            ("prepare_input", "error"),
-            ("prepare_input", "cancel"),
-            ("thread_options", "ok"),
-            ("prepare_thread", "ok"),
-        ),
-    )
-    async def test_reaction_order(self, stage, outcome):
-        self.setup_turn([turn_done()])
-        reacted, cancelled = asyncio.Event(), asyncio.Event()
-
-        async def account():
-            self.bot.call.assert_not_awaited()
-            return NS(account=object())
-
-        async def react(action, params):
-            reacted.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-
-        self.codex.account.side_effect = account
-        self.bot.call.side_effect = react
-        owner = self.agent.inputs if stage == "prepare_input" else self.agent.runtime
-        original = getattr(owner, stage)
-
-        async def prepare(*args):
-            assert reacted.is_set()
-            if outcome == "invalid":
-                return None
-            if outcome == "error":
-                raise RuntimeError("input failed")
-            if outcome == "cancel":
-                raise asyncio.CancelledError
-            return await original(*args)
-
-        message = parse_message(event(group=10), self.settings)
-        with patch.object(owner, stage, side_effect=prepare):
-            if outcome == "cancel":
-                with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(self.agent.turns.execute(message), 2)
-            else:
-                await asyncio.wait_for(self.agent.turns.execute(message), 2)
-        assert cancelled.is_set()
-        assert not self.agent.turns.contexts
-        self.bot.call.assert_awaited_once_with(
-            "set_msg_emoji_like",
-            {"message_id": "1", "emoji_id": "124", "set": True},
-        )
-
-    @pytest.mark.parametrize("group", (10, None))
+    @pytest.mark.parametrize("group", (None,))
     @pytest.mark.parametrize("status", (TurnStatus.completed, TurnStatus.failed))
     async def test_auto_compact_notice(self, group, status):
         events = []
@@ -2095,7 +1882,7 @@ class TestAgent:
             yield turn_done(status)
 
         turn.stream = stream
-        await self.agent.turns.execute(parse_message(event(group=group), self.settings))
+        await self.execute(parse_message(event(group=group), self.settings))
         texts = [call.kwargs["text"] for call in self.bot.send.call_args_list]
         assert texts.count("正在压缩上下文……") == 2
 
@@ -2119,7 +1906,7 @@ class TestAgent:
             "任务完成。",
         ]
         for identifier in (1, 2):
-            await self.agent.turns.execute(
+            await self.execute(
                 parse_message(event(identifier=identifier), self.settings)
             )
         assert [
@@ -2161,7 +1948,8 @@ class TestAgent:
                 image_tool.__file__,
                 str(socket_path),
                 self.agent.turns.contexts["group-10"].folder.name,
-                "--stickers",
+                "--group",
+                self.agent.turns.contexts["group-10"].token,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
             )
@@ -2194,7 +1982,7 @@ class TestAgent:
             assert {tool["name"] for tool in responses[1]["result"]["tools"]} == {
                 "send_image",
                 "list_images",
-                "send_sticker",
+                "view_image",
             }
             assert "isError" not in responses[2]["result"]
             assert responses[3]["result"]["structuredContent"]["already_sent"]
@@ -2212,7 +2000,7 @@ class TestAgent:
             await self.agent.commands.control(message)
             read.assert_not_called()
             assert "上下文：0 tokens" in self.bot.send.call_args.kwargs["text"]
-            assert "用户消息：0 条" in self.bot.send.call_args.kwargs["text"]
+            assert "已提交消息批次：0 条" in self.bot.send.call_args.kwargs["text"]
             with self.agent.db:
                 self.agent.db.execute(
                     "INSERT INTO sessions (key, thread, folder) VALUES ('group-10', 'thread1', 'folder')"
@@ -2242,7 +2030,7 @@ class TestAgent:
             text = self.bot.send.call_args.kwargs["text"]
             assert "标题" not in text and "图片测试" not in text
             assert "上下文：暂未知" in text
-            assert "用户消息：2 条" in text
+            assert "已提交消息批次：2 条" in text
             for tokens in (0, 12345):
                 self.store_usage(tokens, thread="thread1")
                 await self.agent.commands.control(message)
@@ -2260,13 +2048,13 @@ class TestAgent:
             read.reset_mock()
             await self.agent.commands.control(message)
             read.assert_not_called()
-            assert "用户消息：0 条" in self.bot.send.call_args.kwargs["text"]
+            assert "已提交消息批次：0 条" in self.bot.send.call_args.kwargs["text"]
             assert "上下文：0 tokens" in self.bot.send.call_args.kwargs["text"]
 
     async def test_interrupt_failure(self):
         _, turn = self.setup_turn([])
         message = parse_message(event(), self.settings)
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         turn.interrupt.assert_awaited_once()
         assert "未完成" in self.bot.send.call_args.kwargs["text"]
 
@@ -2282,7 +2070,7 @@ class TestAgent:
             return_value=NS(id="t", turn=AsyncMock(return_value=turn))
         )
         with pytest.raises(TimeoutError):
-            await self.agent.turns.execute(parse_message(event(), self.settings))
+            await self.execute(parse_message(event(), self.settings))
         turn.interrupt.assert_awaited_once()
 
     @pytest.mark.parametrize("group", (10, None))
@@ -2291,7 +2079,8 @@ class TestAgent:
         await self.agent.turns.execute(parse_message(event(group=group), self.settings))
         assert "设备码" in self.bot.send.call_args.kwargs["text"]
         self.bot.image.assert_not_called()
-        self.bot.call.assert_not_called()
+        if group is None:
+            self.bot.call.assert_not_called()
 
     def compact_event(self, method, thread="test-thread", turn="compact1", **kwargs):
         payload = NS(thread_id=thread, turn_id=turn, **kwargs)
@@ -2326,7 +2115,7 @@ class TestAgent:
         self.agent.db.close()
         self.agent = Agent(self.settings, self.bot, self.codex)
         self.read_history.side_effect = RuntimeError("must not read old history")
-        await self.agent.turns.execute(parse_message(event(text="继续"), self.settings))
+        await self.execute(parse_message(event(text="继续"), self.settings))
         self.codex.thread_start.assert_awaited_once()
         self.codex.thread_resume.assert_not_awaited()
         self.read_history.assert_not_awaited()
@@ -2362,7 +2151,7 @@ class TestAgent:
         thread.compact.reset_mock()
         with patch.object(time, "time", return_value=1000 + gap):
             self.agent.receive(event())
-        await self.agent.turns.execute(self.agent.queue.get_nowait())
+        await self.execute(self.agent.queue.get_nowait())
         assert thread.compact.await_count == int(expected)
         assert sum(
             call.kwargs.get("text") == "正在压缩上下文……"
@@ -2486,7 +2275,7 @@ class TestAgent:
     async def test_compact_command(self, group):
         thread, _ = self.setup_turn([])
         message = parse_message(event(group=group, text="/compact"), self.settings)
-        await self.agent.turns.execute(message)
+        await self.execute(message)
         self.codex.thread_start.assert_not_awaited()
         assert "暂无" in self.bot.send.call_args.kwargs["text"]
         with self.agent.db:
@@ -2504,9 +2293,9 @@ class TestAgent:
         thread.compact = AsyncMock(side_effect=compact)
         self.agent.receive(event(group=group, text="/compact", identifier=2))
         self.agent.receive(event(group=group, text="/compact", identifier=3))
-        await asyncio.gather(*self.agent.controls)
+        await self.drain()
         assert self.agent.queue.qsize() == 1
-        await self.agent.turns.execute(self.agent.queue.get_nowait())
+        await self.execute(self.agent.queue.get_nowait())
         thread.compact.assert_awaited_once()
         thread.turn.assert_not_awaited()
         assert self.bot.send.call_args.kwargs["text"] == "上下文压缩完成。"
@@ -2586,7 +2375,7 @@ class TestAgent:
         ).fetchone() == ("existing", 0)
         for group in (None, 10, 11):
             message = parse_message(event(group=group), self.settings)
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             folder = self.agent.db.execute(
                 "SELECT folder FROM sessions WHERE key=?", (message.key,)
             ).fetchone()[0]
@@ -2596,7 +2385,7 @@ class TestAgent:
                     self.settings,
                 )
             )
-            await self.agent.turns.execute(message)
+            await self.execute(message)
             assert self.codex.thread_start.call_args.kwargs["cwd"] == str(
                 self.settings.workspace_dir / folder
             )
@@ -2610,7 +2399,6 @@ class TestAgent:
     async def test_steering_deadline(self):
         message = parse_message(event(), self.settings)
         context = ImageTurn(message, self.settings.workspace_dir)
-        context.sticker_used = True
         finished = asyncio.Event()
         self.agent.pending[message.key] = deque([message])
         self.agent.wake[message.key] = asyncio.Event()
@@ -2623,7 +2411,6 @@ class TestAgent:
             assert after > before + 800
             await asyncio.sleep(0.02)
         turn.steer.assert_awaited_once()
-        assert context.sticker_used
 
         finished.clear()
         self.agent.pending[message.key].append(message)
@@ -2645,7 +2432,7 @@ class TestAgent:
             self.agent.db.execute("INSERT INTO models VALUES ('private-1', 'alpha')")
         with caplog.at_level("INFO", logger=LOG.name):
             self.agent.receive(event(text="测试消息"))
-            await self.agent.turns.execute(self.agent.queue.get_nowait())
+            await self.execute(self.agent.queue.get_nowait())
         output = caplog.text
         assert "测试消息" in output
         assert "HTTP 400 Bad Request" in output
@@ -2767,7 +2554,7 @@ class TestAgent:
             result = await bot.send(message, image=PNG, sticker=True)
         else:
             result = await bot.send(message, image=PNG)
-        assert result == receipt
+        assert result == [receipt]
         data = {"file": "base64://" + base64.b64encode(PNG).decode()}
         bot.call.assert_awaited_once_with(
             "send_msg",
@@ -2811,7 +2598,7 @@ class TestAgent:
             }
         )
         assert await bot.reply_content("42", {"group_id": 10}) == (
-            [("text", "caption"), ("at", "2")],
+            [("text", "caption"), ("at", "2"), ("image", "image-id")],
             ["image-id"],
             "2",
             "群名片",
@@ -2958,17 +2745,17 @@ class TestAgent:
                 await asyncio.sleep(0.01)
             assert turns["group-10"].steer.await_count == 2
             assert turns["private-1"].steer.await_count == 1
-            self.bot.call.assert_awaited_once_with(
-                "set_msg_emoji_like",
-                {"message_id": "1", "emoji_id": "124", "set": True},
+            assert not any(
+                call.args[0] == "set_msg_emoji_like"
+                for call in self.bot.call.call_args_list
             )
             texts = [
                 call.args[0][0].text for call in turns["group-10"].steer.call_args_list
             ]
-            assert texts == [
-                "QQ 用户 1（ID: 1）:\nfirst",
-                "QQ 用户 2（ID: 2）:\nsecond",
-            ]
+            records = [json.loads(text.split("\n", 1)[1])[-1] for text in texts]
+            assert [
+                (record["sender_id"], record["content"][0]) for record in records
+            ] == [("1", "first"), ("2", "second")]
             assert all(
                 len(call.args[0]) == 1
                 for call in turns["group-10"].steer.call_args_list
@@ -3113,21 +2900,21 @@ class TestAgent:
         turn.stream = stream
         turn.steer = AsyncMock()
         self.bot.image.side_effect = image
-        self.agent.receive(event(group=10))
+        self.agent.receive(event(group=None))
         worker = asyncio.create_task(self.agent.work())
         try:
             await asyncio.wait_for(starting.wait(), 2)
-            self.agent.receive(event(group=10, identifier=2, text="during startup"))
+            self.agent.receive(event(group=None, identifier=2, text="during startup"))
             release.set()
             await asyncio.wait_for(entered.wait(), 2)
-            incoming = event(group=10, identifier=3)
+            incoming = event(group=None, identifier=3)
             incoming["message"].append({"type": "image", "data": {"file": "slow"}})
             self.agent.receive(incoming)
-            self.agent.receive(event(group=10, identifier=4))
+            self.agent.receive(event(group=None, identifier=4))
             await asyncio.wait_for(downloading.wait(), 2)
             turn.steer.assert_awaited_once()
             await self.agent.commands.control(
-                parse_message(event(group=10, text="/stop"), self.settings)
+                parse_message(event(group=None, text="/stop"), self.settings)
             )
             assert not self.agent.jobs
             assert not self.agent.pending
@@ -3147,7 +2934,7 @@ class TestAgent:
         self.agent.receive(event(group=10))
         self.agent.receive(event(group=10, identifier=2, text="/stop"))
         try:
-            await asyncio.gather(*self.agent.controls)
+            await self.drain()
             assert not self.agent.jobs
             assert not self.agent.pending
             self.codex.account.assert_not_awaited()
@@ -3182,6 +2969,6 @@ class TestAgent:
 
     async def test_runtime_error(self):
         _, turn = self.setup_turn([turn_done(TurnStatus.failed)])
-        await self.agent.turns.execute(parse_message(event(), self.settings))
+        await self.execute(parse_message(event(), self.settings))
         turn.interrupt.assert_not_called()
         assert "服务日志" in self.bot.send.call_args.kwargs["text"]

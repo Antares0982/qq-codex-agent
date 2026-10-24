@@ -56,19 +56,14 @@ MEMBER_TOOLS = [
 ]
 
 
-STICKER_TOOLS = [
+GROUP_TOOLS = [
     {
-        "name": "send_sticker",
-        "description": "当有合适场景的表情时，尽可能调用表情工具发送表情。使用提示词列出的表情名称，将应用内置表情发送到当前 QQ 会话。每 turn 最多一次，同轮追加消息不重置；失败或结果未知也不能重试。只有成功回执表示已发送。",
+        "name": "view_image",
+        "description": "按当前群消息中的 image_id 查看图片，同时将原文件下载到当前工作区。返回图片预览及真实路径；动画预览首帧，原文件保留动画。过期图片可能不可用。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "提示词中列出的完整表情名称。",
-                }
-            },
-            "required": ["name"],
+            "properties": {"image_id": {"type": "string"}},
+            "required": ["image_id"],
             "additionalProperties": False,
         },
     },
@@ -128,10 +123,12 @@ def call(path, session, action, arguments, token=None):
         with client.makefile("r") as stream:
             result = json.loads(stream.readline())
     if result.get("ok"):
+        image = result.pop("image", None)
         return {
             "content": [
                 {"type": "text", "text": json.dumps(result, ensure_ascii=False)}
-            ],
+            ]
+            + ([image] if image else []),
             "structuredContent": result,
         }
     return {
@@ -144,9 +141,9 @@ def main():
     path = sys.argv[1]
     session = sys.argv[2] if len(sys.argv) > 2 else None
     members = len(sys.argv) == 5 and sys.argv[3] == "--members"
-    token = sys.argv[4] if members else None
-    stickers = len(sys.argv) == 4 and sys.argv[3] == "--stickers"
-    tools = MEMBER_TOOLS if members else TOOLS + (STICKER_TOOLS if stickers else [])
+    group = len(sys.argv) == 5 and sys.argv[3] == "--group"
+    token = sys.argv[4] if members or group else None
+    tools = MEMBER_TOOLS if members else TOOLS + (GROUP_TOOLS if group else [])
     for line in sys.stdin:
         request = {}
         try:
@@ -181,8 +178,8 @@ def main():
                     else (
                         {"path", "resend"}
                         if name == "send_image"
-                        else {"name"}
-                        if name == "send_sticker"
+                        else {"image_id"}
+                        if name == "view_image"
                         else set()
                     )
                 )
@@ -191,8 +188,8 @@ def main():
                     or not isinstance(arguments, dict)
                     or arguments.keys() - allowed
                     or (
-                        name == "send_sticker"
-                        and not isinstance(arguments.get("name"), str)
+                        name == "view_image"
+                        and not isinstance(arguments.get("image_id"), str)
                     )
                 ):
                     raise ValueError("Unknown tool or invalid arguments")
@@ -202,7 +199,7 @@ def main():
                         session,
                         name,
                         arguments,
-                        **({"token": token} if members else {}),
+                        **({"token": token} if members or name == "view_image" else {}),
                     )
                 except (OSError, ValueError):
                     result = {

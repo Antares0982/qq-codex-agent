@@ -15,7 +15,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from qq_agent.config import Settings
+from qq_agent.config import GroupSettings, Settings
 from qq_agent.logging import read_diagnostics
 from qq_agent.messages import ImageTurn, Message
 from qq_agent.profiles import Profiles
@@ -243,7 +243,7 @@ async def test_runtime_prompts(tmp_path, mode):
     port = runner.addresses[0][1]
     settings = Settings(
         set(),
-        {"10": {"1"}},
+        {"10": GroupSettings()},
         "ws://127.0.0.1:3001",
         tmp_path / "token",
         tmp_path / "state",
@@ -253,7 +253,7 @@ async def test_runtime_prompts(tmp_path, mode):
         group_agents_file=tmp_path / "group.md",
     )
     group_template = tmp_path / "group.md"
-    group_template.write_text("GROUP_TEMPLATE_ALPHA {nickname}")
+    group_template.write_text("GROUP_TEMPLATE_ALPHA")
     db = open_database(settings)
     home = tmp_path / "codex"
     home.mkdir()
@@ -337,7 +337,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 if index == 1:
                     settings.agent_admin_qq = "987654321"
                     settings.group_agents_file = group_template
-                    group_template.write_text("GROUP_TEMPLATE_BETA {nickname}")
+                    group_template.write_text("GROUP_TEMPLATE_BETA")
                 if index == 2:
                     await codex.close()
                     db.close()
@@ -451,7 +451,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 for tool in requests[0]["tools"]
                 if tool.get("name") == "mcp__qq_image"
             )
-            assert "send_sticker" in {tool["name"] for tool in image_tools["tools"]}
+            assert "view_image" in {tool["name"] for tool in image_tools["tools"]}
             for index, request in enumerate(requests):
                 assert request["instructions"].startswith(GROUP_BASE_INSTRUCTIONS)
                 assert ("PROMPT_ALPHA" in request["instructions"]) == (
@@ -462,7 +462,7 @@ async def test_runtime_prompts(tmp_path, mode):
                     mode != "upgrade"
                 )
                 assert "987654321" not in request["instructions"]
-                assert ("GROUP_TEMPLATE_ALPHA bot" in request["instructions"]) == (
+                assert ("GROUP_TEMPLATE_ALPHA" in request["instructions"]) == (
                     mode != "upgrade"
                 )
                 assert "GROUP_TEMPLATE_BETA" not in request["instructions"]
@@ -485,7 +485,10 @@ async def test_runtime_prompts(tmp_path, mode):
                     assert "全部可用表情名称" not in content
                     continue
                 assert "qq_member" in content
-                assert "当有合适场景的表情时，尽可能调用表情工具发送表情" in content
+                assert (
+                    "每条 assistant 消息（过程说明和最终回复）必须仅包含一个 JSON 对象"
+                    in content
+                )
                 assert all(name in content for name in runtime.stickers)
                 assert "probe-0" in content
                 updates = [
@@ -548,18 +551,16 @@ async def test_runtime_prompts(tmp_path, mode):
                 diagnose_failure = False
                 handoff_response = True
                 previous_thread = thread.id
-                send = AsyncMock()
                 with patch.object(
                     codex, "account", AsyncMock(return_value=NS(account=object()))
                 ):
                     summary = await runtime.summarize(
-                        message, previous_thread, workspace, send
+                        message, previous_thread, workspace
                     )
                 assert summary == "HANDOFF_BACKGROUND"
                 assert "PROMPT_ALPHA" in requests[-1]["instructions"]
                 assert "管理员 QQ 号为 123456789" in requests[-1]["instructions"]
-                assert "GROUP_TEMPLATE_ALPHA bot" in requests[-1]["instructions"]
-                send.assert_not_awaited()
+                assert "GROUP_TEMPLATE_ALPHA" in requests[-1]["instructions"]
                 assert any(
                     part.get("text") == HANDOFF_INSTRUCTIONS
                     for item in requests[-1]["input"]
@@ -587,7 +588,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert "probe-compact" not in content
                 assert "PROMPT_ALPHA" not in requests[-1]["instructions"]
                 assert "管理员 QQ 号为 987654321" in requests[-1]["instructions"]
-                assert "GROUP_TEMPLATE_BETA bot" in requests[-1]["instructions"]
+                assert "GROUP_TEMPLATE_BETA" in requests[-1]["instructions"]
                 assert "GROUP_TEMPLATE_" not in content
                 await runtime.release_thread(thread.id)
                 for prompt in ("PROMPT_BETA", ""):
@@ -613,4 +614,211 @@ async def test_runtime_prompts(tmp_path, mode):
     finally:
         await codex.close()
         db.close()
+        await runner.cleanup()
+
+
+async def test_group_correction(tmp_path):
+    from qq_agent.agent import Agent
+    from qq_agent.onebot import OneBot
+    from test_agent import event
+
+    requests = []
+    injected = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def respond(request):
+        body = await request.json()
+        requests.append(body)
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        number = len(requests)
+
+        async def emit(value):
+            await response.write(("data: " + json.dumps(value) + "\n\n").encode())
+
+        await emit({"type": "response.created", "response": {"id": str(number)}})
+        if number == 1:
+            await emit(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "bad",
+                        "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "invalid JSON"}],
+                    },
+                }
+            )
+            entered.set()
+            await release.wait()
+        elif number == 2:
+            await emit(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "corrected",
+                        "phase": "final_answer",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"response":"已修正","sticker":"平静"}',
+                            }
+                        ],
+                    },
+                }
+            )
+        elif number == 3:
+            await emit(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "bad-final",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "invalid final"}],
+                    },
+                }
+            )
+        else:
+            await emit(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "silent",
+                        "phase": "final_answer",
+                        "content": [
+                            {"type": "output_text", "text": '{"response":null}'}
+                        ],
+                    },
+                }
+            )
+        await emit(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": str(number),
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                },
+            }
+        )
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/responses", respond)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    port = runner.addresses[0][1]
+    home = tmp_path / "codex"
+    home.mkdir()
+    settings = Settings(
+        set(),
+        {"10": GroupSettings()},
+        "ws://127.0.0.1:3001",
+        tmp_path / "token",
+        tmp_path / "state",
+        tmp_path / "work",
+        tmp_path / "common.md",
+    )
+    settings.agents_file.write_text("Follow the group protocol.")
+    config = CodexConfig(
+        cwd=str(tmp_path),
+        env={"CODEX_HOME": str(home)},
+        config_overrides=(
+            'model="gpt-5.4"',
+            'model_provider="probe"',
+            'model_providers.probe.name="OpenAI"',
+            f'model_providers.probe.base_url="http://127.0.0.1:{port}"',
+            'model_providers.probe.wire_api="responses"',
+            "model_providers.probe.requires_openai_auth=false",
+            "model_providers.probe.supports_websockets=false",
+            "features.shell_snapshot=false",
+        ),
+    )
+    bot = OneBot(settings)
+    bot.call = AsyncMock(return_value={"message_id": 123, "member_count": 10})
+    agent = None
+    task = None
+    try:
+        async with AsyncCodex(config=config) as codex:
+            assert (await codex.account()).account is None
+            codex.account = AsyncMock(return_value=NS(account=object()))
+            agent = Agent(settings, bot, codex)
+            original_inject = agent.runtime.inject
+
+            async def inject(thread, text):
+                await original_inject(thread, text)
+                if text.startswith("上一条回复解析失败"):
+                    injected.set()
+
+            agent.runtime.inject = inject
+
+            agent.receive(event(group=10))
+            await asyncio.gather(*agent.receivers.values())
+            message = agent.queue.get_nowait()
+            task = asyncio.create_task(agent.turns.execute(message))
+            await asyncio.wait_for(entered.wait(), 20)
+            await asyncio.wait_for(injected.wait(), 10)
+            release.set()
+            await asyncio.wait_for(task, 20)
+            assert len(requests) == 2
+            assert any(
+                item.get("role") == "developer"
+                and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
+                for item in requests[1]["input"]
+            )
+            assert (
+                len(
+                    [
+                        item
+                        for item in requests[1]["input"]
+                        if item.get("role") == "user"
+                        and "群聊消息记录" in json.dumps(item, ensure_ascii=False)
+                    ]
+                )
+                == 1
+            )
+            assert (
+                len(
+                    [
+                        call
+                        for call in bot.call.call_args_list
+                        if call.args[0] == "send_msg"
+                    ]
+                )
+                == 1
+            )
+            assert agent.db.execute("SELECT status FROM group_batches").fetchone() == (
+                "completed",
+            )
+            agent.receive(event(group=10, identifier=2, mention=False, reply="123"))
+            await asyncio.gather(*agent.receivers.values())
+            await asyncio.wait_for(agent.turns.execute(agent.queue.get_nowait()), 20)
+            assert len(requests) == 4
+            assert any(
+                item.get("role") == "developer"
+                and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
+                for item in requests[3]["input"]
+            )
+            assert all(
+                not item.get("role") == "user"
+                or "上一条回复解析失败" not in json.dumps(item, ensure_ascii=False)
+                for body in requests
+                for item in body["input"]
+            )
+    finally:
+        release.set()
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if agent:
+            agent.db.close()
         await runner.cleanup()

@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,10 @@ class Message:
     bot_id: str
     sender_id: str
     generation: int = 0
+    timestamp: float = 0
+    time_source: str = "received"
+    mentioned: bool = False
+    batch: str | None = None
 
 
 @dataclass
@@ -44,7 +49,6 @@ class ImageTurn:
     profiles: list = field(default_factory=list)
     blocked_members: set[str] = field(default_factory=set)
     group_writable: bool = True
-    sticker_used: bool = False
 
 
 def parse_parts(segments, group, bot=None):
@@ -63,6 +67,8 @@ def parse_parts(segments, group, bot=None):
                 if not isinstance(file, str) or not file or len(file) > 4096:
                     raise ValueError("Invalid message image")
                 images.append(file)
+                if group:
+                    parts.append(("image", file))
             case "reply":
                 identifier = data.get("id")
                 if (
@@ -74,38 +80,40 @@ def parse_parts(segments, group, bot=None):
                     raise ValueError("Invalid reply")
                 reply = str(identifier)
             case "at":
-                if group and str(data.get("qq")) != bot:
+                if group:
                     qq = "all" if data.get("qq") == "all" else qq_id(data.get("qq"))
                     parts.append(("at", qq))
             case _:
                 unsupported = True
+                if group:
+                    label = {
+                        "forward": "转发的消息",
+                        "json": "卡片",
+                        "xml": "卡片",
+                    }.get(str(segment.get("type")), "不支持的消息")
+                    parts.append(("placeholder", f"[{label}，暂不支持读取]"))
     return parts, images, reply, unsupported
 
 
 def parse_message(event, settings):
-    if not isinstance(event, dict) or event.get("post_type") != "message":
+    if not isinstance(event, dict) or event.get("post_type") not in {
+        "message",
+        "message_sent",
+    }:
         return None
     try:
         sender = qq_id(event.get("user_id"))
         bot = qq_id(event.get("self_id"))
-        if sender == bot:
-            return None
         segments = event.get("message")
         if not isinstance(segments, list):
             return None
         if event.get("message_type") == "private":
-            if sender not in settings.private_users:
+            if sender == bot or sender not in settings.private_users:
                 return None
             key, target = f"private-{sender}", {"user_id": int(sender)}
         elif event.get("message_type") == "group":
             group = qq_id(event.get("group_id"))
-            users = settings.groups.get(group, set())
-            if not (sender in users or "all" in users) or not any(
-                segment.get("type") == "at"
-                and str(segment.get("data", {}).get("qq")) == bot
-                for segment in segments
-                if isinstance(segment, dict)
-            ):
+            if group not in settings.groups:
                 return None
             key, target = f"group-{group}", {"group_id": int(group)}
         else:
@@ -114,7 +122,9 @@ def parse_message(event, settings):
             segments, "group_id" in target, bot
         )
         text = "".join(
-            value if kind == "text" else f"@{value}" for kind, value in parts
+            value if kind == "text" else f"@{value}"
+            for kind, value in parts
+            if kind == "text" or (kind == "at" and value != bot)
         ).strip()
         identifier = event.get("message_id")
         if type(identifier) not in (str, int) or not str(identifier):
@@ -132,6 +142,13 @@ def parse_message(event, settings):
             unsupported,
             bot,
             sender,
+            timestamp=event["time"]
+            if type(event.get("time")) in (int, float) and event["time"] > 0
+            else time.time(),
+            time_source="event"
+            if type(event.get("time")) in (int, float) and event["time"] > 0
+            else "received",
+            mentioned=("at", bot) in parts,
         )
     except (ValueError, TypeError, KeyError, AttributeError):
         return None

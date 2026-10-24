@@ -67,9 +67,14 @@ async def run(settings, login):
             for task in done:
                 task.result()
         finally:
-            for task in [*workers, *agent.controls]:
+            for task in [*workers, *agent.controls, *agent.receivers.values()]:
                 task.cancel()
-            await asyncio.gather(*workers, *agent.controls, return_exceptions=True)
+            await asyncio.gather(
+                *workers,
+                *agent.controls,
+                *agent.receivers.values(),
+                return_exceptions=True,
+            )
             server.close()
             await server.wait_closed()
             socket_path.unlink(missing_ok=True)

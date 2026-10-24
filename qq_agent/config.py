@@ -1,3 +1,4 @@
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,9 +15,24 @@ def qq_id(value):
 
 
 @dataclass
+class GroupSettings:
+    request_interval_minutes: int = 60
+    request_message_count: int = 20
+    participation_ratio: float = 5.0
+
+    def __post_init__(self):
+        for value in (self.request_interval_minutes, self.request_message_count):
+            if type(value) is not int or value <= 0:
+                raise ValueError("Group intervals must be positive integers")
+        value = self.participation_ratio
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 1:
+            raise ValueError("participation_ratio must be finite and >= 1")
+
+
+@dataclass
 class Settings:
     private_users: set[str]
-    groups: dict[str, set[str]]
+    groups: dict[str, GroupSettings]
     napcat_url: str
     token_file: Path
     state_dir: Path
@@ -70,14 +86,13 @@ class Settings:
             group = qq_id(group)
             if group in raw["groups"]:
                 raise ValueError("Duplicate normalized group ID")
-            if not isinstance(entry, dict) or entry.keys() - {"users"}:
-                raise ValueError("Group entries must contain only users")
-            users = entry.get("users", [])
-            if not isinstance(users, list):
-                raise ValueError("Group users must be an array")
-            raw["groups"][group] = {
-                "all" if value == "all" else qq_id(value) for value in users
-            }
+            if not isinstance(entry, dict) or entry.keys() - {
+                "request_interval_minutes",
+                "request_message_count",
+                "participation_ratio",
+            }:
+                raise ValueError("Unknown group settings; users is no longer supported")
+            raw["groups"][group] = GroupSettings(**entry)
         for key in ("token_file", "state_dir", "workspace_dir", "agents_file"):
             raw[key] = Path(raw[key])
             if not raw[key].is_absolute():

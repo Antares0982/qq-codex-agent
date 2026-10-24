@@ -6,6 +6,7 @@ from collections import deque
 from .cleanup import Cleanup
 from .commands import Commands
 from .inputs import Inputs
+from .groups import Groups
 from .logging import LOG, log_text
 from .messages import parse_message
 from .replies import Replies
@@ -26,9 +27,14 @@ class Agent:
         self.pending = {}
         self.wake = {}
         self.controls = set()
+        self.receivers = {}
+        self.incoming = {}
+        self.scheduled = set()
         self.resetting = set()
         self.replies = Replies(bot)
         self.inputs = Inputs(bot, self.replies.safe_send)
+        self.groups = Groups(settings, self.db, bot, self.inputs)
+        bot.on_sent = self.groups.sent
         self.runtime = Runtime(settings, self.db, codex, self.inputs.group_name)
         self.turns = Turns(
             settings,
@@ -41,6 +47,7 @@ class Agent:
             self.wake,
             self.resetting,
             self.mark,
+            self.groups,
         )
         self.commands = Commands(
             self.db,
@@ -53,12 +60,12 @@ class Agent:
             self.resetting,
             self.mark,
             self.cancel_chat,
+            self.flush_group,
         )
         self.tools = ToolServer(
             self.turns.contexts,
             self.turns.images,
             self.turns.profiles,
-            self.replies.safe_send,
         )
         self.cleanup = Cleanup(
             settings, self.db, self.jobs, self.resetting, self.turns.contexts
@@ -67,6 +74,26 @@ class Agent:
     def receive(self, event):
         message = parse_message(event, self.settings)
         if message is None:
+            return
+        if "group_id" in message.target:
+            if not self.groups.record(message, self.is_command(message)):
+                return
+            if message.sender_id == message.bot_id:
+                return
+            LOG.info(
+                "Received chat=%s message=%s sender=%s text=%s images=%d reply=%s",
+                message.key,
+                message.identifier,
+                message.sender_id,
+                log_text(message.text),
+                len(message.images),
+                message.reply,
+            )
+            self.incoming.setdefault(message.key, deque()).append(message)
+            if message.key not in self.receivers:
+                self.receivers[message.key] = asyncio.create_task(
+                    self.receive_group(message.key)
+                )
             return
         with self.db:
             inserted = self.db.execute(
@@ -84,19 +111,8 @@ class Agent:
             len(message.images),
             message.reply,
         )
-        command = message.text if not message.images and not message.unsupported else ""
-        if (
-            ("group_id" in message.target and command == "/new blank")
-            or command in {"/new", "/stop", "/status", "/help", "/compact"}
-            or (
-                command.split(maxsplit=1)[:1]
-                in (["/model"], ["/profile"], ["/prompt"], ["/group-profile"])
-            )
-        ):
-            if len(self.controls) < 8:
-                task = asyncio.create_task(self.commands.control(message))
-                self.controls.add(task)
-                task.add_done_callback(self.controls.discard)
+        if self.is_command(message):
+            self.start_control(message)
             return
         reason = None
         if message.key in self.resetting:
@@ -137,6 +153,58 @@ class Agent:
         self.queue.put_nowait(message)
         self.mark(message, "queued")
 
+    def is_command(self, message):
+        if message.images or message.unsupported:
+            return False
+        if "group_id" in message.target and not message.mentioned:
+            return False
+        command = message.text
+        return (
+            command in {"/new", "/stop", "/status", "/help", "/compact"}
+            or ("group_id" in message.target and command == "/new blank")
+            or command.split(maxsplit=1)[:1]
+            in (["/model"], ["/profile"], ["/prompt"], ["/group-profile"])
+        )
+
+    def start_control(self, message):
+        if len(self.controls) < 8:
+            task = asyncio.create_task(self.commands.control(message))
+            self.controls.add(task)
+            task.add_done_callback(self.controls.discard)
+
+    async def receive_group(self, key):
+        try:
+            while self.incoming[key]:
+                message = self.incoming[key].popleft()
+                command = self.is_command(message)
+                if command:
+                    self.start_control(message)
+                    # Controls establish cancellation before later arrivals.
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    quoted_bot = await self.groups.prepare(message)
+                    if self.groups.trigger(message, quoted_bot):
+                        self.groups.freeze(message)
+                        self.flush_group(key)
+                except Exception as error:
+                    LOG.error(
+                        "Group receive failed chat=%s error=%s", key, log_text(error)
+                    )
+        finally:
+            self.receivers.pop(key, None)
+            self.incoming.pop(key, None)
+
+    def flush_group(self, key):
+        if key in self.resetting:
+            return
+        for message in self.groups.pending(key):
+            if message.batch in self.scheduled:
+                continue
+            self.scheduled.add(message.batch)
+            self.queue.put_nowait(message)
+            self.mark(message, "queued")
+
     def mark(self, message, status):
         LOG.info(
             "Message status chat=%s message=%s status=%s",
@@ -148,6 +216,8 @@ class Agent:
             self.db.execute(
                 "UPDATE messages SET status=? WHERE id=?", (status, message.identifier)
             )
+        if message.batch and status not in {"queued", "running"}:
+            self.scheduled.discard(message.batch)
 
     async def chat_work(self, key):
         try:
@@ -188,7 +258,9 @@ class Agent:
             for key in list(self.jobs):
                 self.clear_chat(key)
 
-    async def cancel_chat(self, key):
+    async def cancel_chat(self, key, identifier=None):
+        if key.startswith("group-"):
+            self.groups.cancel(key, identifier)
         retained = []
         while not self.queue.empty():
             queued = self.queue.get_nowait()

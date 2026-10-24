@@ -46,11 +46,13 @@ class Cleanup:
                             )
                     except OSError as error:
                         report(error)
-        for table in ("generated_images", "image_deliveries"):
+        for table in ("generated_images", "image_deliveries", "received_images"):
             rows = self.db.execute(
                 f"SELECT DISTINCT path FROM {table} WHERE folder=?", (folder.name,)
             ).fetchall()
             for (value,) in rows:
+                if value is None:
+                    continue
                 path = Path(value)
                 if path.is_absolute() or ".." in path.parts or not path.parts:
                     continue
@@ -69,6 +71,22 @@ class Cleanup:
     def clean_files(self):
         cutoff = time.time() - FILE_RETENTION
         busy = set(self.jobs) | self.resetting | set(self.contexts)
+        for (key,) in self.db.execute("SELECT key FROM group_state").fetchall():
+            if key in busy:
+                continue
+            with self.db:
+                self.db.execute(
+                    "DELETE FROM group_messages WHERE key=? AND consumed=1 AND created<?",
+                    (key, cutoff),
+                )
+                self.db.execute(
+                    "DELETE FROM group_batches WHERE key=? AND status NOT IN ('pending','submitting','submitted') AND created<?",
+                    (key, cutoff),
+                )
+                self.db.execute(
+                    "DELETE FROM received_images WHERE key=? AND path IS NULL AND created<? AND NOT EXISTS (SELECT 1 FROM group_messages WHERE group_messages.key=received_images.key AND consumed=0)",
+                    (key, cutoff),
+                )
         folders = {
             folder
             for key, folder in self.db.execute("SELECT key, folder FROM sessions")

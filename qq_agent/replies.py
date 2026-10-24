@@ -36,19 +36,6 @@ class Replies:
                 log_text(error),
             )
 
-    async def react_message(self, message):
-        try:
-            await self.bot.call(
-                "set_msg_emoji_like",
-                {
-                    "message_id": message.identifier.split(":", 2)[2],
-                    "emoji_id": "124",
-                    "set": True,
-                },
-            )
-        except (ConnectionError, RuntimeError, TimeoutError, aiohttp.ClientError):
-            LOG.warning("Message reaction failed")
-
     async def remind_group(self, message, started):
         loop = asyncio.get_running_loop()
         for delay, filename in GROUP_REMINDERS:

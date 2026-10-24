@@ -74,7 +74,7 @@ RPi 的共享服务和一次性 `codex-auth-import` 由 Nix 仓库维护；令�
 `agentsFile`、`privateAgentsFile`、`groupAgentsFile` 可分别指定覆盖文件的绝对路径。
 私聊继续在新建/恢复 thread 时传入公共及私聊模板，不提供表情工具。
 私聊和群聊关闭 runtime 的 `multi_agent_role` 与 `collaboration_mode` 提示词注入，其他 developer 提示词保留。同时关闭 `recommended_plugins` 和 `tool_suggest`，停用插件推荐上下文与安装推荐工具，保留已安装插件。已有历史中的旧提示词不会被删除，部署后可用 `/new` 创建不含这些提示词的新上下文。
-群聊模板在创建 thread 时读取并替换 `{nickname}`，通过 `base_instructions` 写入 system；更新后需 `/new` 或 `/new blank` 创建新 thread 生效。恢复、总结和压缩沿用原 system，不重读群模板或刷新 bot 昵称。群聊在每个独立 turn 前重读公共模板，将应用规则、表情名称与记忆纳入完整快照；与上次成功注入内容相同则跳过，否则显式注入并持久保存。公共模板及动态应用规则更新无需 `/new`，压缩后下一轮补注入；表情 JSON 仍仅启动时加载。
+群聊模板在创建 thread 时读取，bot QQ 号及群昵称由代码独立注入，通过 `base_instructions` 写入 system；更新后需 `/new` 或 `/new blank` 创建新 thread 生效。恢复、总结和压缩沿用原 system，不重读群模板或刷新 bot 昵称。群聊在每个独立 turn 前重读公共模板，将应用规则、表情名称与记忆纳入完整快照；与上次成功注入内容相同则跳过，否则显式注入并持久保存。公共模板及动态应用规则更新无需 `/new`，压缩后下一轮补注入；表情 JSON 仍仅启动时加载。
 `services.qq-codex-agent.groupPromptAllowMembers` 默认 `false`，对应主配置
 `group_prompt_allow_members`：仅可交互用户中的群主、管理员能修改群设定或清除群共同记录；
 设为 `true` 后，所有可交互用户均可操作。查看仍对所有可交互用户开放。
@@ -131,3 +131,9 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 后续更新同样只需推送应用、更新这一个 input，并在 Pi 上构建和切换。
 在 Pi 验证服务启动、私聊和群聊提示词、GitHub/Nix 工具、自检及设备码登录；
 本地测试不代替实机验收。
+
+## 主动群聊版本升级
+
+先备份服务状态目录，再把加密配置中的每个 `[groups."群号"]` 的 `users` 删除，改用 `request_interval_minutes = 60`、`request_message_count = 20`、`participation_ratio = 5.0`。群表存在即开放全群，不再有群成员白名单。私聊 `private_users` 保持不变。
+启动会拒绝旧群配置；数据库升级自动备份为 `sessions.pre-group-v2.sqlite`，一次性让旧群开启空白 thread 并清除旧交接摘要。工作目录、模型、群设定和成员记忆保留；累计参与率从新版启用开始。回滚旧程序需要恢复备份数据库与旧配置，先停止服务再恢复。
+应用按成功发送回执记录自身消息，不依赖 NapCat 自身上报；若需要捕获同账号其他客户端发出的消息，开启对应 WebSocket 的 `reportSelfMessage`。任何断线漏报均不补抓。

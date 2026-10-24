@@ -184,7 +184,7 @@ in
     groupPromptAllowMembers = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Allow all authorized group members to change group prompts and clear group memory.";
+      description = "Allow all members of enabled groups to change group prompts and clear group memory.";
     };
     agentAdminQQ = lib.mkOption {
       type = lib.types.nullOr lib.types.str;

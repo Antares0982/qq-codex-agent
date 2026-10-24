@@ -3,5 +3,8 @@
   "开心": "happy.png",
   "帮你写代码": "help_code.png",
   "逗我呢": "tease.png",
-  "让我想想": "thinking.gif"
+  "让我想想": "thinking.gif",
+  "对的":"correct.png",
+  "哼":"hmm.png",
+  "平静": null
 }
