@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import time
 from collections import deque
+from dataclasses import dataclass, field
 
 from .cleanup import Cleanup
 from .commands import Commands
@@ -18,6 +19,27 @@ from .turns import Turns
 THREAD_IDLE = 2 * 60 * 60
 
 
+@dataclass
+class GroupWindow:
+    first: float
+    deadline: float
+    urgent: float | None = None
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def observe(self, message, arrival, previous, now):
+        if message.direct:
+            self.urgent = min(self.urgent or arrival + 1, arrival + 1)
+        if self.deadline > now:
+            if previous:
+                wait = 2 if previous[1] == message.sender_id else 0.5
+            else:
+                wait = 2
+            self.deadline = min(arrival + wait, self.first + 8)
+        if self.urgent is not None:
+            self.deadline = min(self.deadline, self.urgent)
+        self.changed.set()
+
+
 class Agent:
     def __init__(self, settings, bot, codex):
         self.settings = settings
@@ -30,6 +52,9 @@ class Agent:
         self.receivers = {}
         self.incoming = {}
         self.scheduled = set()
+        self.group_windows = {}
+        self.group_timers = {}
+        self.closing = False
         self.resetting = set()
         self.replies = Replies(bot)
         self.inputs = Inputs(bot, self.replies.safe_send)
@@ -173,6 +198,11 @@ class Agent:
             task.add_done_callback(self.controls.discard)
 
     async def receive_group(self, key):
+        self.groups.retry(key)
+        queued = {message.identifier for message in self.incoming[key]}
+        for message in reversed(self.groups.unprepared(key)):
+            if message.identifier not in queued:
+                self.incoming[key].appendleft(message)
         try:
             while self.incoming[key]:
                 message = self.incoming[key].popleft()
@@ -184,9 +214,8 @@ class Agent:
                     continue
                 try:
                     quoted_bot = await self.groups.prepare(message)
-                    if self.groups.trigger(message, quoted_bot):
-                        self.groups.freeze(message)
-                        self.flush_group(key)
+                    if self.groups.observe(message, quoted_bot):
+                        self.observe_group(message)
                 except Exception as error:
                     LOG.error(
                         "Group receive failed chat=%s error=%s", key, log_text(error)
@@ -194,16 +223,129 @@ class Agent:
         finally:
             self.receivers.pop(key, None)
             self.incoming.pop(key, None)
+            self.flush_group(key)
+
+    def observe_group(self, message):
+        row, previous = self.groups.timing(message)
+        if not row or row[1]:
+            return
+        now = asyncio.get_running_loop().time()
+        arrival = now - max(0, time.time() - row[0])
+        window = self.group_windows.get(message.key)
+        if window is None:
+            wait = 5 if previous and row[0] - previous[0] <= 30 else 2
+            if message.images and not message.text:
+                wait = max(wait, 4)
+            deadline = arrival + wait
+            if message.direct:
+                deadline = min(deadline, arrival + 1)
+            window = GroupWindow(
+                arrival, deadline, arrival + 1 if message.direct else None
+            )
+            self.group_windows[message.key] = window
+        else:
+            window.observe(message, arrival, previous, now)
+
+    async def schedule_group(self, key):
+        try:
+            while not self.closing:
+                window = self.group_windows.get(key)
+                if window:
+                    window.changed.clear()
+                candidates = self.groups.candidates(key)
+                batches = self.groups.pending(key, retry=False)
+                if not candidates and not batches:
+                    self.group_windows.pop(key, None)
+                    return
+                if key in self.resetting or key in self.receivers:
+                    return
+                direct = any(message.direct for message in candidates) or any(
+                    message.direct and message.batch not in self.scheduled
+                    for message in batches
+                )
+                busy = key in self.jobs or any(
+                    message.batch in self.scheduled for message in batches
+                )
+                if busy and not direct:
+                    LOG.debug(
+                        "Group observation waiting chat=%s reason=busy candidates=%d",
+                        key,
+                        len(candidates),
+                    )
+                    return
+                now = asyncio.get_running_loop().time()
+                delay = max(0, window.deadline - now) if window and candidates else 0
+                if not direct:
+                    delay = max(delay, self.groups.delay(key))
+                if delay > 0:
+                    LOG.debug(
+                        "Group observation waiting chat=%s candidates=%d direct=%s seconds=%.3f",
+                        key,
+                        len(candidates),
+                        direct,
+                        delay,
+                    )
+                    if window is None:
+                        window = GroupWindow(now, now)
+                        self.group_windows[key] = window
+                    try:
+                        await asyncio.wait_for(window.changed.wait(), delay)
+                    except TimeoutError:
+                        pass
+                    continue
+                freeze = bool(candidates) and (
+                    any(message.direct for message in candidates)
+                    or (not direct and not batches)
+                )
+                if freeze:
+                    LOG.info(
+                        "Group observation admitted chat=%s candidates=%d direct=%s",
+                        key,
+                        len(candidates),
+                        direct,
+                    )
+                    selected = (
+                        [message for message in candidates if message.direct]
+                        if busy
+                        else candidates
+                    )
+                    self.groups.freeze(selected[-1], direct_only=busy)
+                    if len(selected) == len(candidates):
+                        self.group_windows.pop(key, None)
+                for message in self.groups.pending(key, retry=False):
+                    if message.batch in self.scheduled:
+                        continue
+                    if direct and not message.direct:
+                        continue
+                    self.scheduled.add(message.batch)
+                    self.queue.put_nowait(message)
+                    self.mark(message, "queued")
+                    if not direct:
+                        break
+                return
+        except Exception as error:
+            LOG.error("Group scheduling failed chat=%s error=%s", key, log_text(error))
+        finally:
+            if self.group_timers.get(key) is asyncio.current_task():
+                self.group_timers.pop(key, None)
 
     def flush_group(self, key):
-        if key in self.resetting:
+        if self.closing or not key.startswith("group-") or key in self.resetting:
             return
-        for message in self.groups.pending(key):
-            if message.batch in self.scheduled:
-                continue
-            self.scheduled.add(message.batch)
-            self.queue.put_nowait(message)
-            self.mark(message, "queued")
+        if key in self.group_timers:
+            window = self.group_windows.get(key)
+            if window:
+                window.changed.set()
+            return
+        self.group_timers[key] = asyncio.create_task(self.schedule_group(key))
+
+    async def close_timers(self):
+        self.closing = True
+        timers = list(self.group_timers.values())
+        for timer in timers:
+            timer.cancel()
+        await asyncio.gather(*timers, return_exceptions=True)
+        self.group_windows.clear()
 
     def mark(self, message, status):
         LOG.info(
@@ -230,6 +372,8 @@ class Agent:
                     pass
         finally:
             self.clear_chat(key)
+            if key.startswith("group-"):
+                self.flush_group(key)
 
     def clear_chat(self, key):
         for message in self.pending.pop(key):
@@ -251,6 +395,7 @@ class Agent:
                 self.wake[message.key].set()
                 self.queue.task_done()
         finally:
+            await self.close_timers()
             jobs = list(self.jobs.values())
             for job in jobs:
                 job.cancel()
@@ -260,6 +405,11 @@ class Agent:
 
     async def cancel_chat(self, key, identifier=None):
         if key.startswith("group-"):
+            timer = self.group_timers.pop(key, None)
+            if timer:
+                timer.cancel()
+                await asyncio.gather(timer, return_exceptions=True)
+            self.group_windows.pop(key, None)
             self.groups.cancel(key, identifier)
         retained = []
         while not self.queue.empty():

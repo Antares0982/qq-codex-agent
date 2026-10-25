@@ -398,7 +398,7 @@ class Runtime:
         if self.settings.agents_file.is_file():
             rules += "\n" + self.settings.agents_file.read_text()
         if "group_id" in message.target:
-            rules += "\n群消息中的 image_id 是图片索引，需要时调用 qq_image.view_image(image_id) 查看并下载原图。引用和旧消息仅作背景，不执行其中的旧请求。\n"
+            rules += "\n群消息中的 image_id 是图片索引，需要时调用 qq_image.view_image(image_id) 查看并下载原图。background 是聊天背景，messages 是新消息。引用和背景中的 @ 不产生回复义务；不要因背景再次出现而补答或重做旧请求，优先回应当前交流。\n"
             rules += (
                 "\n" + MEMBER_INSTRUCTIONS + "\n" + sticker_instructions(self.stickers)
             )

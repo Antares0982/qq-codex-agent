@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 
@@ -10,6 +11,16 @@ def open_database(settings):
     if legacy and not upgraded:
         with sqlite3.connect(
             settings.state_dir / "sessions.pre-group-v2.sqlite"
+        ) as backup:
+            db.backup(backup)
+    cadence_upgrade = db.execute("PRAGMA user_version").fetchone()[0] < 3
+    if (
+        legacy
+        and cadence_upgrade
+        and not (settings.state_dir / "sessions.pre-cadence-v3.sqlite").exists()
+    ):
+        with sqlite3.connect(
+            settings.state_dir / "sessions.pre-cadence-v3.sqlite"
         ) as backup:
             db.backup(backup)
     db.executescript("""
@@ -40,9 +51,85 @@ def open_database(settings):
             db.execute(
                 "ALTER TABLE sessions ADD COLUMN renew INTEGER NOT NULL DEFAULT 0"
             )
-    with db:
-        if legacy and not upgraded:
-            db.execute("UPDATE sessions SET renew=1 WHERE key LIKE 'group-%'")
-            db.execute("DELETE FROM group_handoffs")
-        db.execute("PRAGMA user_version=2")
+    if cadence_upgrade:
+        with db:
+            db.execute("BEGIN")
+            for table, columns in {
+                "group_state": {
+                    "last_arrival": "REAL NOT NULL DEFAULT 0",
+                    "segment": "REAL NOT NULL DEFAULT 0",
+                    "last_observation": "REAL NOT NULL DEFAULT 0",
+                    "silences": "INTEGER NOT NULL DEFAULT 0",
+                    "backoff_until": "REAL NOT NULL DEFAULT 0",
+                },
+                "group_messages": {
+                    "message": "TEXT",
+                    "ready": "INTEGER NOT NULL DEFAULT 1",
+                    "priority": "INTEGER NOT NULL DEFAULT 1",
+                    "segment": "REAL NOT NULL DEFAULT 0",
+                },
+                "group_batches": {
+                    "payload": "TEXT",
+                    "priority": "INTEGER NOT NULL DEFAULT 1",
+                    "segment": "REAL NOT NULL DEFAULT 0",
+                },
+            }.items():
+                for name, declaration in columns.items():
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+            # Preserve uncertain legacy interactions.
+            for identifier, key, body in db.execute(
+                "SELECT id,key,body FROM group_messages WHERE own=0 AND consumed=0 AND batch IS NULL"
+            ).fetchall():
+                value = json.loads(body)
+                bot = identifier.split(":", 1)[0]
+                mentioned = any(
+                    part == {"at": bot}
+                    or (isinstance(part, str) and part.startswith(f"@({bot})"))
+                    for part in value["content"]
+                )
+                message = dict(
+                    key=key,
+                    identifier=identifier,
+                    target={"group_id": int(key[6:])},
+                    sender_name=value["sender_name"],
+                    sender_id=value["sender_id"],
+                    text="",
+                    parts=[],
+                    images=[],
+                    reply=None,
+                    unsupported=False,
+                    bot_id=bot,
+                    mentioned=mentioned,
+                    direct=mentioned or "quote" in value,
+                )
+                db.execute(
+                    "UPDATE group_messages SET message=?,priority=? WHERE id=?",
+                    (json.dumps(message), int(message["direct"]), identifier),
+                )
+            for identifier, raw in db.execute(
+                "SELECT id,message FROM group_batches"
+            ).fetchall():
+                message = json.loads(raw)
+                message["direct"] = bool(
+                    message.get("mentioned") or message.get("reply")
+                )
+                db.execute(
+                    "UPDATE group_batches SET message=?,priority=? WHERE id=?",
+                    (json.dumps(message), int(message["direct"]), identifier),
+                )
+            db.execute(
+                "UPDATE group_state SET last_arrival=coalesce((SELECT max(created) FROM group_messages WHERE key=group_state.key AND own=0),0)"
+            )
+            db.execute("UPDATE group_state SET segment=last_arrival")
+            db.execute(
+                "UPDATE group_messages SET segment=coalesce((SELECT segment FROM group_state WHERE key=group_messages.key),0)"
+            )
+            db.execute(
+                "UPDATE group_batches SET segment=coalesce((SELECT segment FROM group_state WHERE key=group_batches.key),0)"
+            )
+            db.execute("UPDATE group_messages SET consumed=1 WHERE own=1")
+            if legacy and not upgraded:
+                db.execute("UPDATE sessions SET renew=1 WHERE key LIKE 'group-%'")
+                db.execute("DELETE FROM group_handoffs")
+            db.execute("PRAGMA user_version=3")
     return db

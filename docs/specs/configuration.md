@@ -6,7 +6,7 @@
 
 - `private_users` 为 QQ 号数组，仅允许其中用户私聊；`groups` 中存在的群允许全员参与，未配置群不处理。两个入口分别由空名单和空群配置禁用。
 - QQ 号接受正整数或 ASCII 数字字符串，规范化为十进制字符串；不接受 bool、零和负数。规范化后重复的群号无效。
-- 每群配置 `request_interval_minutes`、`request_message_count` 必须为正整数，默认分别为 60、20；`participation_ratio` 必须为有限数值且至少为 1，默认 5.0。不接受 bool、未知群字段或旧 `groups.users`。
+- 每群配置 `observation_interval_seconds`、`message_ttl_seconds`、`conversation_gap_seconds` 必须为正整数，默认分别为 60、120、300，且满足 `observation_interval_seconds <= message_ttl_seconds <= conversation_gap_seconds`。不接受 bool、未知字段、旧 `groups.users` 或旧节奏字段 `request_interval_minutes`、`request_message_count`、`participation_ratio`；旧字段明确提示迁移。节奏行为见 [群聊协议](groups.md)。
 - 不接受旧 `allowed_users`、`allowed_groups`。可选 `allowlist_file` 必须为绝对路径，其文件仅接受 `private_users` 和 `groups`，替换主配置中的这两项；不能将完整应用配置作为白名单文件。
 - `napcat_url` 必须为不含查询参数、用户名的回环 `ws://` 地址。`token_file` 必须存在，内容可为空；非空时用于连接认证。
 - `token_file`、`state_dir`、`workspace_dir`、`agents_file` 及可选私聊/群聊模板、认证 socket、资源目录均使用绝对路径。配置中提供的模板须可读且非空；Nix 服务要求三份模板均有效。

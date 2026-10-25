@@ -116,14 +116,14 @@ group_prompt_allow_members = false
 private_users = ["123456789"]
 
 [groups."987654321"]
-request_interval_minutes = 60
-request_message_count = 20
-participation_ratio = 5.0
+observation_interval_seconds = 60
+message_ttl_seconds = 120
+conversation_gap_seconds = 300
 
 [groups."876543210"]
-request_interval_minutes = 60
-request_message_count = 20
-participation_ratio = 5.0
+observation_interval_seconds = 60
+message_ttl_seconds = 120
+conversation_gap_seconds = 300
 ```
 
 解密文件位于 `/run/agenix/qqCodexAllowlist`，仅专用服务用户可读。
@@ -223,6 +223,17 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 
 ## 主动群聊版本升级
 
-先备份服务状态目录，再把加密配置中的每个 `[groups."群号"]` 的 `users` 删除，改用 `request_interval_minutes = 60`、`request_message_count = 20`、`participation_ratio = 5.0`。群表存在即开放全群，不再有群成员白名单。私聊 `private_users` 保持不变。
-启动会拒绝旧群配置；数据库升级自动备份为 `sessions.pre-group-v2.sqlite`，一次性让旧群开启空白 thread 并清除旧交接摘要。工作目录、模型、群设定和成员记忆保留；累计参与率从新版启用开始。回滚旧程序需要恢复备份数据库与旧配置，先停止服务再恢复。
+早期主动群聊升级曾移除每群 `users` 并引入时间／数量触发及累计参与率；当前版本不再接受这些中间版本字段。升级当前版本按下节操作。群表存在即开放全群，不再有群成员白名单；私聊 `private_users` 保持不变。
+从更早的 schema v1 升级时，仍先保留 `sessions.pre-group-v2.sqlite` 并让旧群下次开启空白 thread、清除旧交接摘要；工作目录、模型、群设定和成员记忆保留。已经使用 schema v2 的群不执行这一步，按下节保留原 thread。
 应用按成功发送回执记录自身消息，不依赖 NapCat 自身上报；若需要捕获同账号其他客户端发出的消息，开启对应 WebSocket 的 `reportSelfMessage`。任何断线漏报均不补抓。
+
+
+## 群聊节奏 v3 迁移
+
+先停止服务并备份状态目录、旧程序版本及旧加密配置。每群删除 `request_interval_minutes`、`request_message_count`、`participation_ratio`，改为 [配置与权限](../specs/configuration.md) 的三个秒级字段；不按旧值换算。主配置及可选 allowlist 文件都要检查；旧字段会阻止启动。
+
+数据库自动备份到 `sessions.pre-cadence-v3.sqlite` 后事务升级，保留 thread、工作目录、图片索引、成员／群记忆及交接摘要，不主动清空会话。旧可识别的普通积压接受时效检查，旧直接 @ 保留义务，无法确认的旧引用保守按直接互动保留；进行中或提交结果未知的批次不重放。重启等待外部消息唤醒，不自动补跑。
+
+RPi 的 `qq-codex-allowlist.age` 实为完整应用 TOML。使用 Nix 仓库的 agenix 编辑流程，只迁移群节奏字段，验证其他配置语义一致；明文不得写入 Git、Nix store 或日志。保留接收者、服务权限及挂载路径。先发布应用、更新 RPi 应用 source input，再将新程序和新密文配置同代部署。配置检查不解密，因此还须在受限临时环境中用新 Settings 解析明文，只输出成功／失败。
+
+回滚需停服并同时恢复旧程序、对应旧配置及迁移前数据库；不能只回滚密文或二进制。Pi 系统只在 Pi 构建和切换，本机只做配置评估与本机架构应用包构建。

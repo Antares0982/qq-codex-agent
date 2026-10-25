@@ -17,6 +17,6 @@ task_timeout = 3600
 
 # 群表存在即开放全员参与；不再支持 users。顶层配置放在群表之前。
 # [groups."987654321"]
-# request_interval_minutes = 60
-# request_message_count = 20
-# participation_ratio = 5.0
+# observation_interval_seconds = 60
+# message_ttl_seconds = 120
+# conversation_gap_seconds = 300

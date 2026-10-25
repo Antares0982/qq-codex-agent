@@ -50,8 +50,10 @@ class Turns:
             message.batch or message.text != "/compact"
         ):
             if message.batch is None:
-                self.groups.record(message)
-                await self.groups.prepare(message)
+                if not self.groups.record(message):
+                    return
+                quoted = await self.groups.prepare(message)
+                self.groups.observe(message, quoted)
                 message = self.groups.freeze(message)
             await GroupTurn(self, message).run()
             return

@@ -140,6 +140,7 @@ class Images:
                 )
             try:
                 receipt = await self.bot.send(context.message, image=data)
+                context.chat_output = True
             except Exception as error:
                 LOG.warning(
                     "Image delivery failed chat=%s error=%s",

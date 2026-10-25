@@ -37,6 +37,7 @@ class Message:
     time_source: str = "received"
     mentioned: bool = False
     batch: str | None = None
+    direct: bool = False
 
 
 @dataclass
@@ -49,6 +50,7 @@ class ImageTurn:
     profiles: list = field(default_factory=list)
     blocked_members: set[str] = field(default_factory=set)
     group_writable: bool = True
+    chat_output: bool = False
 
 
 def parse_parts(segments, group, bot=None):

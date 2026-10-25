@@ -11,6 +11,11 @@ from .logging import LOG, log_text
 from .messages import Message, display_name, parse_parts
 
 
+BACKGROUND_SECONDS = 300
+BACKGROUND_COUNT = 40
+BACKGROUND_CHARS = 16000
+
+
 class Groups:
     def __init__(self, settings, db, bot, inputs):
         self.settings = settings
@@ -88,19 +93,45 @@ class Groups:
             if not inserted:
                 return False
             body = self.record_body(message)
+            now = time.time()
             self.db.execute(
-                "INSERT INTO group_messages (id,key,body,own,created,consumed) VALUES (?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO group_state (key) VALUES (?)", (message.key,)
+            )
+            last, segment = self.db.execute(
+                "SELECT last_arrival,segment FROM group_state WHERE key=?",
+                (message.key,),
+            ).fetchone()
+            readable = self.readable(message) or message.reply is not None
+            if not own and not command and readable:
+                config = self.settings.groups[str(message.target["group_id"])]
+                if not last or now - last > config.conversation_gap_seconds:
+                    segment = now
+                    self.db.execute(
+                        "UPDATE group_state SET segment=?,silences=0,backoff_until=0 WHERE key=?",
+                        (segment, message.key),
+                    )
+                self.db.execute(
+                    "UPDATE group_state SET last_arrival=? WHERE key=?",
+                    (now, message.key),
+                )
+            self.db.execute(
+                "INSERT INTO group_messages (id,key,body,own,created,consumed,message,ready,priority,segment) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     message.identifier,
                     message.key,
                     json.dumps(body, ensure_ascii=False),
                     own,
-                    time.time(),
-                    command,
+                    now,
+                    own or command,
+                    json.dumps(asdict(message)),
+                    -1 if own or command else 0,
+                    int(
+                        not own
+                        and not command
+                        and (message.mentioned or message.reply is not None)
+                    ),
+                    segment,
                 ),
-            )
-            self.db.execute(
-                "INSERT OR IGNORE INTO group_state (key) VALUES (?)", (message.key,)
             )
             self.db.execute(
                 "UPDATE group_state SET total=total+1, own=own+?, count=count+? WHERE key=?",
@@ -179,42 +210,201 @@ class Groups:
             )
         return quoted_bot
 
-    def trigger(self, message, quoted_bot):
-        readable = any(
+    @staticmethod
+    def readable(message):
+        return any(
             kind in {"at", "image"} or (kind == "text" and value.strip())
             for kind, value in message.parts
         )
-        if not readable and not quoted_bot:
-            return False
-        config = self.settings.groups[str(message.target["group_id"])]
-        last = self.db.execute(
-            "SELECT last_request FROM group_state WHERE key=?", (message.key,)
-        ).fetchone()[0]
-        count = self.db.execute(
-            "SELECT count(*) FROM group_messages WHERE key=? AND own=0 AND consumed=0 AND batch IS NULL AND sequence <= (SELECT sequence FROM group_messages WHERE id=?)",
-            (message.key, message.identifier),
-        ).fetchone()[0]
-        available = self.db.execute(
-            "SELECT consumed=0 AND batch IS NULL FROM group_messages WHERE id=?",
+
+    def observe(self, message, quoted_bot):
+        message.direct = message.mentioned or quoted_bot
+        readable = self.readable(message) or quoted_bot
+        with self.db:
+            self.db.execute(
+                "UPDATE group_messages SET ready=?,priority=?,message=?,consumed=CASE WHEN ? THEN consumed ELSE 1 END WHERE id=?",
+                (
+                    1 if readable else -1,
+                    int(message.direct),
+                    json.dumps(asdict(message)),
+                    readable,
+                    message.identifier,
+                ),
+            )
+        return readable
+
+    def unprepared(self, key):
+        return [
+            Message(**json.loads(row[0]))
+            for row in self.db.execute(
+                "SELECT message FROM group_messages WHERE key=? AND ready=0 AND consumed=0 AND message IS NOT NULL ORDER BY sequence",
+                (key,),
+            )
+        ]
+
+    def expire(self, key):
+        config = self.settings.groups[key[6:]]
+        cutoff = time.time() - config.message_ttl_seconds
+        with self.db:
+            expired_batches = [
+                row[0]
+                for row in self.db.execute(
+                    "SELECT b.id FROM group_batches b WHERE b.key=? AND b.status='pending' AND b.priority=0 AND EXISTS (SELECT 1 FROM group_messages m WHERE m.batch=b.id AND (m.created<=? OR m.segment<(SELECT segment FROM group_state WHERE key=?)))",
+                    (key, cutoff, key),
+                )
+            ]
+            rows = self.db.execute(
+                "SELECT id FROM group_messages WHERE key=? AND own=0 AND consumed=0 AND priority=0 AND batch IS NULL AND (created<=? OR segment<(SELECT segment FROM group_state WHERE key=?))",
+                (key, cutoff, key),
+            ).fetchall()
+            for batch in expired_batches:
+                rows.extend(
+                    self.db.execute(
+                        "SELECT id FROM group_messages WHERE batch=?", (batch,)
+                    ).fetchall()
+                )
+                self.db.execute(
+                    "UPDATE group_batches SET status='expired' WHERE id=?", (batch,)
+                )
+                self.db.execute(
+                    "UPDATE messages SET status='expired' WHERE id=(SELECT json_extract(message,'$.identifier') FROM group_batches WHERE id=?)",
+                    (batch,),
+                )
+            for (identifier,) in rows:
+                self.db.execute(
+                    "UPDATE group_messages SET consumed=1 WHERE id=?", (identifier,)
+                )
+                self.db.execute(
+                    "UPDATE messages SET status='expired' WHERE id=?", (identifier,)
+                )
+        if rows:
+            LOG.info("Group candidates expired chat=%s count=%d", key, len(rows))
+
+    def candidates(self, key):
+        self.expire(key)
+        return [
+            Message(**json.loads(row[0]))
+            for row in self.db.execute(
+                "SELECT message FROM group_messages WHERE key=? AND own=0 AND consumed=0 AND ready=1 AND batch IS NULL AND message IS NOT NULL ORDER BY sequence",
+                (key,),
+            )
+        ]
+
+    def retry(self, key):
+        with self.db:
+            self.db.execute(
+                "UPDATE messages SET status='received' WHERE status='failed' AND id IN (SELECT json_extract(message,'$.identifier') FROM group_batches WHERE key=? AND status='pending')",
+                (key,),
+            )
+
+    def timing(self, message):
+        row = self.db.execute(
+            "SELECT created,consumed FROM group_messages WHERE id=?",
             (message.identifier,),
         ).fetchone()
-        if not available or not available[0]:
-            return False
+        previous = self.db.execute(
+            "SELECT created,json_extract(message,'$.sender_id') FROM group_messages WHERE key=? AND own=0 AND ready=1 AND message IS NOT NULL AND sequence<(SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence DESC LIMIT 1",
+            (message.key, message.identifier),
+        ).fetchone()
+        return row, previous
+
+    def eligible(self, message):
+        self.expire(message.key)
         return (
-            message.mentioned
-            or quoted_bot
-            or time.time() - last >= config.request_interval_minutes * 60
-            or count >= config.request_message_count
+            self.db.execute(
+                "SELECT 1 FROM group_batches WHERE id=? AND status='pending'",
+                (message.batch,),
+            ).fetchone()
+            is not None
         )
 
-    def freeze(self, message):
+    def delay(self, key):
+        last, until = self.db.execute(
+            "SELECT last_observation,backoff_until FROM group_state WHERE key=?", (key,)
+        ).fetchone()
+        interval = self.settings.groups[key[6:]].observation_interval_seconds
+        return max(0, last + interval - time.time(), until - time.time())
+
+    def result(self, message, status, visible):
+        if status != "completed":
+            return
+        segment = self.db.execute(
+            "SELECT segment FROM group_batches WHERE id=?", (message.batch,)
+        ).fetchone()
+        row = self.db.execute(
+            "SELECT segment,silences FROM group_state WHERE key=?", (message.key,)
+        ).fetchone()
+        if not segment or not row or segment[0] != row[0]:
+            return
+        if not visible and message.direct:
+            return
+        count = 0 if visible else row[1] + 1
+        delay = min(300, 60 * 2 ** min(3, count - 2)) if count >= 2 else 0
+        with self.db:
+            self.db.execute(
+                "UPDATE group_state SET silences=?,backoff_until=? WHERE key=?",
+                (count, time.time() + delay if delay else 0, message.key),
+            )
+        LOG.info(
+            "Group observation ended chat=%s visible=%s silences=%d backoff=%s",
+            message.key,
+            visible,
+            count,
+            delay,
+        )
+
+    def freeze(self, message, direct_only=False):
+        self.expire(message.key)
         now = time.time()
         row = self.db.execute(
             "SELECT received,message_gen,thread_gen FROM activity WHERE key=?",
             (message.key,),
         ).fetchone()
         generation = (row[1] + int(now - row[0] > 7200)) if row else 0
-        batch = replace(message, batch=uuid.uuid4().hex, generation=generation)
+        rows = self.db.execute(
+            "SELECT id,body,message,priority,segment FROM group_messages WHERE key=? AND own=0 AND batch IS NULL AND consumed=0 AND ready=1 AND (?=0 OR priority=1) AND sequence <= (SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence",
+            (message.key, direct_only, message.identifier),
+        ).fetchall()
+        if not rows:
+            raise ValueError("No eligible group messages")
+        required = any(json.loads(row[2]).get("mentioned", False) for row in rows)
+        direct = any(row[3] for row in rows)
+        batch = replace(
+            message,
+            batch=uuid.uuid4().hex,
+            generation=generation,
+            mentioned=required,
+            direct=direct,
+        )
+        segment = rows[-1][4]
+        identifiers = {row[0] for row in rows}
+        background, size = [], 0
+        for identifier, body in self.db.execute(
+            "SELECT id,body FROM group_messages WHERE key=? AND ready!=0 AND segment=? AND created>=? AND sequence <= (SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence DESC LIMIT ?",
+            (
+                message.key,
+                segment,
+                now - BACKGROUND_SECONDS,
+                message.identifier,
+                BACKGROUND_COUNT + len(rows),
+            ),
+        ):
+            if identifier in identifiers:
+                continue
+            if (
+                len(background) >= BACKGROUND_COUNT
+                or size + len(body) > BACKGROUND_CHARS
+            ):
+                break
+            background.append(json.loads(body))
+            size += len(body)
+        payload = json.dumps(
+            {
+                "background": list(reversed(background)),
+                "messages": [json.loads(row[1]) for row in rows],
+            },
+            ensure_ascii=False,
+        )
         batch.identifier = f"{message.bot_id}:{message.key}:batch-{batch.batch}"
         with self.db:
             self.db.execute(
@@ -222,12 +412,20 @@ class Groups:
                 (message.key, now, generation, row[2] if row else 0),
             )
             self.db.execute(
-                "INSERT INTO group_batches VALUES (?,?,?,'pending',?)",
-                (batch.batch, batch.key, json.dumps(asdict(batch)), time.time()),
+                "INSERT INTO group_batches (id,key,message,status,created,payload,priority,segment) VALUES (?,?,?,'pending',?,?,?,?)",
+                (
+                    batch.batch,
+                    batch.key,
+                    json.dumps(asdict(batch)),
+                    now,
+                    payload,
+                    int(direct),
+                    segment,
+                ),
             )
-            self.db.execute(
-                "UPDATE group_messages SET batch=? WHERE key=? AND batch IS NULL AND consumed=0 AND sequence <= (SELECT sequence FROM group_messages WHERE id=?)",
-                (batch.batch, batch.key, message.identifier),
+            self.db.executemany(
+                "UPDATE group_messages SET batch=? WHERE id=?",
+                [(batch.batch, identifier) for identifier in identifiers],
             )
             self.db.execute(
                 "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=group_state.key AND own=0 AND consumed=0 AND batch IS NULL),last_request=? WHERE key=?",
@@ -238,29 +436,44 @@ class Groups:
             )
         return batch
 
-    def pending(self, key):
+    def pending(self, key, retry=True):
+        self.expire(key)
         return [
             Message(**json.loads(row[0]))
             for row in self.db.execute(
-                "SELECT message FROM group_batches WHERE key=? AND status='pending' ORDER BY created,rowid",
-                (key,),
+                "SELECT message FROM group_batches WHERE key=? AND status='pending' AND (? OR coalesce((SELECT status FROM messages WHERE id=json_extract(group_batches.message,'$.identifier')),'received')!='failed') ORDER BY created,rowid",
+                (key, retry),
             )
         ]
 
     def input(self, message):
-        rows = self.db.execute(
-            "SELECT body FROM group_messages WHERE batch=? ORDER BY sequence",
-            (message.batch,),
-        )
-        return [
-            TextInput(
-                "群聊消息记录：\n"
-                + json.dumps([json.loads(row[0]) for row in rows], ensure_ascii=False)
+        row = self.db.execute(
+            "SELECT payload FROM group_batches WHERE id=?", (message.batch,)
+        ).fetchone()
+        payload = row[0] if row else None
+        if payload is None:
+            rows = self.db.execute(
+                "SELECT body FROM group_messages WHERE batch=? ORDER BY sequence",
+                (message.batch,),
             )
-        ]
+            payload = json.dumps(
+                {"background": [], "messages": [json.loads(row[0]) for row in rows]},
+                ensure_ascii=False,
+            )
+            with self.db:
+                self.db.execute(
+                    "UPDATE group_batches SET payload=? WHERE id=?",
+                    (payload, message.batch),
+                )
+        return [TextInput("群聊消息记录：\n" + payload)]
 
     def status(self, message, status):
         with self.db:
+            if status == "submitted" and not message.direct:
+                self.db.execute(
+                    "UPDATE group_state SET last_observation=? WHERE key=?",
+                    (time.time(), message.key),
+                )
             self.db.execute(
                 "UPDATE messages SET status=? WHERE id IN (SELECT id FROM group_messages WHERE batch=?)",
                 (
@@ -303,35 +516,9 @@ class Groups:
                 (key, key, sequence),
             )
             self.db.execute(
-                "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=group_state.key AND own=0 AND consumed=0 AND batch IS NULL),last_request=0 WHERE key=?",
+                "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=group_state.key AND own=0 AND consumed=0 AND batch IS NULL),silences=0,backoff_until=0,last_request=0 WHERE key=?",
                 (key,),
             )
-
-    async def instructions(self, message):
-        try:
-            info = await self.bot.call(
-                "get_group_info", {"group_id": message.target["group_id"]}
-            )
-            members = info.get("member_count")
-            if type(members) is int and members > 0:
-                with self.db:
-                    self.db.execute(
-                        "UPDATE group_state SET members=? WHERE key=?",
-                        (members, message.key),
-                    )
-        except Exception as error:
-            LOG.warning(
-                "Group count unavailable chat=%s error=%s", message.key, log_text(error)
-            )
-        row = self.db.execute(
-            "SELECT total,own,members FROM group_state WHERE key=?", (message.key,)
-        ).fetchone()
-        ratio = self.settings.groups[
-            str(message.target["group_id"])
-        ].participation_ratio
-        if row and row[0] and row[2] and row[1] / row[0] < 1 / (row[2] * ratio):
-            return "你在群聊中的参与度偏低，可以在合适时自然参与。"
-        return ""
 
     def sent(self, message, receipt, parts, image=None):
         if "group_id" not in message.target:

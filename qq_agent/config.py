@@ -1,4 +1,3 @@
-import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,17 +15,20 @@ def qq_id(value):
 
 @dataclass
 class GroupSettings:
-    request_interval_minutes: int = 60
-    request_message_count: int = 20
-    participation_ratio: float = 5.0
+    observation_interval_seconds: int = 60
+    message_ttl_seconds: int = 120
+    conversation_gap_seconds: int = 300
 
     def __post_init__(self):
-        for value in (self.request_interval_minutes, self.request_message_count):
-            if type(value) is not int or value <= 0:
-                raise ValueError("Group intervals must be positive integers")
-        value = self.participation_ratio
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 1:
-            raise ValueError("participation_ratio must be finite and >= 1")
+        values = (
+            self.observation_interval_seconds,
+            self.message_ttl_seconds,
+            self.conversation_gap_seconds,
+        )
+        if any(type(value) is not int or value <= 0 for value in values):
+            raise ValueError("Group intervals must be positive integers")
+        if not values[0] <= values[1] <= values[2]:
+            raise ValueError("Group intervals must satisfy observation <= ttl <= gap")
 
 
 @dataclass
@@ -86,10 +88,18 @@ class Settings:
             group = qq_id(group)
             if group in raw["groups"]:
                 raise ValueError("Duplicate normalized group ID")
-            if not isinstance(entry, dict) or entry.keys() - {
+            if isinstance(entry, dict) and entry.keys() & {
                 "request_interval_minutes",
                 "request_message_count",
                 "participation_ratio",
+            }:
+                raise ValueError(
+                    "Migrate group settings to observation_interval_seconds, message_ttl_seconds, conversation_gap_seconds"
+                )
+            if not isinstance(entry, dict) or entry.keys() - {
+                "observation_interval_seconds",
+                "message_ttl_seconds",
+                "conversation_gap_seconds",
             }:
                 raise ValueError("Unknown group settings; users is no longer supported")
             raw["groups"][group] = GroupSettings(**entry)

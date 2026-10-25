@@ -4,7 +4,7 @@
 
 ## 状态与生命周期
 
-群历史和调度由 `groups` 管理，JSON 解析、纠错与 turn 生命周期由 `group_turns` 管理。批次状态为 pending/submitting/submitted/终态。消息发送回执和 bot 自身事件按群及消息 ID 去重。
+群历史、候选时效和输入快照由 `groups` 管理，每群定时任务、合并窗口及忙碌调度由 `Agent` 管理，JSON 解析、纠错与 turn 生命周期由 `group_turns` 管理。批次状态为 pending/submitting/submitted/终态。消息发送回执和 bot 自身事件按群及消息 ID 去重。
 
 `member_profiles` 按 `(group_id, user_id)` 保存固定成员字段，`group_profiles` 保存群共同记录，`group_prompts` 保存群设定、修改者及时间。查询其他成员身份后再次校验活动任务和删除状态，防止异步查询期间发生的 forget 被旧任务写回。
 
@@ -18,7 +18,7 @@
 
 群新 thread 的 `base_instructions` 写入 Responses 的 system `instructions`；bot QQ 号和昵称由代码独立注入，不依赖 `{nickname}` 占位符。恢复、总结和压缩不覆盖已保存的 system。
 
-直接 @ 的回复规则放在 `GROUP_BASE_INSTRUCTIONS`。`Groups.instructions` 只返回必要的低参与度提示；新 turn 和 steering 仅在其非空时注入，回复义务仍由 `GroupTurn` 跟踪和校验。
+直接 @ 的回复规则放在 `GROUP_BASE_INSTRUCTIONS`。背景／新消息语义通过 developer 快照更新，回复义务仍由 `GroupTurn` 汇总、跟踪和校验；不再调用群人数接口或注入低参与度提示。
 
 `group_snapshots` 按 thread 保存上次成功注入的完整 developer 快照。轮前比较内容，变化时通过 `thread/inject_items` 显式注入，成功后保存；压缩完成事件删除去重记录。新 thread 不把动态快照重复放入初始化指令。
 
@@ -33,3 +33,15 @@
 生成图片从 Codex 结构化事件提取 base64，在应用内解码并原子写入工作区 `artifacts/`，图片索引及交付记录持久保存。提醒图片通过 `pics` 包资源加载。
 
 清理按文件系统 `max(atime, mtime)` 判断，不额外追踪读取；清理文件时同步清除过期或已不存在文件的图片索引及发送记录。保留范围见 [图片与文件](../specs/images.md)。
+
+## 群聊候选与节奏
+
+`group_messages` 保存接收时间、准备状态、直接互动标记、片段及可恢复的原始 Message。准备后的可读候选与不可读占位分开；异步准备前先持久记录，重启后由外部消息唤醒补准备。bot 和命令只作历史。`consumed` 表示不再待处理，过期的独立原因保存在 `messages.status`，并不表示曾提交给模型。
+
+`group_state` 保存最近接收、片段、普通提交时间、连续沉默次数及退避截止；原累计统计只留作历史。`group_batches` 保存优先级、片段及冻结输入快照。背景不占用新消息的 batch 归属；快照中没有内部调度信息。
+
+防抖使用事件循环单调时钟，接收墙钟用于持久时效与恢复；事件时间仅供聊天内容展示。每群最多一个定时任务，新的候选唤醒它；到期重新检查，忙碌则由任务结束或命令收尾重新调度。取消及关闭先取消、等待定时任务，任务清理仅移除自身注册项，避免旧任务删除新任务。
+
+`GroupTurn` 与图片交付共用活动上下文中的成功聊天输出标记，整轮成功结束才反馈一次；提醒和故障发送不设置该标记。失败批次通过外部入站事件解除重试抑制；提交结果未知仍遵循原恢复规则。
+
+参考 MaiBot 提交 [062d45c](https://github.com/Mai-with-u/MaiBot/tree/062d45cf8bd4272ac57d7ec03fcf405e5a458211/src/maisaka/turn_trigger) 的分层调度、沉默退避及短时合并思路；没有复制基于其运行数据拟合的概率权重，也没有新增独立 Planner。参数契约仅在 specs 维护。

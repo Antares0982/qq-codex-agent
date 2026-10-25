@@ -67,6 +67,7 @@ async def run(settings, login):
             for task in done:
                 task.result()
         finally:
+            await agent.close_timers()
             for task in [*workers, *agent.controls, *agent.receivers.values()]:
                 task.cancel()
             await asyncio.gather(

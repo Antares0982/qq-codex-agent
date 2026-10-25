@@ -21,7 +21,7 @@ from test_agent import PNG, event, turn_done
 async def group_agent(tmp_path):
     settings = Settings(
         set(),
-        {"10": GroupSettings(request_message_count=3)},
+        {"10": GroupSettings()},
         "ws://127.0.0.1:3001",
         tmp_path / "token",
         tmp_path / "state",
@@ -103,6 +103,7 @@ async def group_agent(tmp_path):
         turns=turns,
         deliveries=deliveries,
     )
+    await agent.close_timers()
     for task in [*agent.receivers.values(), *agent.controls, *agent.jobs.values()]:
         task.cancel()
     await asyncio.gather(
@@ -114,10 +115,21 @@ async def group_agent(tmp_path):
     agent.db.close()
 
 
-async def receive(env, incoming):
+async def drain(env):
+    window = env.agent.group_windows.get("group-10")
+    if window:
+        window.deadline = 0
+        window.changed.set()
+    with patch.object(env.agent.groups, "delay", return_value=0):
+        await asyncio.gather(*env.agent.group_timers.values())
+
+
+async def receive(env, incoming, dispatch=True):
     env.agent.receive(incoming)
     await asyncio.gather(*env.agent.receivers.values())
     await asyncio.gather(*env.agent.controls)
+    if dispatch:
+        await drain(env)
 
 
 async def execute(env, incoming):
@@ -168,14 +180,14 @@ def test_reply_errors(payload, required):
 @pytest.mark.parametrize(
     "options",
     [
-        {"request_message_count": 0},
-        {"request_message_count": True},
-        {"request_interval_minutes": 0.5},
-        {"request_interval_minutes": -1},
-        {"participation_ratio": float("inf")},
-        {"participation_ratio": float("nan")},
-        {"participation_ratio": 0.9},
-        {"participation_ratio": True},
+        {"observation_interval_seconds": 0},
+        {"observation_interval_seconds": True},
+        {"observation_interval_seconds": 0.5},
+        {"message_ttl_seconds": -1},
+        {"conversation_gap_seconds": float("inf")},
+        {"conversation_gap_seconds": float("nan")},
+        {"message_ttl_seconds": 30},
+        {"conversation_gap_seconds": 60},
     ],
 )
 def test_group_config(options):
@@ -211,13 +223,11 @@ async def test_time_trigger(group_agent):
     await execute(env, event(group=10, mention=False))
     with patch("qq_agent.groups.time.time", return_value=10000):
         with env.agent.db:
-            env.agent.db.execute("UPDATE group_state SET last_request=6401")
-        await receive(env, event(group=10, identifier=2, mention=False))
-        assert env.agent.queue.empty()
+            env.agent.db.execute("UPDATE group_state SET last_observation=9970")
+        assert env.agent.groups.delay("group-10") == 30
         with env.agent.db:
-            env.agent.db.execute("UPDATE group_state SET last_request=6400")
-        await receive(env, event(group=10, identifier=3, mention=False))
-        assert env.agent.queue.qsize() == 1
+            env.agent.db.execute("UPDATE group_state SET last_observation=9940")
+        assert env.agent.groups.delay("group-10") == 0
 
 
 async def test_delivery_history(group_agent):
@@ -319,7 +329,6 @@ async def test_image_socket(group_agent):
 @pytest.mark.parametrize("mentioned", [False, True])
 async def test_group_instructions(group_agent, low, mentioned):
     env = group_agent
-    env.agent.settings.groups["10"].request_message_count = 1
     for identifier in (1, 2):
         await receive(env, event(group=10, identifier=identifier, mention=mentioned))
         message = env.agent.queue.get_nowait()
@@ -339,9 +348,7 @@ async def test_group_instructions(group_agent, low, mentioned):
         assert all("当前待回复要求" not in text for text in texts)
         if identifier == 1:
             assert texts.pop(0).startswith("以下是本轮最新应用提示词与记忆")
-        assert texts == (
-            ["你在群聊中的参与度偏低，可以在合适时自然参与。"] if low else []
-        )
+        assert texts == []
     system = env.codex.thread_start.call_args.kwargs["base_instructions"]
     assert "收到群成员直接 @ 你的新消息时" in system
     assert "response 必须提供非空文本" in system
@@ -463,7 +470,8 @@ async def test_restart_batches(group_agent):
     await receive(env, event(group=10, mention=False))
     message = env.agent.queue.get_nowait()
     env.agent.groups.status(message, "submitting")
-    await receive(env, event(group=10, identifier=2, mention=False))
+    await receive(env, event(group=10, identifier=2, mention=False), dispatch=False)
+    await env.agent.close_timers()
     env.agent.db.close()
     env.agent.db = open_database(env.agent.settings)
     env.agent.groups.db = env.agent.db
@@ -589,15 +597,13 @@ async def test_steer_rejection(group_agent, low):
         for call in env.codex._client.request.call_args_list
         if call.args[0] == "thread/inject_items"
     ]
-    assert texts == ["你在群聊中的参与度偏低，可以在合适时自然参与。"] * (
-        2 if low else 0
-    )
+    assert texts == []
 
 
 async def test_history_cleanup(group_agent):
     env = group_agent
     await execute(env, event(group=10, mention=False))
-    await receive(env, event(group=10, identifier=2, mention=False))
+    await receive(env, event(group=10, identifier=2, mention=False), dispatch=False)
     with env.agent.db:
         env.agent.db.execute("UPDATE group_messages SET created=0")
         env.agent.db.execute("UPDATE group_batches SET created=0")
@@ -676,15 +682,22 @@ async def test_arrival_persistence(group_agent):
     )
     release.set()
     await asyncio.gather(*env.agent.receivers.values())
+    await drain(env)
     first = env.agent.queue.get_nowait()
-    records = json.loads(env.agent.groups.input(first)[0].text.split("\n", 1)[1])
-    assert [row["message_id"] for row in records] == ["1"]
+    records = json.loads(env.agent.groups.input(first)[0].text.split("\n", 1)[1])[
+        "messages"
+    ]
+    assert [row["message_id"] for row in records] == ["1", "2", "3"]
     assert env.agent.queue.empty()
-    assert env.agent.db.execute("SELECT count FROM group_state").fetchone() == (2,)
+    assert env.agent.db.execute("SELECT count FROM group_state").fetchone() == (0,)
+    env.agent.groups.status(first, "completed")
+    env.agent.mark(first, "completed")
     await receive(env, event(group=10, identifier=4, mention=False))
     second = env.agent.queue.get_nowait()
-    records = json.loads(env.agent.groups.input(second)[0].text.split("\n", 1)[1])
-    assert [row["message_id"] for row in records] == ["2", "3", "4"]
+    records = json.loads(env.agent.groups.input(second)[0].text.split("\n", 1)[1])[
+        "messages"
+    ]
+    assert [row["message_id"] for row in records] == ["4"]
 
 
 async def test_stop_arrival_boundary(group_agent):
@@ -694,9 +707,12 @@ async def test_stop_arrival_boundary(group_agent):
     env.agent.receive(event(group=10, identifier=3))
     await asyncio.gather(*env.agent.receivers.values())
     await asyncio.gather(*env.agent.controls)
+    await drain(env)
     batches = env.agent.groups.pending("group-10")
     assert len(batches) == 1
-    records = json.loads(env.agent.groups.input(batches[0])[0].text.split("\n", 1)[1])
+    records = json.loads(env.agent.groups.input(batches[0])[0].text.split("\n", 1)[1])[
+        "messages"
+    ]
     assert [row["message_id"] for row in records] == ["3"]
 
 
@@ -710,3 +726,329 @@ async def test_start_rejection(group_agent):
         message.batch
     ]
     assert not env.deliveries
+
+
+def test_debounce_deadlines():
+    from qq_agent.agent import GroupWindow
+
+    message = NS(direct=False, sender_id="1")
+    window = GroupWindow(0, 5)
+    window.observe(message, 1, (0, "1"), 1)
+    assert window.deadline == 3
+    window.observe(message, 2, (1, "2"), 2)
+    assert window.deadline == 2.5
+    window = GroupWindow(0, 5)
+    for arrival in (1, 2, 3, 4, 5, 6, 7):
+        window.observe(message, arrival, (arrival - 1, "1"), arrival)
+    assert window.deadline == 8
+    window.observe(message, 9, (7, "1"), 9)
+    assert window.deadline == 8
+    window = GroupWindow(0, 5)
+    message.direct = True
+    window.observe(message, 1, (0, "1"), 1)
+    window.observe(message, 1.5, (1, "1"), 1.5)
+    assert window.deadline == 2
+
+
+async def test_idle_boundary(group_agent):
+    env = group_agent
+    with patch("qq_agent.groups.time.time", return_value=10000):
+        await receive(
+            env,
+            event(group=10, identifier=1, mention=False, text="旧讨论"),
+            dispatch=False,
+        )
+    with patch("qq_agent.groups.time.time", return_value=13600):
+        await receive(env, event(group=10, identifier=2, mention=False, text="新话题"))
+    batch = env.agent.queue.get_nowait()
+    payload = env.agent.groups.input(batch)[0].text
+    assert "新话题" in payload and "旧讨论" not in payload
+    assert env.agent.db.execute(
+        "SELECT status FROM messages WHERE id='99:group-10:1'"
+    ).fetchone() == ("expired",)
+    assert env.agent.db.execute("SELECT count(*) FROM group_messages").fetchone() == (
+        2,
+    )
+
+
+async def test_timer_without_arrival(group_agent):
+    env = group_agent
+    await receive(env, event(group=10, mention=False), dispatch=False)
+    assert env.agent.queue.empty()
+    window = env.agent.group_windows["group-10"]
+    window.deadline = 0
+    window.changed.set()
+    await asyncio.gather(*env.agent.group_timers.values())
+    assert env.agent.queue.qsize() == 1
+    batch = env.agent.queue.get_nowait()
+    await env.agent.turns.execute(batch)
+    env.agent.flush_group("group-10")
+    await asyncio.gather(*env.agent.group_timers.values())
+    assert env.agent.queue.empty()
+
+
+async def test_middle_mention(group_agent):
+    env = group_agent
+    for identifier, mention in ((1, False), (2, True), (3, False)):
+        await receive(
+            env, event(group=10, identifier=identifier, mention=mention), dispatch=False
+        )
+    await drain(env)
+    batch = env.agent.queue.get_nowait()
+    assert batch.mentioned and batch.direct
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert [row["message_id"] for row in payload["messages"]] == ["1", "2", "3"]
+    assert set(payload) == {"background", "messages"}
+    env.scripts.append(['{"response":"收到","sticker":"平静"}'])
+    await env.agent.turns.execute(batch)
+    await receive(env, event(group=10, identifier=4, mention=False))
+    batch = env.agent.queue.get_nowait()
+    assert not batch.mentioned and not batch.direct
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert any(row["message_id"] == "2" for row in payload["background"])
+
+
+async def test_backoff_results(group_agent):
+    env = group_agent
+    await receive(env, event(group=10, mention=False))
+    batch = env.agent.queue.get_nowait()
+    with patch("qq_agent.groups.time.time", return_value=10000):
+        for count, delay in enumerate((0, 60, 120, 240, 300, 300), 1):
+            env.agent.groups.result(batch, "completed", False)
+            actual = env.agent.db.execute(
+                "SELECT silences,backoff_until FROM group_state"
+            ).fetchone()
+            assert actual == (count, 10000 + delay if delay else 0)
+        env.agent.groups.result(batch, "failed", False)
+        assert env.agent.db.execute("SELECT silences FROM group_state").fetchone() == (
+            6,
+        )
+        env.agent.groups.result(replace(batch, direct=True), "completed", False)
+        assert env.agent.db.execute("SELECT silences FROM group_state").fetchone() == (
+            6,
+        )
+        env.agent.groups.result(batch, "completed", True)
+        assert env.agent.db.execute(
+            "SELECT silences,backoff_until FROM group_state"
+        ).fetchone() == (0, 0)
+
+
+async def test_direct_bypasses_backoff(group_agent):
+    env = group_agent
+    await execute(env, event(group=10, mention=False))
+    with env.agent.db:
+        env.agent.db.execute("UPDATE group_state SET backoff_until=9999999999")
+    await receive(env, event(group=10, identifier=2), dispatch=False)
+    window = env.agent.group_windows["group-10"]
+    window.deadline = 0
+    window.changed.set()
+    await asyncio.gather(*env.agent.group_timers.values())
+    assert env.agent.queue.get_nowait().mentioned
+
+
+async def test_candidate_expiry(group_agent):
+    env = group_agent
+    with patch("qq_agent.groups.time.time", return_value=10000):
+        await receive(env, event(group=10, identifier=1, mention=False), dispatch=False)
+        await receive(env, event(group=10, identifier=2), dispatch=False)
+    with patch("qq_agent.groups.time.time", return_value=10120):
+        candidates = env.agent.groups.candidates("group-10")
+        assert [message.identifier for message in candidates] == ["99:group-10:2"]
+        assert candidates[0].mentioned
+    await drain(env)
+    batch = env.agent.queue.get_nowait()
+    assert batch.mentioned
+
+
+async def test_background_limits(group_agent):
+    env = group_agent
+    for identifier in range(1, 45):
+        message = parse_message(
+            event(group=10, identifier=identifier, mention=False), env.agent.settings
+        )
+        env.agent.groups.record(message)
+        await env.agent.groups.prepare(message)
+        env.agent.groups.observe(message, False)
+        with env.agent.db:
+            env.agent.db.execute(
+                "UPDATE group_messages SET consumed=1 WHERE id=?", (message.identifier,)
+            )
+    await receive(env, event(group=10, identifier=45, mention=False))
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert len(payload["background"]) == 40
+    assert payload["background"][0]["message_id"] == "5"
+    original = env.agent.groups.input(batch)[0].text
+    with env.agent.db:
+        env.agent.db.execute("UPDATE group_messages SET body='{}'")
+    assert env.agent.groups.input(batch)[0].text == original
+
+
+async def test_pending_expiry(group_agent):
+    env = group_agent
+    with patch("qq_agent.groups.time.time", return_value=10000):
+        await receive(env, event(group=10, mention=False))
+    batch = env.agent.queue.get_nowait()
+    with patch("qq_agent.groups.time.time", return_value=10120):
+        await env.agent.turns.execute(batch)
+    env.thread.turn.assert_not_awaited()
+    assert env.agent.db.execute("SELECT status FROM group_batches").fetchone() == (
+        "expired",
+    )
+
+
+async def test_failed_no_retry(group_agent):
+    from openai_codex.errors import JsonRpcError
+
+    env = group_agent
+    env.thread.turn.side_effect = JsonRpcError(-32602, "rejected")
+    await execute(env, event(group=10, mention=False))
+    env.agent.flush_group("group-10")
+    await asyncio.gather(*env.agent.group_timers.values())
+    assert env.agent.queue.empty()
+
+
+async def test_restart_unprepared(group_agent):
+    env = group_agent
+    message = parse_message(event(group=10), env.agent.settings)
+    env.agent.groups.record(message)
+    env.agent.db.close()
+    env.agent.db = open_database(env.agent.settings)
+    env.agent.groups.db = env.agent.db
+    await receive(env, event(group=10, identifier=2, mention=False))
+    batch = env.agent.queue.get_nowait()
+    assert batch.mentioned
+    assert (
+        len(
+            json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])[
+                "messages"
+            ]
+        )
+        == 2
+    )
+
+
+async def test_busy_candidates(group_agent):
+    env = group_agent
+    key = "group-10"
+    busy = asyncio.create_task(asyncio.Event().wait())
+    env.agent.jobs[key] = busy
+    try:
+        await receive(env, event(group=10, identifier=1, mention=False))
+        assert env.agent.queue.empty()
+        assert len(env.agent.groups.candidates(key)) == 1
+        await receive(env, event(group=10, identifier=2))
+        batch = env.agent.queue.get_nowait()
+        assert batch.mentioned
+        payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+        assert [row["message_id"] for row in payload["messages"]] == ["2"]
+        assert len(env.agent.groups.candidates(key)) == 1
+    finally:
+        busy.cancel()
+        await asyncio.gather(busy, return_exceptions=True)
+        env.agent.jobs.pop(key)
+
+
+async def test_slow_preparation(group_agent):
+    env = group_agent
+    with patch("qq_agent.groups.time.time", return_value=10000):
+        message = parse_message(event(group=10, mention=False), env.agent.settings)
+        env.agent.groups.record(message)
+    with patch("qq_agent.groups.time.time", return_value=10010):
+        quoted = await env.agent.groups.prepare(message)
+        env.agent.groups.observe(message, quoted)
+        env.agent.observe_group(message)
+        assert (
+            env.agent.group_windows[message.key].deadline
+            < asyncio.get_running_loop().time()
+        )
+
+
+async def test_cadence_upgrade(group_agent):
+    import sqlite3
+
+    env = group_agent
+    with patch("qq_agent.groups.time.time", return_value=10000):
+        await receive(env, event(group=10, identifier=1, mention=False))
+        ordinary = env.agent.queue.get_nowait()
+        await receive(env, event(group=10, identifier=2))
+        direct = env.agent.queue.get_nowait()
+        message = parse_message(event(group=10, identifier=3), env.agent.settings)
+        env.agent.groups.record(message)
+    await env.agent.close_timers()
+    with env.agent.db:
+        for table, columns in {
+            "group_state": [
+                "last_arrival",
+                "segment",
+                "last_observation",
+                "silences",
+                "backoff_until",
+            ],
+            "group_messages": ["message", "ready", "priority", "segment"],
+            "group_batches": ["payload", "priority", "segment"],
+        }.items():
+            for name in columns:
+                env.agent.db.execute(f"ALTER TABLE {table} DROP COLUMN {name}")
+        env.agent.db.execute("PRAGMA user_version=2")
+    env.agent.db.close()
+    env.agent.db = open_database(env.agent.settings)
+    env.agent.groups.db = env.agent.db
+    with patch("qq_agent.groups.time.time", return_value=10010):
+        assert {batch.batch for batch in env.agent.groups.pending("group-10")} == {
+            ordinary.batch,
+            direct.batch,
+        }
+    with patch("qq_agent.groups.time.time", return_value=10120):
+        batches = env.agent.groups.pending("group-10")
+        assert len(batches) == 1 and batches[0].batch == direct.batch
+        assert batches[0].direct and batches[0].mentioned
+        candidates = env.agent.groups.candidates("group-10")
+        assert len(candidates) == 1 and candidates[0].mentioned
+    assert env.agent.db.execute("PRAGMA user_version").fetchone() == (3,)
+    with sqlite3.connect(
+        env.agent.settings.state_dir / "sessions.pre-cadence-v3.sqlite"
+    ) as backup:
+        assert backup.execute("PRAGMA user_version").fetchone() == (2,)
+        assert backup.execute("SELECT count(*) FROM group_messages").fetchone() == (3,)
+    env.agent.db.close()
+    env.agent.db = open_database(env.agent.settings)
+    env.agent.groups.db = env.agent.db
+    assert env.agent.db.execute("PRAGMA user_version").fetchone() == (3,)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["request_message_count", "request_interval_minutes", "participation_ratio"],
+)
+def test_legacy_config(field, tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(f'[groups."10"]\n{field} = 60\n')
+    with pytest.raises(ValueError, match="Migrate group settings"):
+        Settings.load(path)
+
+
+async def test_retry_admission(group_agent):
+    from openai_codex.errors import JsonRpcError
+
+    env = group_agent
+    env.thread.turn.side_effect = JsonRpcError(-32602, "rejected")
+    first = await execute(env, event(group=10, mention=False))
+    await receive(env, event(group=10, identifier=2, mention=False))
+    assert env.agent.queue.qsize() == 1
+    assert env.agent.queue.get_nowait().batch == first.batch
+    assert len(env.agent.groups.candidates("group-10")) == 1
+
+
+async def test_priority_admission(group_agent):
+    from openai_codex.errors import JsonRpcError
+
+    env = group_agent
+    env.thread.turn.side_effect = JsonRpcError(-32602, "rejected")
+    first = await execute(env, event(group=10, mention=False))
+    await receive(env, event(group=10, identifier=2))
+    assert env.agent.queue.qsize() == 1
+    assert env.agent.queue.get_nowait().mentioned
+    assert any(
+        batch.batch == first.batch for batch in env.agent.groups.pending("group-10")
+    )

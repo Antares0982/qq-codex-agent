@@ -611,6 +611,16 @@ async def test_runtime_prompts(tmp_path, mode):
                     assert "管理员 QQ 号为" not in instructions
                     assert "PROMPT_BETA" not in json.dumps(requests[-1]["input"])
                     await runtime.release_thread(thread.id)
+            encoded = json.dumps(requests, ensure_ascii=False)
+            for forbidden in (
+                "observation_interval_seconds",
+                "message_ttl_seconds",
+                "conversation_gap_seconds",
+                "backoff_until",
+                "silences",
+                "参与度偏低",
+            ):
+                assert forbidden not in encoded
     finally:
         await codex.close()
         db.close()
@@ -763,6 +773,7 @@ async def test_group_correction(tmp_path):
 
             agent.receive(event(group=10))
             await asyncio.gather(*agent.receivers.values())
+            await asyncio.gather(*agent.group_timers.values())
             message = agent.queue.get_nowait()
             task = asyncio.create_task(agent.turns.execute(message))
             await asyncio.wait_for(entered.wait(), 20)
@@ -801,8 +812,19 @@ async def test_group_correction(tmp_path):
             )
             agent.receive(event(group=10, identifier=2, mention=False, reply="123"))
             await asyncio.gather(*agent.receivers.values())
+            await asyncio.gather(*agent.group_timers.values())
             await asyncio.wait_for(agent.turns.execute(agent.queue.get_nowait()), 20)
             assert len(requests) == 4
+            encoded = json.dumps(requests, ensure_ascii=False)
+            for forbidden in (
+                "observation_interval_seconds",
+                "message_ttl_seconds",
+                "conversation_gap_seconds",
+                "backoff_until",
+                "silences",
+                "参与度偏低",
+            ):
+                assert forbidden not in encoded
             assert any(
                 item.get("role") == "developer"
                 and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
@@ -820,5 +842,6 @@ async def test_group_correction(tmp_path):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if agent:
+            await agent.close_timers()
             agent.db.close()
         await runner.cleanup()

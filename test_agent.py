@@ -121,17 +121,35 @@ class TestAgent:
             yield
         finally:
             await self.drain()
+            await self.agent.close_timers()
             self.agent.db.close()
 
     async def execute(self, message):
         # Shared runtime tests use optional group replies.
         if "group_id" in message.target and message.text != "/compact":
-            message = replace(message, mentioned=False)
+            identifier = message.identifier
+            while self.agent.db.execute(
+                "SELECT 1 FROM messages WHERE id=?", (identifier,)
+            ).fetchone():
+                identifier += "-next"
+            message = replace(
+                message,
+                mentioned=False,
+                identifier=identifier,
+                parts=[
+                    part for part in message.parts if part != ("at", message.bot_id)
+                ],
+            )
         return await self.agent.turns.execute(message)
 
     async def drain(self):
         await asyncio.gather(*self.agent.receivers.values(), return_exceptions=True)
         await asyncio.gather(*self.agent.controls, return_exceptions=True)
+        for window in self.agent.group_windows.values():
+            window.deadline = 0
+            window.changed.set()
+        with patch.object(self.agent.groups, "delay", return_value=0):
+            await asyncio.gather(*self.agent.group_timers.values())
 
     def test_admission(self):
         for candidate in (
@@ -187,7 +205,7 @@ class TestAgent:
             inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
             identity = "（ID: 1）" if group else ""
             if group:
-                record = json.loads(inputs[0].text.split("\n", 1)[1])[0]
+                record = json.loads(inputs[0].text.split("\n", 1)[1])["messages"][0]
                 assert (
                     record["sender_name"] == "小明 管理员"
                     and record["content"][0] == "你好"
@@ -206,7 +224,7 @@ class TestAgent:
             inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
             identity = "（ID: 1）" if group else ""
             if group:
-                record = json.loads(inputs[0].text.split("\n", 1)[1])[0]
+                record = json.loads(inputs[0].text.split("\n", 1)[1])["messages"][0]
                 assert (
                     record["sender_name"] == expected
                     and record["content"][0] == "hello"
@@ -1054,7 +1072,7 @@ class TestAgent:
         with pytest.raises(FileNotFoundError):
             Settings.load(path)
         allowlist.write_text(
-            'private_users=["1"]\n[groups."10"]\nrequest_message_count=20\n'
+            'private_users=["1"]\n[groups."10"]\nobservation_interval_seconds=60\n'
         )
         assert Settings.load(path).private_users == {"1"}
         assert Settings.load(path).groups == {"10": GroupSettings()}
@@ -1090,7 +1108,7 @@ class TestAgent:
             'auth_socket="/auth/socket"\nagents_file="/common.md"\n'
             'private_agents_file="/private.md"\ngroup_agents_file="/group.md"\n'
             "group_prompt_allow_members=true\nqueue_limit=4\ntask_timeout=900\n"
-            '[groups."10"]\nrequest_message_count=20\n'
+            '[groups."10"]\nobservation_interval_seconds=60\n'
         )
         path.write_text(original)
         settings = Settings.load(path)
@@ -2738,12 +2756,12 @@ class TestAgent:
             )
             for _ in range(100):
                 if (
-                    turns["group-10"].steer.await_count == 2
+                    turns["group-10"].steer.await_count == 1
                     and turns["private-1"].steer.await_count == 1
                 ):
                     break
                 await asyncio.sleep(0.01)
-            assert turns["group-10"].steer.await_count == 2
+            assert turns["group-10"].steer.await_count == 1
             assert turns["private-1"].steer.await_count == 1
             assert not any(
                 call.args[0] == "set_msg_emoji_like"
@@ -2752,7 +2770,11 @@ class TestAgent:
             texts = [
                 call.args[0][0].text for call in turns["group-10"].steer.call_args_list
             ]
-            records = [json.loads(text.split("\n", 1)[1])[-1] for text in texts]
+            records = [
+                record
+                for text in texts
+                for record in json.loads(text.split("\n", 1)[1])["messages"]
+            ]
             assert [
                 (record["sender_id"], record["content"][0]) for record in records
             ] == [("1", "first"), ("2", "second")]

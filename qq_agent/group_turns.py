@@ -123,6 +123,7 @@ class GroupTurn:
             self.repair = False
             if sticker is not None:
                 await self.replies.bot.send(self.message, image=sticker, sticker=True)
+                self.context.chat_output = True
                 if not self.visible:
                     self.visible = True
                     await self.notice(True)
@@ -130,6 +131,7 @@ class GroupTurn:
                 await self.replies.bot.send(self.message, text=text)
                 if version is None or version == self.required_version:
                     self.required = False
+                self.context.chat_output = True
                 if not self.visible:
                     self.visible = True
                     await self.notice(True)
@@ -144,17 +146,12 @@ class GroupTurn:
                 await wake.wait()
                 continue
             message = pending[0]
-            if message.batch is None:
+            if message.batch is None or not message.direct:
                 return
             async with self.lock:
                 if self.finished.is_set() or self.tripped:
                     return
                 required = self.required or message.mentioned
-                instructions = await self.groups.instructions(message)
-                if self.finished.is_set():
-                    return
-                if instructions:
-                    await self.runtime.inject(self.thread, instructions)
                 pending.popleft()
                 self.groups.status(message, "submitting")
                 try:
@@ -216,6 +213,9 @@ class GroupTurn:
 
     async def run(self):
         message = self.message
+        if not self.groups.eligible(message):
+            self.owner.mark(message, "expired")
+            return
         status = "failed"
         started = time.monotonic()
         deadline = asyncio.timeout(self.owner.settings.task_timeout)
@@ -247,9 +247,6 @@ class GroupTurn:
                     self.thread, message, self.owner.profiles
                 )
                 self.required = message.mentioned
-                instructions = await self.groups.instructions(message)
-                if instructions:
-                    await self.runtime.inject(self.thread, instructions)
                 first = True
                 while True:
                     self.finished.clear()
@@ -257,6 +254,9 @@ class GroupTurn:
                     self.repair = False
                     saw_reply = False
                     if first:
+                        if not self.groups.eligible(message):
+                            status = "expired"
+                            return
                         self.groups.status(message, "submitting")
                     usage = self.owner.db.execute(
                         "SELECT tokens FROM context_usage WHERE thread=?",
@@ -343,6 +343,9 @@ class GroupTurn:
                 self.groups.status(submitted, status)
                 self.owner.mark(submitted, status)
             self.owner.mark(message, status)
+            self.groups.result(
+                message, status, bool(self.context and self.context.chat_output)
+            )
             await self.owner.cleanup_context(message, self.context, [], [])
             if self.turn is not None and not self.finished.is_set():
                 try:

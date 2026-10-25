@@ -4,7 +4,7 @@
 
 - [配置与权限](specs/configuration.md)：入口授权、配置约束和安全边界。
 - [会话与命令](specs/sessions.md)：任务、指令、上下文、取消与恢复。
-- [群聊协议](specs/groups.md)：触发、回复、参与率和故障语义。
+- [群聊协议](specs/groups.md)：消息节奏、时效、回复和故障语义。
 - [图片与文件](specs/images.md)：图片工具、交付、资源保留。
 - [记忆与提示词](specs/memory-prompts.md)：成员记录、群设定和更新时机。
 
