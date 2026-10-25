@@ -1,4 +1,4 @@
-"""Compress bundled stickers in place."""
+"""Compress an image or directory in place."""
 
 import argparse
 import io
@@ -137,14 +137,19 @@ def compress_image(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", nargs="?", type=Path, default=Path("stickers"))
+    parser.add_argument("path", nargs="?", type=Path, default=Path("stickers"))
     args = parser.parse_args()
-    if not args.directory.is_dir():
-        parser.error("Image directory does not exist")
+    if args.path.is_symlink() or not args.path.exists():
+        parser.error("Expected an existing regular image file or directory")
+    paths = (
+        sorted(
+            path for path in args.path.rglob("*") if path.suffix.lower() in EXTENSIONS
+        )
+        if args.path.is_dir()
+        else [args.path]
+    )
     failed = False
-    for path in sorted(args.directory.rglob("*")):
-        if path.suffix.lower() not in EXTENSIONS:
-            continue
+    for path in paths:
         try:
             before, after, old_size, new_size = compress_image(path)
             print(

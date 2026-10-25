@@ -17,13 +17,13 @@ dev = [
 ]
 
 [tool.pyright]
-include = ["*.py", "qq_agent", "pics", "stickers"]
+include = ["*.py", "qq_agent", "pics", "stickers", ".agents/skills/export-pi-transcript/scripts"]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.13"
 
 [tool.pytest.ini_options]
-testpaths = ["test_agent.py", "test_images.py", "test_auth.py", "test_runtime.py", "test_groups.py"]
+testpaths = ["test_agent.py", "test_images.py", "test_auth.py", "test_runtime.py", "test_groups.py", "test_transcript.py"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 

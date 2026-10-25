@@ -695,3 +695,45 @@ def test_compress_failure(tmp_path):
     link.symlink_to(path)
     with pytest.raises(ValueError, match="regular"):
         compress_stickers.compress_image(link)
+
+
+@pytest.mark.parametrize("mode", ["file", "directory", "default"])
+def test_compress_cli(tmp_path, monkeypatch, capsys, mode):
+    folder = tmp_path / "stickers"
+    folder.mkdir()
+    target = folder / "target.png"
+    sibling = folder / "sibling.png"
+    for path in (target, sibling):
+        Image.new("RGB", (1000, 1000), "red").save(path)
+    original = sibling.read_bytes()
+    (folder / "notes.txt").write_text("untouched")
+    monkeypatch.chdir(tmp_path)
+    arguments = [str(target)] if mode == "file" else [str(folder)]
+    monkeypatch.setattr(
+        sys, "argv", ["compress_stickers.py", *([] if mode == "default" else arguments)]
+    )
+    compress_stickers.main()
+    with Image.open(target) as result:
+        assert result.width * result.height <= compress_stickers.PIXEL_LIMIT
+    assert (sibling.read_bytes() == original) == (mode == "file")
+    assert (folder / "notes.txt").read_text() == "untouched"
+    assert "ERROR" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", ["missing", "invalid", "link", "unsupported"])
+def test_compress_cli_failure(tmp_path, monkeypatch, kind):
+    path = tmp_path / "input.png"
+    if kind == "link":
+        source = tmp_path / "original.png"
+        source.write_bytes(PNG)
+        path.symlink_to(source)
+    elif kind == "unsupported":
+        Image.new("RGB", (2, 2)).save(path, format="BMP")
+    elif kind == "invalid":
+        path.write_bytes(b"invalid")
+    before = path.read_bytes() if path.exists() else None
+    monkeypatch.setattr(sys, "argv", ["compress_stickers.py", str(path)])
+    with pytest.raises(SystemExit) as error:
+        compress_stickers.main()
+    assert error.value.code != 0
+    assert (path.read_bytes() if path.exists() else None) == before
