@@ -18,6 +18,8 @@
 
 群新 thread 的 `base_instructions` 写入 Responses 的 system `instructions`；bot QQ 号和昵称由代码独立注入，不依赖 `{nickname}` 占位符。恢复、总结和压缩不覆盖已保存的 system。
 
+直接 @ 的回复规则放在 `GROUP_BASE_INSTRUCTIONS`。`Groups.instructions` 只返回必要的低参与度提示；新 turn 和 steering 仅在其非空时注入，回复义务仍由 `GroupTurn` 跟踪和校验。
+
 `group_snapshots` 按 thread 保存上次成功注入的完整 developer 快照。轮前比较内容，变化时通过 `thread/inject_items` 显式注入，成功后保存；压缩完成事件删除去重记录。新 thread 不把动态快照重复放入初始化指令。
 
 不能借用 `collaborationMode.settings.developer_instructions`：模型目录的协作模板会优先覆盖该字段。不依赖 resume 刷新已加载 thread。群 thread 开启 `features.retain_client_developer_messages`，支持远程 v2 手动和自动压缩保留客户端 developer 消息。

@@ -150,10 +150,11 @@ class GroupTurn:
                 if self.finished.is_set() or self.tripped:
                     return
                 required = self.required or message.mentioned
-                instructions = await self.groups.instructions(message, required)
+                instructions = await self.groups.instructions(message)
                 if self.finished.is_set():
                     return
-                await self.runtime.inject(self.thread, instructions)
+                if instructions:
+                    await self.runtime.inject(self.thread, instructions)
                 pending.popleft()
                 self.groups.status(message, "submitting")
                 try:
@@ -246,9 +247,9 @@ class GroupTurn:
                     self.thread, message, self.owner.profiles
                 )
                 self.required = message.mentioned
-                await self.runtime.inject(
-                    self.thread, await self.groups.instructions(message, self.required)
-                )
+                instructions = await self.groups.instructions(message)
+                if instructions:
+                    await self.runtime.inject(self.thread, instructions)
                 first = True
                 while True:
                     self.finished.clear()

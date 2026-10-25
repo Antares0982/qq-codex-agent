@@ -315,6 +315,39 @@ async def test_image_socket(group_agent):
         await server.wait_closed()
 
 
+@pytest.mark.parametrize("low", [False, True])
+@pytest.mark.parametrize("mentioned", [False, True])
+async def test_group_instructions(group_agent, low, mentioned):
+    env = group_agent
+    env.agent.settings.groups["10"].request_message_count = 1
+    for identifier in (1, 2):
+        await receive(env, event(group=10, identifier=identifier, mention=mentioned))
+        message = env.agent.queue.get_nowait()
+        env.agent.queue.task_done()
+        with env.agent.db:
+            env.agent.db.execute(
+                "UPDATE group_state SET total=100,own=?", (0 if low else 50,)
+            )
+        env.scripts.append(['{"response":"收到","sticker":"平静"}'])
+        env.codex._client.request.reset_mock()
+        await env.agent.turns.execute(message)
+        texts = [
+            call.args[1]["items"][0]["content"][0]["text"]
+            for call in env.codex._client.request.call_args_list
+            if call.args[0] == "thread/inject_items"
+        ]
+        assert all("当前待回复要求" not in text for text in texts)
+        if identifier == 1:
+            assert texts.pop(0).startswith("以下是本轮最新应用提示词与记忆")
+        assert texts == (
+            ["你在群聊中的参与度偏低，可以在合适时自然参与。"] if low else []
+        )
+    system = env.codex.thread_start.call_args.kwargs["base_instructions"]
+    assert "收到群成员直接 @ 你的新消息时" in system
+    assert "response 必须提供非空文本" in system
+    assert "base_instructions" not in env.codex.thread_resume.call_args.kwargs
+
+
 async def test_required_repair(group_agent):
     env = group_agent
     env.scripts.extend(
@@ -510,7 +543,8 @@ async def test_reminder_timing(group_agent):
     )
 
 
-async def test_steer_rejection(group_agent):
+@pytest.mark.parametrize("low", [False, True])
+async def test_steer_rejection(group_agent, low):
     from openai_codex.errors import JsonRpcError
 
     env = group_agent
@@ -518,6 +552,10 @@ async def test_steer_rejection(group_agent):
     first = env.agent.queue.get_nowait()
     await receive(env, event(group=10, identifier=2))
     second = env.agent.queue.get_nowait()
+    with env.agent.db:
+        env.agent.db.execute(
+            "UPDATE group_state SET total=100,own=?", (0 if low else 50,)
+        )
     env.agent.pending[first.key] = deque([second])
     env.agent.wake[first.key] = asyncio.Event()
     folder = env.agent.settings.workspace_dir / "steer"
@@ -546,6 +584,14 @@ async def test_steer_rejection(group_agent):
     assert second.batch not in [
         message.batch for message in env.agent.groups.pending(first.key)
     ]
+    texts = [
+        call.args[1]["items"][0]["content"][0]["text"]
+        for call in env.codex._client.request.call_args_list
+        if call.args[0] == "thread/inject_items"
+    ]
+    assert texts == ["你在群聊中的参与度偏低，可以在合适时自然参与。"] * (
+        2 if low else 0
+    )
 
 
 async def test_history_cleanup(group_agent):
