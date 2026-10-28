@@ -15,8 +15,12 @@ PATH aliases 的只读警告是预期现象；必须以实际 thread、沙箱和
 
 ## 导出最近请求
 
-仓库维护技能 [export-pi-transcript](../../.agents/skills/export-pi-transcript/SKILL.md)通过 SSH 只读访问 Pi，生成一份带完整性说明的 Markdown 重建 transcript。它不属于 QQ bot 的内置技能，不能通过开放 bot 私有状态权限来运行。
+仓库维护技能 [export-pi-transcript](../../.agents/skills/export-pi-transcript/SKILL.md)通过 SSH 只读复制 Pi 服务保存的最新 Markdown 重建 transcript。它不属于 QQ bot 的内置技能，不能通过开放 bot 私有状态权限来运行。
 
-runtime 目前记录请求诊断和 rollout 历史，没有保存完整 HTTP 请求正文。导出按请求时间恢复可用上下文，不能保证工具定义、压缩状态、内部动态提示词及并发消息边界与真实请求逐字一致。产物含聊天内容，只保存于仓库外；不自动发布或发送。
+服务监听 turn 完成事件，在状态目录原子覆盖 `latest-transcript.md`（0600），仅保留最新完成的一份；覆盖顺序按完成通知串行化，包含私聊、群聊、纠错、总结和压缩 turn，失败只记日志。短暂等待 runtime 落盘后读取固定截止时间内、指定 thread/turn 的诊断和 rollout；无法关联时明确未知，不选别的会话。维护 skill 只复制固定路径，不在远端运行重建代码。
+
+runtime 记录请求诊断和 rollout 历史，没有保存完整 HTTP 请求正文。导出按请求时间恢复可用上下文，不能保证工具定义、压缩状态、内部动态提示词及并发消息边界与真实请求逐字一致。缺少 HTTP 请求定位时，明确展示 turn 结束前历史，不能冒充精确的请求输入。
+
+Token 统计使用 rollout 的 `token_usage_record`，列出 response ID、输入、缓存输入、输出、reasoning 和总量；reasoning 是 output 的子集。累计 usage 去重后，使用同 thread、同模型上一次请求的 input_tokens 计算净增量；首次、压缩、模型切换或统计缺失/重置时基线未知。不使用 `token_count` 的压缩估算，不解析加密块。这个差值包含工具结果、响应回填和 runtime 转换等因素，不是新增正文的精确 token 数或计费差值。产物含聊天内容，只保存于仓库外；不自动发布或发送。
 
 群聊节奏排查先检查应用日志中的候选过期、调度等待／提交及观察结束事件，结合候选数量、等待秒数、直接互动标记、可见输出和连续沉默次数判断原因。节奏状态只进入应用日志，不发到 QQ、不注入模型；配置与行为以 [群聊协议](../specs/groups.md) 为准。模型调用失败不视为沉默，明确未提交的失败等待下一条外部消息再检查，避免定时重试风暴。

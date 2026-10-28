@@ -16,7 +16,11 @@ class Replies:
         if intermediate and "group_id" in message.target:
             return
         try:
-            await self.bot.send(message, text=text)
+            await self.bot.send(
+                message,
+                text=text,
+                **({"system": True} if "group_id" in message.target else {}),
+            )
             LOG.info(
                 "Sent chat=%s message=%s text=%s",
                 message.key,
@@ -42,6 +46,6 @@ class Replies:
             await asyncio.sleep(max(0, started + delay - loop.time()))
             try:
                 data = files("pics").joinpath(filename).read_bytes()
-                await self.bot.send(message, image=data, sticker=True)
+                await self.bot.send(message, image=data, sticker=True, system=True)
             except (OSError, RuntimeError, TimeoutError, aiohttp.ClientError):
                 LOG.warning("Group reminder delivery failed")

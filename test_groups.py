@@ -151,7 +151,10 @@ async def execute(env, incoming):
     ],
 )
 def test_reply_values(payload, required, result):
-    assert parse_reply(payload, {"平静": None, "开心": PNG}, required) == result
+    assert parse_reply(payload, {"平静": None, "开心": PNG}, required) == (
+        *result,
+        None,
+    )
 
 
 @pytest.mark.parametrize(
@@ -546,8 +549,8 @@ async def test_reminder_timing(group_agent):
     ):
         await execute(env, event(group=10))
     assert env.agent.db.execute("SELECT total,own FROM group_state").fetchone() == (
-        6,
-        5,
+        2,
+        1,
     )
 
 
@@ -1052,3 +1055,227 @@ async def test_priority_admission(group_agent):
     assert any(
         batch.batch == first.batch for batch in env.agent.groups.pending("group-10")
     )
+
+
+async def test_low_backlog(group_agent):
+    env = group_agent
+    for index in range(110):
+        incoming = event(group=10, identifier=index, text="", mention=False)
+        incoming["message"] = (
+            [{"type": "image", "data": {"file": "same", "sub_type": 1}}]
+            if index < 100
+            else [{"type": "forward", "data": {"id": "x"}}]
+        )
+        await receive(env, incoming)
+    assert env.agent.queue.empty() and not env.agent.group_windows
+    assert env.agent.db.execute(
+        "SELECT last_arrival,count FROM group_state"
+    ).fetchone() == (0, 0)
+    with env.agent.db:
+        env.agent.db.execute("UPDATE group_messages SET created=created-7200")
+    await receive(env, event(group=10, identifier=111, mention=False))
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert len(payload["messages"]) == 111
+    assert (
+        len({row["content"][0]["sticker_id"] for row in payload["messages"][:100]}) == 1
+    )
+    env.bot.image.assert_not_called()
+
+
+async def test_media_identity(group_agent, monkeypatch):
+    import time
+    from qq_agent import groups
+
+    env = group_agent
+    monkeypatch.setenv("TZ", "UTC-8")
+    time.tzset()
+    try:
+        ids = []
+        parsed = None
+        for index, subtype in enumerate((0, 1, 0)):
+            incoming = event(group=10, identifier=index, mention=False)
+            incoming["time"] = 100.123456
+            incoming["message"] = [
+                {
+                    "type": "image",
+                    "data": {
+                        "file": f"source-{index}",
+                        "file_unique": "A" * 32,
+                        "sub_type": subtype,
+                    },
+                }
+            ]
+            parsed = parse_message(incoming, env.agent.settings)
+            assert parsed is not None
+            env.agent.groups.record(parsed)
+            body = json.loads(
+                env.agent.db.execute(
+                    "SELECT body FROM group_messages WHERE id=?", (parsed.identifier,)
+                ).fetchone()[0]
+            )
+            assert body["time"] == "1970-01-01T08:01:40+08:00"
+            ids.append(body["content"][0]["sticker_id" if subtype else "image_id"])
+        assert len(set(ids)) == 1
+        assert env.agent.db.execute(
+            "SELECT source FROM received_images"
+        ).fetchone() == ("source-2",)
+        assert parsed is not None
+        parsed.key = "group-11"
+        assert env.agent.groups.record_body(parsed)["content"][0]["image_id"] != ids[0]
+        payload = {
+            "background": [],
+            "messages": [
+                {"message_id": "old", "time": "2026-01-01T00:00:00.123+00:00"}
+            ],
+        }
+        assert (
+            groups.Groups.format_history(payload)["messages"][0]["time"]
+            == "2026-01-01T08:00:00+08:00"
+        )
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+async def test_system_history(group_agent):
+    env = group_agent
+    await receive(env, event(group=10, text="/status"))
+    assert env.agent.db.execute("SELECT count(*) FROM group_messages").fetchone() == (
+        0,
+    )
+    assert env.agent.db.execute("SELECT count(*) FROM system_messages").fetchone() == (
+        2,
+    )
+    assert env.agent.queue.empty()
+    await receive(env, event(group=10, identifier=2, reply="1001", mention=False))
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert payload["messages"][0]["quote"] == {
+        "message_id": "1001",
+        "content": ["<redacted system message>"],
+    }
+    assert batch.direct and not env.agent.groups.can_quote("group-10", "1001")
+    assert not env.agent.groups.can_quote("group-11", "2")
+    assert not env.agent.groups.can_quote("group-10", "%")
+
+
+async def test_system_echo(group_agent):
+    env = group_agent
+    trigger = parse_message(event(group=10), env.agent.settings)
+    assert trigger is not None
+    for identifier, system in ((20, True), (21, False)):
+        echo = event(
+            group=10, user=99, identifier=identifier, text="echo", mention=False
+        )
+        echo["time"] = 100
+        await receive(env, echo)
+        assert env.agent.db.execute(
+            "SELECT count(*) FROM group_messages"
+        ).fetchone() == (0,)
+        env.agent.groups.sent(
+            trigger, {"message_id": identifier}, [("text", "reply")], system=system
+        )
+    rows = env.agent.db.execute("SELECT body,category FROM group_messages").fetchall()
+    assert len(rows) == 1 and rows[0][1] == "low"
+    assert json.loads(rows[0][0])["time_source"] == "event"
+    assert env.agent.queue.empty()
+
+
+async def test_quote_delivery(group_agent):
+    env = group_agent
+    env.agent.runtime.stickers = {"静": None, "图": PNG}
+    env.scripts.append(
+        [json.dumps({"response": "a" * 1600, "sticker": "图", "quote": "1"})]
+    )
+    await execute(env, event(group=10))
+    assert [part["type"] for part in env.deliveries[0]["message"]] == ["image"]
+    assert env.deliveries[1]["message"][0] == {"type": "reply", "data": {"id": "1"}}
+    assert [part["type"] for part in env.deliveries[2]["message"]] == ["text"]
+    env.scripts.append(['{"response":null,"sticker":"图","quote":"1"}'])
+    await execute(env, event(group=10, identifier=2, mention=False))
+    assert env.deliveries[-1]["message"][0] == {"type": "reply", "data": {"id": "1"}}
+    before = len(env.deliveries)
+    env.scripts.append(
+        ['{"response":"bad","sticker":"图","quote":"missing"}', '{"response":null}']
+    )
+    await execute(env, event(group=10, identifier=3, mention=False))
+    assert len(env.deliveries) == before
+
+
+async def test_quote_batch(group_agent):
+    env = group_agent
+    await receive(env, event(group=10, mention=False), dispatch=False)
+    await receive(env, event(group=10, identifier=2, reply="1", mention=False))
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert payload["messages"][-1]["quote"] == {"message_id": "1"}
+    stored = env.agent.db.execute(
+        "SELECT body FROM group_messages WHERE id='99:group-10:2'"
+    ).fetchone()[0]
+    assert json.loads(stored)["quote"]["sender_id"] == "1"
+    env.agent.groups.status(batch, "completed")
+    with env.agent.db:
+        env.agent.db.execute("UPDATE group_messages SET created=created-3600")
+    await receive(env, event(group=10, identifier=3, reply="1", mention=False))
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert payload["messages"][0]["quote"]["sender_id"] == "1"
+
+
+async def test_low_retry(group_agent):
+    from openai_codex.errors import JsonRpcError
+
+    env = group_agent
+    env.thread.turn.side_effect = JsonRpcError(-32602, "rejected")
+    await execute(env, event(group=10, mention=False))
+    incoming = event(group=10, identifier=2, mention=False, text="")
+    incoming["message"].append(
+        {"type": "image", "data": {"file": "same", "sub_type": 1}}
+    )
+    await receive(env, incoming)
+    assert env.agent.queue.empty() and not env.agent.group_windows
+    assert env.agent.db.execute(
+        "SELECT status FROM messages WHERE id LIKE '%batch-%'"
+    ).fetchone() == ("failed",)
+    incoming["message_id"] = 3
+    incoming["message"].append({"type": "at", "data": {"qq": "99"}})
+    await receive(env, incoming)
+    assert not env.agent.queue.empty()
+
+
+@pytest.mark.parametrize("quote", [1, "", " ", [], {}, "a" * 129])
+def test_quote_invalid(quote):
+    with pytest.raises(ValueError):
+        parse_reply(
+            json.dumps({"response": "hi", "sticker": "静", "quote": quote}),
+            {"静": None},
+        )
+    with pytest.raises(ValueError):
+        parse_reply('{"response":null,"quote":"1"}', {})
+
+
+async def test_low_during_window(group_agent):
+    env = group_agent
+    await receive(env, event(group=10, mention=False), dispatch=False)
+    entered, release = asyncio.Event(), asyncio.Event()
+    prepare = env.agent.groups.prepare
+
+    async def blocked(message):
+        entered.set()
+        await release.wait()
+        return await prepare(message)
+
+    incoming = event(group=10, identifier=2, mention=False, text="")
+    incoming["message"] = [{"type": "forward", "data": {"id": "x"}}]
+    with patch.object(env.agent.groups, "prepare", side_effect=blocked):
+        env.agent.receive(incoming)
+        await entered.wait()
+        await drain(env)
+        assert env.agent.queue.empty()
+        release.set()
+        await asyncio.gather(*env.agent.receivers.values())
+    await drain(env)
+    batch = env.agent.queue.get_nowait()
+    history = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert [row["message_id"] for row in history["messages"]] == ["1", "2"]

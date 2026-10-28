@@ -46,10 +46,10 @@ def load_stickers():
 def sticker_instructions(stickers):
     return (
         "普通群聊任务的每条 assistant 消息（过程说明和最终回复）必须仅包含一个 JSON 对象，"
-        '格式为 {"response":"文本","sticker":"表情名称"}，不要代码围栏或其他字段。'
+        '格式为 {"response":"文本","sticker":"表情名称"}，可选 quote 为本群可见消息的 message_id 字符串或 null，不要代码围栏或其他字段。'
         "response 必填，只能是文本或 null。有文本必须填写 sticker 配置键。"
         '不回复时使用 {"response":null}；仅发表情时 response 为 null，sticker 为图片键。'
-        "键对应 null 时不发表情。表情先于文本发送。普通图片仍用 qq_image.send_image。"
+        "键对应 null 时不发表情。表情先于文本发送。quote 仅用于文本首段；没有文本时用于表情。沉默不能带非空 quote，不能引用系统消息。普通图片仍用 qq_image.send_image。"
         "不得输出原始 JSON 以外的 assistant 文字。应用发起的内部交接总结改用该轮指定的 summary schema，不发送到 QQ。\n表情配置（值表示是否发送图片）："
         + json.dumps(
             {

@@ -26,6 +26,7 @@ from .images import IMAGE_INSTRUCTIONS
 from .logging import LOG, log_text
 from .profiles import MEMBER_INSTRUCTIONS
 from .stickers import load_stickers, sticker_instructions
+from .transcript import Transcripts
 
 BUILTIN_SKILLS = Path(__file__).with_name("skills")
 
@@ -66,6 +67,7 @@ class Runtime:
         self.stickers = load_stickers()
         self.compactions = {}
         self.usage_ready = {}
+        self.transcripts = Transcripts(settings.state_dir)
 
     @contextlib.contextmanager
     def watch_codex(self):
@@ -99,6 +101,8 @@ class Runtime:
     def observe_codex(self, event):
         payload = event.payload
         thread_id = getattr(payload, "thread_id", None)
+        if event.method == "turn/completed":
+            self.transcripts.completed(thread_id, payload.turn.id)
         if event.method == "item/completed":
             if payload.item.root.type == "contextCompaction":
                 with self.db:
@@ -350,7 +354,7 @@ class Runtime:
             "config": {
                 "sandbox_workspace_write": sandbox_options,
                 "model_reasoning_effort": "medium",
-                "model_auto_compact_token_limit": 200000,
+                "model_auto_compact_token_limit": self.settings.model_auto_compact_token_limit,
                 "model_auto_compact_token_limit_scope": "total",
                 "include_collaboration_mode_instructions": False,
                 "features": {
@@ -535,7 +539,7 @@ def codex_config(settings):
         'approval_policy="on-request"',
         'approvals_reviewer="auto_review"',
         'model_reasoning_effort="medium"',
-        "model_auto_compact_token_limit=200000",
+        f"model_auto_compact_token_limit={settings.model_auto_compact_token_limit}",
         'model_auto_compact_token_limit_scope="total"',
         f'projects.{json.dumps(str(settings.workspace_dir))}.trust_level="trusted"',
         "project_root_markers=[]",

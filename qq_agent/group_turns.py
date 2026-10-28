@@ -16,9 +16,9 @@ def parse_reply(text, stickers, required=False):
     if (
         not isinstance(value, dict)
         or "response" not in value
-        or value.keys() - {"response", "sticker"}
+        or value.keys() - {"response", "sticker", "quote"}
     ):
-        raise ValueError("只允许 response 和 sticker，response 必填")
+        raise ValueError("只允许 response、sticker 和 quote，response 必填")
     response = value["response"]
     if response is not None and not isinstance(response, str):
         raise ValueError("response 必须是字符串或 null")
@@ -30,7 +30,15 @@ def parse_reply(text, stickers, required=False):
     name = value.get("sticker")
     if "sticker" in value and (not isinstance(name, str) or name not in stickers):
         raise ValueError("sticker 必须是配置中的名称字符串")
-    return response, stickers[name] if name is not None else None
+    sticker = stickers[name] if name is not None else None
+    quote = value.get("quote")
+    if quote is not None and (
+        not isinstance(quote, str) or not 1 <= len(quote) <= 128 or not quote.strip()
+    ):
+        raise ValueError("quote 必须是消息 ID 字符串或 null")
+    if quote is not None and not response and sticker is None:
+        raise ValueError("沉默时不能指定 quote")
+    return response, sticker, quote
 
 
 class GroupTurn:
@@ -110,25 +118,40 @@ class GroupTurn:
                 log_text(item.text),
             )
             try:
-                text, sticker = parse_reply(
+                text, sticker, quote = parse_reply(
                     item.text,
                     self.runtime.stickers,
                     self.required
                     and (version is None or version == self.required_version),
                 )
+                if quote is not None and not self.groups.can_quote(
+                    self.message.key, quote
+                ):
+                    raise ValueError(
+                        "quote 必须引用本群可见历史中的消息，不能引用系统消息"
+                    )
             except (ValueError, TypeError, RecursionError) as error:
                 await self.correct(error)
                 return
             self.errors = 0
             self.repair = False
             if sticker is not None:
-                await self.replies.bot.send(self.message, image=sticker, sticker=True)
+                await self.replies.bot.send(
+                    self.message,
+                    image=sticker,
+                    sticker=True,
+                    **({"quote": quote} if quote is not None and not text else {}),
+                )
                 self.context.chat_output = True
                 if not self.visible:
                     self.visible = True
                     await self.notice(True)
             if text:
-                await self.replies.bot.send(self.message, text=text)
+                await self.replies.bot.send(
+                    self.message,
+                    text=text,
+                    **({"quote": quote} if quote is not None else {}),
+                )
                 if version is None or version == self.required_version:
                     self.required = False
                 self.context.chat_output = True
@@ -231,7 +254,7 @@ class GroupTurn:
                 session = await self.owner.prepare_session(message, False)
                 if session is None:
                     return
-                thread_id, folder, inputs, _, renewing = session
+                thread_id, folder, inputs, _ = session
                 self.context = ImageTurn(message, folder)
                 self.owner.contexts[message.key] = self.context
                 self.context.profiles = self.owner.profiles.recall_profiles(message)
@@ -241,8 +264,6 @@ class GroupTurn:
                 )
                 if not thread_id:
                     self.owner.save_session(message, self.thread, folder)
-                if renewing:
-                    await self.owner.compact_idle(message, self.thread)
                 await self.runtime.update_group(
                     self.thread, message, self.owner.profiles
                 )
@@ -279,11 +300,6 @@ class GroupTurn:
                     if first:
                         self.groups.status(message, "submitted")
                         self.submitted.append(message)
-                        with self.owner.db:
-                            self.owner.db.execute(
-                                "UPDATE activity SET thread_gen=? WHERE key=?",
-                                (message.generation, message.key),
-                            )
                     first = False
                     LOG.info(
                         "Group turn started chat=%s thread=%s turn=%s model=%s effort=medium context_tokens=%s",

@@ -71,12 +71,18 @@ class Cleanup:
     def clean_files(self):
         cutoff = time.time() - FILE_RETENTION
         busy = set(self.jobs) | self.resetting | set(self.contexts)
-        for (key,) in self.db.execute("SELECT key FROM group_state").fetchall():
+        for (key,) in self.db.execute(
+            "SELECT key FROM group_state UNION SELECT key FROM system_messages"
+        ).fetchall():
             if key in busy:
                 continue
             with self.db:
                 self.db.execute(
-                    "DELETE FROM group_messages WHERE key=? AND consumed=1 AND created<?",
+                    "DELETE FROM system_messages WHERE key=? AND created<?",
+                    (key, cutoff),
+                )
+                self.db.execute(
+                    "DELETE FROM group_messages WHERE key=? AND (consumed=1 OR (category='low' AND priority=0 AND batch IS NULL)) AND created<?",
                     (key, cutoff),
                 )
                 self.db.execute(

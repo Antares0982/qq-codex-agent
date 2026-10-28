@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -38,6 +39,34 @@ class Message:
     mentioned: bool = False
     batch: str | None = None
     direct: bool = False
+    category: str = "normal"
+    image_keys: dict[str, str] = field(default_factory=dict)
+
+
+def media_key(source, unique=None):
+    value = unique or source
+    match = re.fullmatch(r"(?:.*\.)?([a-fA-F0-9]{32})(?:\.[A-Za-z0-9]+)?", value)
+    return "md5:" + match[1].lower() if match else "file:" + value
+
+
+def image_source(data):
+    file = data.get("file")
+    if file == "marketface":
+        return data.get("file_id") or data.get("url") or file
+    return file
+
+
+def is_command(message):
+    if message.images or message.unsupported:
+        return False
+    if "group_id" in message.target and not message.mentioned:
+        return False
+    return (
+        message.text in {"/new", "/stop", "/status", "/help", "/compact"}
+        or ("group_id" in message.target and message.text == "/new blank")
+        or message.text.split(maxsplit=1)[:1]
+        in (["/model"], ["/profile"], ["/prompt"], ["/group-profile"])
+    )
 
 
 @dataclass
@@ -65,12 +94,16 @@ def parse_parts(segments, group, bot=None):
                     raise ValueError("Invalid message text")
                 parts.append(("text", data["text"]))
             case "image":
-                file = data.get("file")
+                file = image_source(data)
                 if not isinstance(file, str) or not file or len(file) > 4096:
                     raise ValueError("Invalid message image")
                 images.append(file)
                 if group:
-                    parts.append(("image", file))
+                    sticker = (
+                        data.get("sub_type") in (1, "1")
+                        or data.get("file") == "marketface"
+                    )
+                    parts.append(("sticker" if sticker else "image", file))
             case "reply":
                 identifier = data.get("id")
                 if (
@@ -151,6 +184,23 @@ def parse_message(event, settings):
             if type(event.get("time")) in (int, float) and event["time"] > 0
             else "received",
             mentioned=("at", bot) in parts,
+            category="normal"
+            if any(
+                kind == "image" or (kind == "text" and value.strip())
+                for kind, value in parts
+            )
+            else "low",
+            image_keys={
+                image_source(segment["data"]): media_key(
+                    image_source(segment["data"]),
+                    segment["data"].get("file_unique")
+                    if isinstance(segment["data"].get("file_unique"), str)
+                    and 0 < len(segment["data"]["file_unique"]) <= 4096
+                    else None,
+                )
+                for segment in segments
+                if segment.get("type") == "image"
+            },
         )
     except (ValueError, TypeError, KeyError, AttributeError):
         return None

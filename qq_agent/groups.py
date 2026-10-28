@@ -1,19 +1,22 @@
+import hashlib
 import json
 import time
 import uuid
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import datetime
 
 from openai_codex import TextInput
 
 from image_assets import save_image
 from .logging import LOG, log_text
-from .messages import Message, display_name, parse_parts
+from .messages import Message, is_command, media_key, parse_message
 
 
 BACKGROUND_SECONDS = 300
 BACKGROUND_COUNT = 40
 BACKGROUND_CHARS = 16000
+HISTORY_SECONDS = 14 * 86400
+SYSTEM_PLACEHOLDER = "<redacted system message>"
 
 
 class Groups:
@@ -26,15 +29,20 @@ class Groups:
     def record_body(self, message):
         content = []
         for index, (kind, value) in enumerate(message.parts):
-            if kind == "image":
+            if kind in {"image", "sticker"}:
+                identity = message.image_keys.get(value, media_key(value))
+                if value == "marketface" and identity == "file:marketface":
+                    identity = f"{message.identifier}:{index}"
                 image_id = uuid.uuid5(
-                    uuid.NAMESPACE_URL, f"{message.identifier}:{index}"
+                    uuid.NAMESPACE_URL, f"{message.key}:{identity}"
                 ).hex
                 self.db.execute(
-                    "INSERT OR IGNORE INTO received_images (id,key,source,created) VALUES (?,?,?,?)",
+                    "INSERT INTO received_images (id,key,source,created) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,created=excluded.created",
                     (image_id, message.key, value, time.time()),
                 )
-                content.append({"image_id": image_id})
+                content.append(
+                    {"sticker_id" if kind == "sticker" else "image_id": image_id}
+                )
             elif kind == "at":
                 content.append({"at": value})
             else:
@@ -42,7 +50,9 @@ class Groups:
         timestamp = message.timestamp
         try:
             timestamp = (
-                datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+                datetime.fromtimestamp(timestamp)
+                .astimezone()
+                .isoformat(timespec="seconds")
                 if timestamp
                 else None
             )
@@ -65,8 +75,38 @@ class Groups:
             }
         return body
 
-    def record(self, message, command=False):
+    def system(self, message):
+        with self.db:
+            inserted = self.db.execute(
+                "INSERT OR IGNORE INTO messages VALUES (?,'received')",
+                (message.identifier,),
+            ).rowcount
+            self.db.execute(
+                "INSERT OR IGNORE INTO system_messages VALUES (?,?,?,?,?,?)",
+                (
+                    message.identifier,
+                    message.key,
+                    message.sender_id == message.bot_id,
+                    self.db.execute(
+                        "SELECT coalesce(max(sequence),0) FROM group_messages WHERE key=?",
+                        (message.key,),
+                    ).fetchone()[0],
+                    time.time(),
+                    message.timestamp if message.time_source == "event" else None,
+                ),
+            )
+        return bool(inserted)
+
+    def record(self, message, command=False, *, sent=False):
         own = message.sender_id == message.bot_id
+        if command or (
+            own
+            and not sent
+            and not self.db.execute(
+                "SELECT 1 FROM group_messages WHERE id=?", (message.identifier,)
+            ).fetchone()
+        ):
+            return self.system(message)
         with self.db:
             old = self.db.execute(
                 "SELECT body FROM group_messages WHERE id=?", (message.identifier,)
@@ -77,7 +117,9 @@ class Groups:
                     body.update(
                         {
                             key: value
-                            for key, value in self.record_body(message).items()
+                            for key, value in self.record_body(
+                                replace(message, parts=[])
+                            ).items()
                             if key in {"time", "time_source"}
                         }
                     )
@@ -90,52 +132,41 @@ class Groups:
                 "INSERT OR IGNORE INTO messages VALUES (?,'received')",
                 (message.identifier,),
             ).rowcount
-            if not inserted:
+            recovered = (
+                sent
+                and self.db.execute(
+                    "DELETE FROM system_messages WHERE id=?", (message.identifier,)
+                ).rowcount
+            )
+            if not inserted and not recovered:
                 return False
             body = self.record_body(message)
             now = time.time()
             self.db.execute(
                 "INSERT OR IGNORE INTO group_state (key) VALUES (?)", (message.key,)
             )
-            last, segment = self.db.execute(
-                "SELECT last_arrival,segment FROM group_state WHERE key=?",
-                (message.key,),
-            ).fetchone()
-            readable = self.readable(message) or message.reply is not None
-            if not own and not command and readable:
-                config = self.settings.groups[str(message.target["group_id"])]
-                if not last or now - last > config.conversation_gap_seconds:
-                    segment = now
-                    self.db.execute(
-                        "UPDATE group_state SET segment=?,silences=0,backoff_until=0 WHERE key=?",
-                        (segment, message.key),
-                    )
-                self.db.execute(
-                    "UPDATE group_state SET last_arrival=? WHERE key=?",
-                    (now, message.key),
-                )
+            segment = self.db.execute(
+                "SELECT segment FROM group_state WHERE key=?", (message.key,)
+            ).fetchone()[0]
             self.db.execute(
-                "INSERT INTO group_messages (id,key,body,own,created,consumed,message,ready,priority,segment) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO group_messages (id,key,body,own,created,consumed,message,ready,priority,segment,category) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     message.identifier,
                     message.key,
                     json.dumps(body, ensure_ascii=False),
                     own,
                     now,
-                    own or command,
+                    False,
                     json.dumps(asdict(message)),
-                    -1 if own or command else 0,
-                    int(
-                        not own
-                        and not command
-                        and (message.mentioned or message.reply is not None)
-                    ),
+                    -1 if own else 0,
+                    int(not own and (message.mentioned or message.reply is not None)),
                     segment,
+                    "low" if own else message.category,
                 ),
             )
             self.db.execute(
                 "UPDATE group_state SET total=total+1, own=own+?, count=count+? WHERE key=?",
-                (own, not own and not command, message.key),
+                (own, not own and message.category == "normal", message.key),
             )
         return True
 
@@ -159,38 +190,55 @@ class Groups:
         quoted_bot = False
         if message.reply:
             identifier = f"{message.bot_id}:{message.key}:{message.reply}"
+            system = self.db.execute(
+                "SELECT own FROM system_messages WHERE id=? AND key=?",
+                (identifier, message.key),
+            ).fetchone()
             row = self.db.execute(
                 "SELECT body FROM group_messages WHERE id=? AND key=?",
                 (identifier, message.key),
             ).fetchone()
             try:
-                if row:
+                if system:
+                    quote = {
+                        "message_id": message.reply,
+                        "content": [SYSTEM_PLACEHOLDER],
+                    }
+                    quoted_bot = bool(system[0])
+                elif row:
                     quote = json.loads(row[0])
                     quote.pop("quote", None)
+                    quoted_bot = quote["sender_id"] == message.bot_id
                 else:
                     result = await self.bot.reply_record(message.reply, message.target)
-                    parts, images, _, unsupported = parse_parts(result["message"], True)
-                    sender = result["sender"]
-                    timestamp = result.get("time")
-                    quoted = replace(
-                        message,
-                        identifier=identifier,
-                        sender_id=str(sender["user_id"]),
-                        sender_name=display_name(sender, True)
-                        or str(sender["user_id"]),
-                        parts=parts,
-                        images=images,
-                        unsupported=unsupported,
-                        timestamp=timestamp
-                        if type(timestamp) in (int, float) and timestamp > 0
-                        else 0,
-                        time_source="event",
-                        reply=None,
+                    quoted = parse_message(
+                        {
+                            **result,
+                            "post_type": "message",
+                            "self_id": message.bot_id,
+                            "user_id": result["sender"]["user_id"],
+                            "message_id": message.reply,
+                            **message.target,
+                        },
+                        self.settings,
                     )
-                    with self.db:
-                        quote = self.record_body(quoted)
+                    if quoted is None:
+                        raise ValueError("Invalid quoted message")
+                    quoted_bot = quoted.sender_id == message.bot_id
+                    if is_command(quoted) or quoted_bot:
+                        self.system(quoted)
+                        quote = {
+                            "message_id": message.reply,
+                            "content": [SYSTEM_PLACEHOLDER],
+                        }
+                    else:
+                        if quoted.time_source != "event":
+                            quoted.timestamp = 0
+                            quoted.time_source = "unknown"
+                        quoted.reply = None
+                        with self.db:
+                            quote = self.record_body(quoted)
                 body["quote"] = await self.resolve_body(quote, message.target)
-                quoted_bot = quote["sender_id"] == message.bot_id
             except Exception as error:
                 LOG.warning(
                     "Group quote unavailable chat=%s error=%s",
@@ -210,28 +258,82 @@ class Groups:
             )
         return quoted_bot
 
-    @staticmethod
-    def readable(message):
-        return any(
-            kind in {"at", "image"} or (kind == "text" and value.strip())
-            for kind, value in message.parts
-        )
-
     def observe(self, message, quoted_bot):
         message.direct = message.mentioned or quoted_bot
-        readable = self.readable(message) or quoted_bot
+        readable = message.category == "normal" or message.direct
         with self.db:
+            if readable:
+                created = self.db.execute(
+                    "SELECT created FROM group_messages WHERE id=?",
+                    (message.identifier,),
+                ).fetchone()[0]
+                last, segment = self.db.execute(
+                    "SELECT last_arrival,segment FROM group_state WHERE key=?",
+                    (message.key,),
+                ).fetchone()
+                if (
+                    not last
+                    or created - last
+                    > self.settings.groups[message.key[6:]].conversation_gap_seconds
+                ):
+                    segment = created
+                    self.db.execute(
+                        "UPDATE group_state SET segment=?,silences=0,backoff_until=0 WHERE key=?",
+                        (segment, message.key),
+                    )
+                self.db.execute(
+                    "UPDATE group_state SET last_arrival=? WHERE key=?",
+                    (created, message.key),
+                )
+                self.db.execute(
+                    "UPDATE group_messages SET segment=? WHERE id=?",
+                    (segment, message.identifier),
+                )
             self.db.execute(
-                "UPDATE group_messages SET ready=?,priority=?,message=?,consumed=CASE WHEN ? THEN consumed ELSE 1 END WHERE id=?",
+                "UPDATE group_messages SET ready=?,priority=?,message=? WHERE id=?",
                 (
                     1 if readable else -1,
                     int(message.direct),
                     json.dumps(asdict(message)),
-                    readable,
                     message.identifier,
                 ),
             )
         return readable
+
+    def can_quote(self, key, identifier):
+        if self.db.execute(
+            "SELECT 1 FROM system_messages WHERE key=? AND substr(id,instr(id,':')+1)=?",
+            (key, f"{key}:{identifier}"),
+        ).fetchone():
+            return False
+        return (
+            self.db.execute(
+                "SELECT 1 FROM group_messages WHERE key=? AND (json_extract(body,'$.message_id')=? OR (json_extract(body,'$.quote.message_id')=? AND json_extract(body,'$.quote.sender_id') IS NOT NULL AND coalesce(json_extract(body,'$.quote.content[0]'),'')!=?)) LIMIT 1",
+                (key, identifier, identifier, SYSTEM_PLACEHOLDER),
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def format_history(payload):
+        bodies = [*payload["background"], *payload["messages"]]
+        identifiers = {body["message_id"] for body in bodies}
+        for body in bodies:
+            quote = body.get("quote")
+            for item in (body, quote):
+                if item and item.get("time"):
+                    item["time"] = (
+                        datetime.fromisoformat(item["time"])
+                        .astimezone()
+                        .isoformat(timespec="seconds")
+                    )
+            if (
+                quote
+                and quote["message_id"] in identifiers
+                and quote.get("content") != [SYSTEM_PLACEHOLDER]
+            ):
+                body["quote"] = {"message_id": quote["message_id"]}
+        return payload
 
     def unprepared(self, key):
         return [
@@ -249,15 +351,19 @@ class Groups:
             expired_batches = [
                 row[0]
                 for row in self.db.execute(
-                    "SELECT b.id FROM group_batches b WHERE b.key=? AND b.status='pending' AND b.priority=0 AND EXISTS (SELECT 1 FROM group_messages m WHERE m.batch=b.id AND (m.created<=? OR m.segment<(SELECT segment FROM group_state WHERE key=?)))",
+                    "SELECT b.id FROM group_batches b WHERE b.key=? AND b.status='pending' AND b.priority=0 AND EXISTS (SELECT 1 FROM group_messages m WHERE m.batch=b.id AND ((m.category='normal' AND m.created<=?) OR (m.category='normal' AND m.segment<(SELECT segment FROM group_state WHERE key=?))))",
                     (key, cutoff, key),
                 )
             ]
             rows = self.db.execute(
-                "SELECT id FROM group_messages WHERE key=? AND own=0 AND consumed=0 AND priority=0 AND batch IS NULL AND (created<=? OR segment<(SELECT segment FROM group_state WHERE key=?))",
+                "SELECT id FROM group_messages WHERE key=? AND own=0 AND category='normal' AND consumed=0 AND priority=0 AND batch IS NULL AND (created<=? OR segment<(SELECT segment FROM group_state WHERE key=?))",
                 (key, cutoff, key),
             ).fetchall()
             for batch in expired_batches:
+                self.db.execute(
+                    "UPDATE group_messages SET batch=NULL WHERE batch=? AND category='low' AND priority=0",
+                    (batch,),
+                )
                 rows.extend(
                     self.db.execute(
                         "SELECT id FROM group_messages WHERE batch=?", (batch,)
@@ -362,7 +468,7 @@ class Groups:
         ).fetchone()
         generation = (row[1] + int(now - row[0] > 7200)) if row else 0
         rows = self.db.execute(
-            "SELECT id,body,message,priority,segment FROM group_messages WHERE key=? AND own=0 AND batch IS NULL AND consumed=0 AND ready=1 AND (?=0 OR priority=1) AND sequence <= (SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence",
+            "SELECT id,body,message,priority,segment,sequence FROM group_messages WHERE key=? AND own=0 AND batch IS NULL AND consumed=0 AND ready=1 AND (?=0 OR priority=1) AND sequence <= (SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence",
             (message.key, direct_only, message.identifier),
         ).fetchall()
         if not rows:
@@ -377,6 +483,11 @@ class Groups:
             direct=direct,
         )
         segment = rows[-1][4]
+        low = self.db.execute(
+            "SELECT id,body,message,priority,segment,sequence FROM group_messages WHERE key=? AND category='low' AND consumed=0 AND batch IS NULL AND ready=-1 AND created>=? ORDER BY sequence",
+            (message.key, now - HISTORY_SECONDS),
+        ).fetchall()
+        rows = sorted([*rows, *low], key=lambda row: row[5])
         identifiers = {row[0] for row in rows}
         background, size = [], 0
         for identifier, body in self.db.execute(
@@ -399,10 +510,12 @@ class Groups:
             background.append(json.loads(body))
             size += len(body)
         payload = json.dumps(
-            {
-                "background": list(reversed(background)),
-                "messages": [json.loads(row[1]) for row in rows],
-            },
+            self.format_history(
+                {
+                    "background": list(reversed(background)),
+                    "messages": [json.loads(row[1]) for row in rows],
+                }
+            ),
             ensure_ascii=False,
         )
         batch.identifier = f"{message.bot_id}:{message.key}:batch-{batch.batch}"
@@ -428,7 +541,7 @@ class Groups:
                 [(batch.batch, identifier) for identifier in identifiers],
             )
             self.db.execute(
-                "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=group_state.key AND own=0 AND consumed=0 AND batch IS NULL),last_request=? WHERE key=?",
+                "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=group_state.key AND own=0 AND ready=1 AND consumed=0 AND batch IS NULL),last_request=? WHERE key=?",
                 (time.time(), batch.key),
             )
             self.db.execute(
@@ -492,7 +605,8 @@ class Groups:
 
     def cancel(self, key, identifier=None):
         cutoff = self.db.execute(
-            "SELECT sequence FROM group_messages WHERE id=?", (identifier,)
+            "SELECT cutoff FROM system_messages WHERE id=? UNION ALL SELECT sequence FROM group_messages WHERE id=? LIMIT 1",
+            (identifier, identifier),
         ).fetchone()
         sequence = (
             cutoff[0]
@@ -516,27 +630,71 @@ class Groups:
                 (key, key, sequence),
             )
             self.db.execute(
-                "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=group_state.key AND own=0 AND consumed=0 AND batch IS NULL),silences=0,backoff_until=0,last_request=0 WHERE key=?",
+                "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=group_state.key AND own=0 AND ready=1 AND consumed=0 AND batch IS NULL),silences=0,backoff_until=0,last_request=0 WHERE key=?",
                 (key,),
             )
 
-    def sent(self, message, receipt, parts, image=None):
+    def sent(self, message, receipt, parts, image=None, *, system=False, quote=None):
         if "group_id" not in message.target:
             return
         identifier = receipt.get("message_id") if isinstance(receipt, dict) else None
         if type(identifier) not in (int, str) or not str(identifier):
             raise RuntimeError("Missing QQ message receipt")
+        echoed = self.db.execute(
+            "SELECT event_time FROM system_messages WHERE id=?",
+            (f"{message.bot_id}:{message.key}:{identifier}",),
+        ).fetchone()
         sent = replace(
             message,
             identifier=f"{message.bot_id}:{message.key}:{identifier}",
             sender_id=message.bot_id,
             sender_name=message.bot_id,
             parts=parts,
-            timestamp=time.time(),
-            time_source="sent",
-            reply=None,
+            timestamp=echoed[0] if echoed and echoed[0] else time.time(),
+            time_source="event" if echoed and echoed[0] else "sent",
+            reply=quote,
+            text="",
+            images=[],
+            mentioned=False,
+            direct=False,
+            unsupported=False,
+            category="low",
+            image_keys={
+                "outgoing": "md5:"
+                + hashlib.md5(image, usedforsecurity=False).hexdigest()
+            }
+            if image is not None
+            else {},
         )
-        self.record(sent)
+        if system:
+            self.system(sent)
+            return
+        self.record(sent, sent=True)
+        if quote:
+            row = self.db.execute(
+                "SELECT body FROM group_messages WHERE key=? AND json_extract(body,'$.message_id')=?",
+                (message.key, quote),
+            ).fetchone()
+            quoted = json.loads(row[0]) if row else None
+            if quoted is None:
+                row = self.db.execute(
+                    "SELECT json_extract(body,'$.quote') FROM group_messages WHERE key=? AND json_extract(body,'$.quote.message_id')=? AND json_extract(body,'$.quote.sender_id') IS NOT NULL LIMIT 1",
+                    (message.key, quote),
+                ).fetchone()
+                quoted = json.loads(row[0]) if row else None
+            if quoted:
+                body = json.loads(
+                    self.db.execute(
+                        "SELECT body FROM group_messages WHERE id=?", (sent.identifier,)
+                    ).fetchone()[0]
+                )
+                body["quote"] = quoted
+                body["quote"].pop("quote", None)
+                with self.db:
+                    self.db.execute(
+                        "UPDATE group_messages SET body=? WHERE id=?",
+                        (json.dumps(body, ensure_ascii=False), sent.identifier),
+                    )
         if image is not None:
             row = self.db.execute(
                 "SELECT folder FROM sessions WHERE key=?", (message.key,)
@@ -544,8 +702,20 @@ class Groups:
             folder_name = row[0] if row else uuid.uuid4().hex
             folder = self.settings.workspace_dir / folder_name
             folder.mkdir(mode=0o700, exist_ok=True)
-            path = save_image(folder, image)
-            image_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{sent.identifier}:0").hex
+            image_id = uuid.uuid5(
+                uuid.NAMESPACE_URL, f"{sent.key}:{sent.image_keys['outgoing']}"
+            ).hex
+            cached = self.db.execute(
+                "SELECT folder,path FROM received_images WHERE id=?", (image_id,)
+            ).fetchone()
+            path = (
+                cached[1]
+                if cached
+                and cached[0] == folder_name
+                and cached[1]
+                and (folder / cached[1]).is_file()
+                else save_image(folder, image)
+            )
             with self.db:
                 self.db.execute(
                     "INSERT OR IGNORE INTO sessions (key,folder) VALUES (?,?)",

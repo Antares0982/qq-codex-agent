@@ -41,6 +41,7 @@ def open_database(settings):
         CREATE INDEX IF NOT EXISTS group_pending ON group_messages(key, consumed, batch);
         CREATE TABLE IF NOT EXISTS group_batches (id TEXT PRIMARY KEY, key TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL, created REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS received_images (id TEXT PRIMARY KEY, key TEXT NOT NULL, source TEXT, folder TEXT, path TEXT, created REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS system_messages (id TEXT PRIMARY KEY, key TEXT NOT NULL, own INTEGER NOT NULL, cutoff INTEGER NOT NULL, created REAL NOT NULL, event_time REAL);
         UPDATE group_batches SET status='unknown' WHERE status='submitting';
         UPDATE group_batches SET status='interrupted' WHERE status='submitted';
         UPDATE group_messages SET consumed=1 WHERE batch IN (SELECT id FROM group_batches WHERE status IN ('unknown','interrupted'));
@@ -132,4 +133,13 @@ def open_database(settings):
                 db.execute("UPDATE sessions SET renew=1 WHERE key LIKE 'group-%'")
                 db.execute("DELETE FROM group_handoffs")
             db.execute("PRAGMA user_version=3")
+    if "category" not in {
+        row[1] for row in db.execute("PRAGMA table_info(group_messages)")
+    }:
+        with db:
+            db.execute(
+                "ALTER TABLE group_messages ADD COLUMN category TEXT NOT NULL DEFAULT 'normal'"
+            )
+            db.execute("UPDATE group_messages SET category='low' WHERE own=1")
+            db.execute("PRAGMA user_version=4")
     return db

@@ -1009,7 +1009,12 @@ class TestAgent:
         assert settings.groups == {}
         assert settings.group_prompt_allow_members is False
         assert settings.agent_admin_qq is None
+        assert settings.model_auto_compact_token_limit == 258000
         original = path.read_text()
+        for value in ("0", "-1", "true", "1.5", '"258000"', "[]"):
+            path.write_text(original + f"model_auto_compact_token_limit={value}\n")
+            with pytest.raises(ValueError, match="model_auto_compact_token_limit"):
+                Settings.load(path)
         for value in ('"00123"', "123"):
             path.write_text(original + f"agent_admin_qq={value}\n")
             assert Settings.load(path).agent_admin_qq == "123"
@@ -1099,7 +1104,7 @@ class TestAgent:
             with pytest.raises(ValueError):
                 Settings.load(path)
 
-    def test_full_config(self):
+    async def test_full_config(self):
         path = self.root / "config.toml"
         original = (
             'private_users=["1"]\nagent_admin_qq="00123"\nmodel="chosen-model"\n'
@@ -1108,6 +1113,7 @@ class TestAgent:
             'auth_socket="/auth/socket"\nagents_file="/common.md"\n'
             'private_agents_file="/private.md"\ngroup_agents_file="/group.md"\n'
             "group_prompt_allow_members=true\nqueue_limit=4\ntask_timeout=900\n"
+            "model_auto_compact_token_limit=150000\n"
             '[groups."10"]\nobservation_interval_seconds=60\n'
         )
         path.write_text(original)
@@ -1120,6 +1126,16 @@ class TestAgent:
         assert settings.resources_dir == Path("/resources")
         assert settings.group_prompt_allow_members is True
         assert (settings.queue_limit, settings.task_timeout) == (4, 900)
+        assert settings.model_auto_compact_token_limit == 150000
+        assert (
+            "model_auto_compact_token_limit=150000"
+            in codex_config(settings).config_overrides
+        )
+        self.agent.runtime.settings = settings
+        options, _ = await self.agent.runtime.thread_options(
+            NS(key="group-10", target={"group_id": 10}), self.root
+        )
+        assert options["config"]["model_auto_compact_token_limit"] == 150000
         for line in original.splitlines():
             if line.split("=", 1)[0] in {
                 "napcat_url",
@@ -1780,31 +1796,6 @@ class TestAgent:
         assert "引用结束" in inputs[2].text
 
     @pytest.mark.parametrize("group", (None,))
-    async def test_idle_notice(self, group):
-        self.setup_turn([turn_done()])
-        message = parse_message(event(group=group), self.settings)
-        with self.agent.db:
-            self.agent.db.execute(
-                "INSERT INTO sessions VALUES (?, 'test-thread', 'folder', 0)",
-                (message.key,),
-            )
-        self.store_usage(110000)
-
-        async def compact(thread):
-            assert self.bot.send.call_args.kwargs == {"text": "正在压缩上下文……"}
-            return False
-
-        self.agent.runtime.compact = AsyncMock(side_effect=compact)
-        message.generation = 1
-        await self.execute(message)
-        self.agent.runtime.compact.assert_awaited_once()
-        self.codex.thread_start.assert_not_awaited()
-        texts = [call.kwargs["text"] for call in self.bot.send.call_args_list]
-        assert texts == ["正在压缩上下文……"] + (
-            ["开始处理……"] if group is None else []
-        ) + ["任务完成。"]
-
-    @pytest.mark.parametrize("group", (None,))
     async def test_all_texts(self, group):
         image = ImageGenerationThreadItem(
             id="image1",
@@ -2145,46 +2136,48 @@ class TestAgent:
         ).fetchone() == ("history", 0)
 
     @pytest.mark.parametrize(
-        "tokens, gap, expected",
-        ((100000, 7201, False), (100001, 7200, False), (100001, 7201, True)),
+        "tokens, gap",
+        ((100000, 7201), (100001, 7200), (100001, 7201)),
     )
-    async def test_compact_boundaries(self, tokens, gap, expected):
+    @pytest.mark.parametrize("group", (None, 10))
+    async def test_idle_resume(self, tokens, gap, group):
         thread, _ = self.setup_turn([turn_done()])
 
-        async def compact():
-            self.agent.runtime.observe_codex(self.compact_event("turn/started"))
-            self.agent.runtime.observe_codex(self.compact_event("turn/completed"))
-
-        thread.compact = AsyncMock(side_effect=compact)
+        thread.compact = AsyncMock()
+        key = "group-10" if group else "private-1"
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT INTO sessions VALUES ('private-1', 'test-thread', 'folder', 0)"
+                "INSERT INTO sessions VALUES (?, 'test-thread', 'folder', 0)", (key,)
             )
         with self.agent.db:
             self.agent.db.execute(
-                "INSERT OR REPLACE INTO activity VALUES ('private-1', 1000, 0, 0)"
+                "INSERT OR REPLACE INTO activity VALUES (?, 1000, 0, 0)", (key,)
             )
             self.agent.db.execute("DELETE FROM messages")
         self.store_usage(tokens)
         thread.compact.reset_mock()
         with patch.object(time, "time", return_value=1000 + gap):
-            self.agent.receive(event())
+            self.agent.receive(event(group=group))
+        await self.drain()
         await self.execute(self.agent.queue.get_nowait())
-        assert thread.compact.await_count == int(expected)
-        assert sum(
-            call.kwargs.get("text") == "正在压缩上下文……"
-            for call in self.bot.send.call_args_list
-        ) == int(expected)
+        thread.compact.assert_not_awaited()
+        assert (
+            sum(
+                call.kwargs.get("text") == "正在压缩上下文……"
+                for call in self.bot.send.call_args_list
+            )
+            == 0
+        )
         self.codex.thread_start.assert_not_awaited()
         self.read_history.assert_not_awaited()
         assert (
             self.codex.thread_resume.call_args.kwargs["config"][
                 "model_auto_compact_token_limit"
             ]
-            == 200000
+            == 258000
         )
         config = codex_config(self.settings)
-        assert "model_auto_compact_token_limit=200000" in config.config_overrides
+        assert "model_auto_compact_token_limit=258000" in config.config_overrides
         assert 'model_auto_compact_token_limit_scope="total"' in config.config_overrides
 
     async def test_compact_queue(self):
@@ -2202,7 +2195,7 @@ class TestAgent:
             )
             self.agent.db.execute("INSERT INTO activity VALUES ('private-1', 0, 0, 0)")
         self.store_usage(110000)
-        self.agent.receive(event())
+        self.agent.receive(event(text="/compact"))
         worker = asyncio.create_task(self.agent.work())
         try:
             await asyncio.wait_for(entered.wait(), 2)
@@ -2224,7 +2217,7 @@ class TestAgent:
                     break
                 await asyncio.sleep(0.01)
             assert not self.agent.jobs
-            assert thread.turn.await_count == 2
+            assert thread.turn.await_count == 1
             thread.compact.assert_awaited_once()
         finally:
             worker.cancel()
@@ -2303,7 +2296,10 @@ class TestAgent:
             )
 
         async def compact():
-            assert self.bot.send.call_args.kwargs == {"text": "正在压缩上下文……"}
+            assert self.bot.send.call_args.kwargs == {
+                "text": "正在压缩上下文……",
+                **({"system": True} if group else {}),
+            }
             self.agent.runtime.observe_codex(self.compact_event("turn/started"))
             self.store_usage(20000)
             self.agent.runtime.observe_codex(self.compact_event("turn/completed"))
@@ -2705,7 +2701,7 @@ class TestAgent:
             )
             turn.interrupt.assert_awaited_once()
             assert [call.kwargs for call in self.bot.send.call_args_list] == [
-                {"text": "已停止本会话任务并清空队列。"}
+                {"text": "已停止本会话任务并清空队列。", "system": True}
             ]
         finally:
             worker.cancel()

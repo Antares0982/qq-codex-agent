@@ -237,3 +237,5 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 RPi 的 `qq-codex-allowlist.age` 实为完整应用 TOML。使用 Nix 仓库的 agenix 编辑流程，只迁移群节奏字段，验证其他配置语义一致；明文不得写入 Git、Nix store 或日志。保留接收者、服务权限及挂载路径。先发布应用、更新 RPi 应用 source input，再将新程序和新密文配置同代部署。配置检查不解密，因此还须在受限临时环境中用新 Settings 解析明文，只输出成功／失败。
 
 回滚需停服并同时恢复旧程序、对应旧配置及迁移前数据库；不能只回滚密文或二进制。Pi 系统只在 Pi 构建和切换，本机只做配置评估与本机架构应用包构建。
+
+群消息分类升级通过 SQLite 增量增加 category 及系统消息元数据。保留旧 thread、历史内容、图片 ID 和冻结批次，不回写或清空已经发给模型的旧上下文；新消息才使用系统过滤、稳定媒体 ID 和 sticker_id。

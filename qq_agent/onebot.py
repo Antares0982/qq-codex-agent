@@ -75,7 +75,9 @@ class OneBot:
         finally:
             self.pending.pop(echo, None)
 
-    async def send(self, message, text=None, image=None, *, sticker=False):
+    async def send(
+        self, message, text=None, image=None, *, sticker=False, system=False, quote=None
+    ):
         receipts = []
         if image is not None:
             segments = [
@@ -87,19 +89,33 @@ class OneBot:
                     },
                 }
             ]
+            if quote is not None and not text:
+                segments.insert(0, {"type": "reply", "data": {"id": quote}})
             receipt = await self.call(
                 "send_msg", {**message.target, "message": segments}
             )
             receipts.append(receipt)
             if self.on_sent:
-                self.on_sent(message, receipt, [("image", "outgoing")], image)
+                self.on_sent(
+                    message,
+                    receipt,
+                    [("sticker" if sticker else "image", "outgoing")],
+                    image,
+                    system=system,
+                    quote=quote if not text else None,
+                )
         if text:
             for offset in range(0, len(text), 1500):
                 receipt = await self.call(
                     "send_msg",
                     {
                         **message.target,
-                        "message": [
+                        "message": (
+                            [{"type": "reply", "data": {"id": quote}}]
+                            if quote is not None and offset == 0
+                            else []
+                        )
+                        + [
                             {
                                 "type": "text",
                                 "data": {"text": text[offset : offset + 1500]},
@@ -110,7 +126,11 @@ class OneBot:
                 receipts.append(receipt)
                 if self.on_sent:
                     self.on_sent(
-                        message, receipt, [("text", text[offset : offset + 1500])]
+                        message,
+                        receipt,
+                        [("text", text[offset : offset + 1500])],
+                        system=system,
+                        quote=quote if offset == 0 else None,
                     )
         return receipts
 

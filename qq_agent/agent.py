@@ -9,7 +9,7 @@ from .commands import Commands
 from .inputs import Inputs
 from .groups import Groups
 from .logging import LOG, log_text
-from .messages import parse_message
+from .messages import is_command, parse_message
 from .replies import Replies
 from .runtime import Runtime
 from .storage import open_database
@@ -179,17 +179,7 @@ class Agent:
         self.mark(message, "queued")
 
     def is_command(self, message):
-        if message.images or message.unsupported:
-            return False
-        if "group_id" in message.target and not message.mentioned:
-            return False
-        command = message.text
-        return (
-            command in {"/new", "/stop", "/status", "/help", "/compact"}
-            or ("group_id" in message.target and command == "/new blank")
-            or command.split(maxsplit=1)[:1]
-            in (["/model"], ["/profile"], ["/prompt"], ["/group-profile"])
-        )
+        return is_command(message)
 
     def start_control(self, message):
         if len(self.controls) < 8:
@@ -198,11 +188,13 @@ class Agent:
             task.add_done_callback(self.controls.discard)
 
     async def receive_group(self, key):
-        self.groups.retry(key)
         queued = {message.identifier for message in self.incoming[key]}
+        recovered = set()
         for message in reversed(self.groups.unprepared(key)):
             if message.identifier not in queued:
                 self.incoming[key].appendleft(message)
+                recovered.add(message.identifier)
+        observed = False
         try:
             while self.incoming[key]:
                 message = self.incoming[key].popleft()
@@ -214,7 +206,12 @@ class Agent:
                     continue
                 try:
                     quoted_bot = await self.groups.prepare(message)
-                    if self.groups.observe(message, quoted_bot):
+                    if (
+                        self.groups.observe(message, quoted_bot)
+                        and message.identifier not in recovered
+                    ):
+                        observed = True
+                        self.groups.retry(key)
                         self.observe_group(message)
                 except Exception as error:
                     LOG.error(
@@ -223,7 +220,8 @@ class Agent:
         finally:
             self.receivers.pop(key, None)
             self.incoming.pop(key, None)
-            self.flush_group(key)
+            if observed or key in self.group_windows:
+                self.flush_group(key)
 
     def observe_group(self, message):
         row, previous = self.groups.timing(message)

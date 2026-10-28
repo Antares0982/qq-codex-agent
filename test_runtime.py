@@ -251,11 +251,12 @@ async def test_runtime_prompts(tmp_path, mode):
         tmp_path / "AGENTS.md",
         agent_admin_qq="123456789",
         group_agents_file=tmp_path / "group.md",
+        model_auto_compact_token_limit=210000,
     )
     group_template = tmp_path / "group.md"
     group_template.write_text("GROUP_TEMPLATE_ALPHA")
     db = open_database(settings)
-    home = tmp_path / "codex"
+    home = settings.state_dir / "codex"
     home.mkdir()
     workspace = settings.workspace_dir
     skill = workspace / ".agents/skills/probe/SKILL.md"
@@ -339,6 +340,7 @@ async def test_runtime_prompts(tmp_path, mode):
                     settings.group_agents_file = group_template
                     group_template.write_text("GROUP_TEMPLATE_BETA")
                 if index == 2:
+                    await runtime.transcripts.close()
                     await codex.close()
                     db.close()
                     db = open_database(settings)
@@ -423,6 +425,27 @@ async def test_runtime_prompts(tmp_path, mode):
                             assert event.payload.turn.status == TurnStatus.completed
                             completed = True
                 assert completed
+                await asyncio.sleep(0)
+                await runtime.transcripts.close()
+                saved = (settings.state_dir / "latest-transcript.md").read_text()
+                assert turn.id in saved and "请求 token 统计" in saved
+                usage = json.loads(
+                    saved.split("## 请求 token 统计", 1)[1]
+                    .split("```json\n", 1)[1]
+                    .split("\n```", 1)[0]
+                )
+                assert usage[-1]["usage"]["input_tokens"] == (
+                    250000 if mode == "pre_turn" and index == 0 else 1
+                )
+                assert len(usage) == (
+                    3
+                    if mode == "mid_turn" and index == 1
+                    else 2
+                    if mode == "pre_turn" and index == 1
+                    else 1
+                )
+                if mode in {"plain", "upgrade"} and index:
+                    assert usage[-1]["input_tokens_delta"] == 0
                 if index != 0:
                     await runtime.release_thread(thread.id)
             assert bool(compactions) == (mode not in {"plain", "upgrade"})

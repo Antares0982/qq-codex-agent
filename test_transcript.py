@@ -11,8 +11,10 @@ SCRIPT = (
 )
 spec = importlib.util.spec_from_file_location("export_transcript", SCRIPT)
 assert spec is not None and spec.loader is not None
-transcript = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(transcript)
+copy_script = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(copy_script)
+
+from qq_agent import transcript
 
 
 def event(kind, payload, second):
@@ -125,10 +127,10 @@ def test_latest_transcript(tmp_path, monkeypatch):
     assert "other turn" not in output
     assert "same millisecond" in before.split("## 边界不明记录", 1)[1]
     assert "same millisecond" not in before.split("## 边界不明记录", 1)[0]
-    path = transcript.save_output(output, tmp_path / "transcript.md")
+    path = copy_script.save_output(output, tmp_path / "transcript.md")
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
-        transcript.save_output("overwrite", path)
+        copy_script.save_output("overwrite", path)
     assert path.read_text() == output
 
 
@@ -230,3 +232,110 @@ def test_cutoff_and_turn(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="turn is absent"):
         transcript.collect(tmp_path)
+
+
+def test_usage_deltas():
+    records = []
+    total = 0
+
+    def add(kind, payload):
+        records.append((0, {"type": kind, "payload": payload}))
+
+    def usage(tokens, turn="current"):
+        nonlocal total
+        total += tokens + 10
+        add(
+            "token_usage_record",
+            {
+                "turn_id": turn,
+                "response_id": f"response-{total}",
+                "usage": {
+                    "input_tokens": tokens,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 10,
+                    "reasoning_output_tokens": 5,
+                    "total_tokens": tokens + 10,
+                },
+                "thread_token_usage": {"total_tokens": total},
+            },
+        )
+
+    add("turn_context", {"model": "a"})
+    usage(100, "previous")
+    usage(130)
+    records.append(records[-1])
+    usage(130)
+    usage(140)
+    add("compacted", {})
+    add(
+        "event_msg",
+        {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 999999}}},
+    )
+    usage(50)
+    add("turn_context", {"model": "b"})
+    usage(60)
+    add("event_msg", {"type": "task_started"})
+    add("event_msg", {"type": "task_complete"})
+    usage(70)
+    report = transcript.usage_report(records, "current")
+    rows = json.loads(report.split("```json\n")[1].split("\n```")[0])
+    assert [row["input_tokens_delta"] for row in rows] == [
+        30,
+        0,
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert all(row["usage"]["reasoning_output_tokens"] == 5 for row in rows)
+    assert "999999" not in report
+    total = 0
+    usage(20)
+    rows = json.loads(
+        transcript.usage_report(records, "current")
+        .split("```json\n")[1]
+        .split("\n```")[0]
+    )
+    assert rows[-1]["input_tokens_delta"] is None
+
+
+async def test_latest_atomic(tmp_path, monkeypatch):
+    import asyncio
+
+    seen = []
+
+    def collect(root, thread, turn, cutoff):
+        seen.append((thread, turn, cutoff))
+        return turn
+
+    monkeypatch.setattr(transcript, "collect", collect)
+    writer = transcript.Transcripts(tmp_path)
+    writer.completed("thread-a", "first")
+    writer.completed("thread-b", "second")
+    await writer.close()
+    path = tmp_path / "latest-transcript.md"
+    assert path.read_text() == "second"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert [row[1] for row in seen] == ["first", "second"]
+    assert not list(tmp_path.glob(".transcript-*"))
+    await asyncio.sleep(0)
+
+
+def test_copy_only(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            returncode=0, stdout="# 最近 LLM 请求：重建 transcript\ncontent"
+        )
+
+    monkeypatch.setattr(copy_script.subprocess, "run", run)
+    assert copy_script.export("pi").endswith("content")
+    assert len(calls) == 1
+    assert calls[0][0][-1] == "sudo -n cat /var/lib/qq-codex-agent/latest-transcript.md"
+    assert "input" not in calls[0][1]
+    with pytest.raises(ValueError):
+        copy_script.export("pi; command")

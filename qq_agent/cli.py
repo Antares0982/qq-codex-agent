@@ -80,6 +80,7 @@ async def run(settings, login):
             await server.wait_closed()
             socket_path.unlink(missing_ok=True)
             watcher.__exit__(None, None, None)
+            await agent.runtime.transcripts.close()
             agent.db.close()
 
 

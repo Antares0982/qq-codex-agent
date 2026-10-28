@@ -12,8 +12,6 @@ from .logging import LOG, log_text
 from .messages import ImageTurn
 from .profiles import Profiles
 
-IDLE_COMPACT_LIMIT = 100000
-
 
 class Turns:
     def __init__(
@@ -81,7 +79,7 @@ class Turns:
                 session = await self.prepare_session(message, manual)
                 if session is None:
                     return
-                thread_id, folder, inputs, manual, renewing = session
+                thread_id, folder, inputs, manual = session
                 options, model = await self.runtime.thread_options(message, folder)
                 context = ImageTurn(message, folder)
                 self.contexts[message.key] = context
@@ -95,15 +93,8 @@ class Turns:
                 if manual:
                     await self.compact_manual(message, thread)
                     return
-                if renewing:
-                    await self.compact_idle(message, thread)
                 if "group_id" in message.target:
                     await self.runtime.update_group(thread, message, self.profiles)
-                with self.db:
-                    self.db.execute(
-                        "UPDATE activity SET thread_gen=? WHERE key=?",
-                        (message.generation, message.key),
-                    )
                 reminder = await self.start_notices(context)
                 usage = self.db.execute(
                     "SELECT tokens FROM context_usage WHERE thread=?", (thread.id,)
@@ -200,11 +191,6 @@ class Turns:
                     "INSERT INTO sessions (key, thread, folder) VALUES (?, ?, ?)",
                     (message.key, None, folder_name),
                 )
-        row = self.db.execute(
-            "SELECT thread_gen FROM activity WHERE key=?",
-            (message.key,),
-        ).fetchone()
-        renewing = thread_id is not None and message.generation > (row[0] if row else 0)
         folder = self.settings.workspace_dir / folder_name
         folder.mkdir(mode=0o700, exist_ok=True)
         if requested and thread_id:
@@ -220,17 +206,13 @@ class Turns:
         if inputs is None:
             self.mark(message, "failed")
             return
-        return thread_id, folder, inputs, manual, renewing and not requested
+        return thread_id, folder, inputs, manual
 
     def save_session(self, message, thread, folder):
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO sessions (key, thread, folder) VALUES (?, ?, ?)",
                 (message.key, thread.id, folder.name),
-            )
-            self.db.execute(
-                "UPDATE activity SET thread_gen=? WHERE key=?",
-                (message.generation, message.key),
             )
 
     async def compact_manual(self, message, thread):
@@ -241,13 +223,6 @@ class Turns:
             "上下文压缩完成。" if success else "上下文压缩失败，原会话保留。",
         )
         self.mark(message, "completed" if success else "failed")
-
-    async def compact_idle(self, message, thread):
-        tokens = await self.runtime.context_tokens(thread.id)
-        if tokens is not None and tokens > IDLE_COMPACT_LIMIT:
-            if "group_id" not in message.target:
-                await self.replies.safe_send(message, "正在压缩上下文……")
-            await self.runtime.compact(thread)
 
     async def start_notices(self, context):
         message = context.message

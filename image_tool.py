@@ -59,7 +59,7 @@ MEMBER_TOOLS = [
 GROUP_TOOLS = [
     {
         "name": "view_image",
-        "description": "按当前群消息中的 image_id 查看图片，同时将原文件下载到当前工作区。返回图片预览及真实路径；动画预览首帧，原文件保留动画。过期图片可能不可用。",
+        "description": "按当前群消息中的 image_id 或 sticker_id 查看图片或表情（都传入 image_id 参数），同时将原文件下载到当前工作区。返回图片预览及真实路径；动画预览首帧，原文件保留动画。过期图片可能不可用。",
         "inputSchema": {
             "type": "object",
             "properties": {"image_id": {"type": "string"}},
