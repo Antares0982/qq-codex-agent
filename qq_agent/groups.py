@@ -9,6 +9,7 @@ from openai_codex import TextInput
 
 from image_assets import save_image
 from .logging import LOG, log_text
+from .faces import face_label
 from .messages import Message, is_command, media_key, parse_message
 
 
@@ -45,6 +46,8 @@ class Groups:
                 )
             elif kind == "at":
                 content.append({"at": value})
+            elif kind == "face":
+                content.append(face_label(value))
             else:
                 content.append(value)
         timestamp = message.timestamp

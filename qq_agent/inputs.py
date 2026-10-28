@@ -4,6 +4,7 @@ import aiohttp
 from openai_codex import LocalImageInput, TextInput
 
 from .messages import display_name
+from .faces import face_label
 from .onebot import image_suffix
 
 
@@ -33,6 +34,8 @@ class Inputs:
         for kind, value in parts:
             if kind == "text":
                 content.append(value)
+            elif kind == "face":
+                content.append(face_label(value))
             elif value == "all":
                 content.append("@全体成员")
             else:

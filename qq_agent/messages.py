@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import qq_id
+from .faces import face_label
 
 
 def clean_name(value):
@@ -57,7 +58,11 @@ def image_source(data):
 
 
 def is_command(message):
-    if message.images or message.unsupported:
+    if (
+        message.images
+        or message.unsupported
+        or any(kind == "face" for kind, _ in message.parts)
+    ):
         return False
     if "group_id" in message.target and not message.mentioned:
         return False
@@ -114,6 +119,13 @@ def parse_parts(segments, group, bot=None):
                 ):
                     raise ValueError("Invalid reply")
                 reply = str(identifier)
+            case "face" if group:
+                identifier = data.get("id")
+                if type(identifier) not in (str, int) or not re.fullmatch(
+                    r"[0-9]{1,10}", str(identifier)
+                ):
+                    raise ValueError("Invalid QQ face ID")
+                parts.append(("face", str(int(identifier))))
             case "at":
                 if group:
                     qq = "all" if data.get("qq") == "all" else qq_id(data.get("qq"))
@@ -157,9 +169,13 @@ def parse_message(event, settings):
             segments, "group_id" in target, bot
         )
         text = "".join(
-            value if kind == "text" else f"@{value}"
+            face_label(value)
+            if kind == "face"
+            else value
+            if kind == "text"
+            else f"@{value}"
             for kind, value in parts
-            if kind == "text" or (kind == "at" and value != bot)
+            if kind in {"text", "face"} or (kind == "at" and value != bot)
         ).strip()
         identifier = event.get("message_id")
         if type(identifier) not in (str, int) or not str(identifier):

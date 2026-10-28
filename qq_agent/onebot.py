@@ -11,6 +11,7 @@ import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
 
 from .config import qq_id
+from .faces import text_chunks
 from .logging import LOG
 from .messages import display_name, parse_parts
 
@@ -78,6 +79,9 @@ class OneBot:
     async def send(
         self, message, text=None, image=None, *, sticker=False, system=False, quote=None
     ):
+        chunks = text_chunks(
+            text or "", faces="group_id" in message.target and not system
+        )
         receipts = []
         if image is not None:
             segments = [
@@ -105,21 +109,22 @@ class OneBot:
                     quote=quote if not text else None,
                 )
         if text:
-            for offset in range(0, len(text), 1500):
+            for index, parts in enumerate(chunks):
                 receipt = await self.call(
                     "send_msg",
                     {
                         **message.target,
                         "message": (
                             [{"type": "reply", "data": {"id": quote}}]
-                            if quote is not None and offset == 0
+                            if quote is not None and index == 0
                             else []
                         )
                         + [
                             {
-                                "type": "text",
-                                "data": {"text": text[offset : offset + 1500]},
+                                "type": kind,
+                                "data": {"id" if kind == "face" else "text": value},
                             }
+                            for kind, value in parts
                         ],
                     },
                 )
@@ -128,9 +133,9 @@ class OneBot:
                     self.on_sent(
                         message,
                         receipt,
-                        [("text", text[offset : offset + 1500])],
+                        parts,
                         system=system,
-                        quote=quote if offset == 0 else None,
+                        quote=quote if index == 0 else None,
                     )
         return receipts
 

@@ -7,6 +7,7 @@ from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
 
 from .logging import LOG, log_text
+from .faces import parse_faces
 from .messages import ImageTurn
 from .stickers import unique_names
 
@@ -23,7 +24,8 @@ def parse_reply(text, stickers, required=False):
     if response is not None and not isinstance(response, str):
         raise ValueError("response 必须是字符串或 null")
     response = response.strip() if response else ""
-    if required and not response:
+    parts = parse_faces(response)
+    if required and not any(kind == "text" and value.strip() for kind, value in parts):
         raise ValueError("当前必须回复非空文本，不能沉默或仅发表情")
     if response and "sticker" not in value:
         raise ValueError("有文本时 sticker 必填")

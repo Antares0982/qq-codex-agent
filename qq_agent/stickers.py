@@ -50,6 +50,10 @@ def sticker_instructions(stickers):
         "response 必填，只能是文本或 null。有文本必须填写 sticker 配置键。"
         '不回复时使用 {"response":null}；仅发表情时 response 为 null，sticker 为图片键。'
         "键对应 null 时不发表情。表情先于文本发送。quote 仅用于文本首段；没有文本时用于表情。沉默不能带非空 quote，不能引用系统消息。普通图片仍用 qq_image.send_image。"
+        "QQ 内置表情在历史中显示为 [qqface:ID:名称]，例如 [qqface:178:斜眼笑]。"
+        "可在 response 中原样使用已知标记，与文字混排；应用会转换为真实 QQ 表情。"
+        "ID 和名称必须匹配，不要猜测；未知表情不能发送。/xyx、[斜眼笑] 等普通文字不会转换。"
+        "只有内置表情的 response 仍需 sticker 配置键，但不能满足直接 @ 的非空文本义务。"
         "不得输出原始 JSON 以外的 assistant 文字。应用发起的内部交接总结改用该轮指定的 summary schema，不发送到 QQ。\n表情配置（值表示是否发送图片）："
         + json.dumps(
             {

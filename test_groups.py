@@ -11,6 +11,7 @@ import image_tool
 from qq_agent.agent import Agent
 from qq_agent.config import GroupSettings, Settings
 from qq_agent.group_turns import GroupTurn, parse_reply
+from qq_agent.faces import FACES, face_label, parse_faces, text_chunks
 from qq_agent.messages import ImageTurn, parse_message
 from qq_agent.onebot import OneBot
 from qq_agent.storage import open_database
@@ -1081,6 +1082,101 @@ async def test_low_backlog(group_agent):
         len({row["content"][0]["sticker_id"] for row in payload["messages"][:100]}) == 1
     )
     env.bot.image.assert_not_called()
+
+
+async def test_face_history(group_agent):
+    env = group_agent
+    for identifier, face in enumerate((178, "999999"), 1):
+        incoming = event(group=10, identifier=identifier, text="", mention=False)
+        incoming["message"] = [{"type": "face", "data": {"id": face}}]
+        parsed = parse_message(incoming, env.agent.settings)
+        assert parsed and not parsed.unsupported and parsed.category == "low"
+        await receive(env, incoming)
+    assert env.agent.queue.empty() and not env.agent.group_windows
+    incoming = event(group=10, identifier=3, text="看看", reply="1", mention=False)
+    incoming["message"].append({"type": "face", "data": {"id": "178"}})
+    parsed = parse_message(incoming, env.agent.settings)
+    assert parsed and parsed.category == "normal"
+    await receive(env, incoming)
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert payload["messages"][0]["content"] == ["[qqface:178:斜眼笑]"]
+    assert payload["messages"][1]["content"] == ["[qqface:999999:未知表情]"]
+    assert payload["messages"][2]["content"] == ["看看", "[qqface:178:斜眼笑]"]
+    assert payload["messages"][2]["quote"] == {"message_id": "1"}
+    assert env.agent.db.execute("SELECT count(*) FROM received_images").fetchone() == (
+        0,
+    )
+    env.agent.groups.status(batch, "completed")
+    incoming = event(group=10, identifier=4, text="/status")
+    incoming["message"].append({"type": "face", "data": {"id": "178"}})
+    parsed = parse_message(incoming, env.agent.settings)
+    assert parsed and not env.agent.is_command(parsed)
+    for invalid in (True, -1, "", "1.0", "1x", "1" * 11, None):
+        incoming["message"][-1]["data"]["id"] = invalid
+        assert parse_message(incoming, env.agent.settings) is None
+
+
+async def test_face_delivery(group_agent):
+    env = group_agent
+    env.agent.runtime.stickers = {"静": None, "图": PNG}
+    marker = "[qqface:178:斜眼笑]"
+    for value in FACES:
+        assert parse_faces(face_label(value)) == [("face", value)]
+    for invalid in (
+        "[qqface:999999:未知表情]",
+        "[qqface:178:笑]",
+        "[qqface:178]",
+        "hello[qqface:178:斜眼笑",
+        "[qqface:0178:斜眼笑]",
+        "[qqface:x:笑]",
+    ):
+        with pytest.raises(ValueError):
+            parse_reply(json.dumps({"response": invalid, "sticker": "图"}), {"图": PNG})
+    with pytest.raises(ValueError, match="非空文本"):
+        parse_reply(
+            json.dumps({"response": marker, "sticker": "静"}), {"静": None}, True
+        )
+    text = "a" * 1499 + marker * 2 + "xyx /xyx [斜眼笑]"
+    assert text_chunks(text) == [[("text", text[:1500])], [("text", text[1500:])]]
+    env.scripts.append(
+        [
+            json.dumps({"response": "[qqface:178:错误]", "sticker": "图"}),
+            json.dumps({"response": text, "sticker": "静", "quote": "1"}),
+        ]
+    )
+    await execute(env, event(group=10))
+    assert len(env.deliveries) == 2
+    assert env.deliveries[0]["message"] == [
+        {"type": "reply", "data": {"id": "1"}},
+        {"type": "text", "data": {"text": "a" * 1499}},
+        {"type": "face", "data": {"id": "178"}},
+    ]
+    assert env.deliveries[1]["message"] == [
+        {"type": "face", "data": {"id": "178"}},
+        {"type": "text", "data": {"text": "xyx /xyx [斜眼笑]"}},
+    ]
+    rows = env.agent.db.execute(
+        "SELECT body,category FROM group_messages WHERE own=1 ORDER BY sequence"
+    ).fetchall()
+    assert all(category == "low" for _, category in rows)
+    assert json.loads(rows[0][0])["content"] == ["a" * 1499, marker]
+    assert json.loads(rows[1][0])["content"] == [marker, "xyx /xyx [斜眼笑]"]
+    env.scripts.append(
+        [json.dumps({"response": marker, "sticker": "静", "quote": "1"})]
+    )
+    await execute(env, event(group=10, identifier=2, mention=False))
+    assert env.deliveries[-1]["message"] == [
+        {"type": "reply", "data": {"id": "1"}},
+        {"type": "face", "data": {"id": "178"}},
+    ]
+    message = parse_message(event(group=10), env.agent.settings)
+    await env.bot.send(message, text=marker, system=True)
+    assert env.deliveries[-1]["message"] == [{"type": "text", "data": {"text": marker}}]
+    before = len(env.deliveries)
+    with pytest.raises(ValueError):
+        await env.bot.send(message, text="[qqface:178:错误]", image=PNG)
+    assert len(env.deliveries) == before
 
 
 async def test_media_identity(group_agent, monkeypatch):

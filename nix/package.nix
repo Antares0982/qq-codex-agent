@@ -35,6 +35,6 @@ pkgs.runCommand "qq-codex-agent" { nativeBuildInputs = [ pkgs.makeWrapper ]; } '
     test -s "$prompt"
   done
   "$out/bin/qq-codex-agent" --help >/dev/null
-  "$out/bin/qq-codex-python" -I -c 'from qq_agent.stickers import load_stickers; load_stickers()'
+  "$out/bin/qq-codex-python" -I -c 'from qq_agent.stickers import load_stickers; from qq_agent.faces import FACES; load_stickers(); assert FACES["178"] == "斜眼笑"'
   ${testEnv}/bin/python -m pytest -v -p no:cacheprovider ${source}
 ''

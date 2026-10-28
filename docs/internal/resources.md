@@ -33,6 +33,8 @@ Nix 可用 `services.qq-codex-agent.agentsFile`、`privateAgentsFile`、`groupAg
 
 ## 表情与压缩
 
+QQ 内置表情映射 `qq_agent/faces.json` 提取自 [NapCat v4.18.38 的 face_config.json](https://github.com/NapNeko/NapCatQQ/blob/v4.18.38/packages/napcat-core/external/face_config.json)：使用 `sysface` 中 `QSid` 到去掉首个 `/` 的 `QDes`，保留数字 ID 字符串，不使用 IQLid/AQLid 或猜测拼音缩写。此版本与 Pi 的 NapCat 部署一致。升级 NapCat 时核对该映射，新增 ID 须在目标版本实际支持后才加入；运行时不联网拉取映射。资源随 Python 包发布，行为见 [群聊协议](../specs/groups.md#图片和提醒)。
+
 `stickers/` 随包发布资源，`qq_agent.stickers` 启动时加载并校验配置和图片，不支持热重载。新增表情时加入图片，更新 `stickers/sticker_config.json`，压缩后重新打包部署，无需修改代码。
 
 ```sh
