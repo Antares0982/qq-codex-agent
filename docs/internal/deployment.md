@@ -145,7 +145,7 @@ sudo nixos-rebuild switch --flake ./hosts/rpi5#rpi5
 独立运行时，`token_file` 仍须存在，但可以为空；非空时只放 token 本身。
 NapCat 的 forward WebSocket 使用 `ws://127.0.0.1:3001`，必须支持多客户端，不能停掉现有 relay。
 应用与依赖均由 Nix 管理，运行用户不可修改。应用的完整运行依赖加入私有根目录的只读挂载，
-默认不开放整个宿主 Nix store。当前 Pi 的宿主配置额外授权完整 store 和 Nix daemon，以支持 Nix 工具；该授权由 dotfile 维护。已有提示词副本不删除，但默认不再使用；登录状态保留。
+默认不开放整个宿主 Nix store。当前 Pi 的宿主配置额外授权完整 store 和 Nix daemon，以支持 Nix 工具；该授权由 dotfile 维护。已有提示词副本不删除，但默认不再使用；登录状态保留。宿主 `/etc/localtime` 存在时只读挂载到服务私有根目录，使群历史采用系统时区。
 
 服务和登录 unit 均设置 `http_proxy`、`https_proxy` 为 `http://127.0.0.1:1081`，
 `no_proxy=127.0.0.1,localhost,::1`。这是环境变量代理，不是强制流量代理；本机 NapCat 连接直连。

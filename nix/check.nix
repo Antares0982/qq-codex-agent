@@ -94,6 +94,10 @@ assert builtins.all (path: builtins.elem path customMounts) [
   "/custom/group.md:/etc/qq-codex-agent/AGENTS.group.md"
 ];
 assert builtins.elem "/run/codex-auth" mounts;
+assert builtins.all (paths: builtins.elem "-/etc/localtime:/etc/localtime" paths) [
+  mounts
+  externalMounts
+];
 assert builtins.elem "codex-auth.service" config.systemd.services.qq-codex-agent.requires;
 assert !(builtins.elem "/nix/store" mounts);
 assert builtins.elem "${pkgs.emptyDirectory}:/var/lib/qq-codex-agent/codex/tmp/arg0" mounts;

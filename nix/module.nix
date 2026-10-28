@@ -128,6 +128,7 @@ let
       "${nsswitch}:/etc/nsswitch.conf"
       "/etc/resolv.conf:/etc/resolv.conf"
       "/etc/hosts:/etc/hosts"
+      "-/etc/localtime:/etc/localtime"
     ]
     ++ lib.optional (
       cfg.configFile == null && cfg.allowlistFile != null
