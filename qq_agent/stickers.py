@@ -47,19 +47,14 @@ def sticker_instructions(stickers):
     return (
         "普通群聊任务的每条 assistant 消息（过程说明和最终回复）必须仅包含一个 JSON 对象，"
         '格式为 {"response":"文本","sticker":"表情名称"}，可选 quote 为本群可见消息的 message_id 字符串或 null，不要代码围栏或其他字段。'
-        "response 必填，只能是文本或 null。有文本必须填写 sticker 配置键。"
-        '不回复时使用 {"response":null}；仅发表情时 response 为 null，sticker 为图片键。'
-        "键对应 null 时不发表情。表情先于文本发送。quote 仅用于文本首段；没有文本时用于表情。沉默不能带非空 quote，不能引用系统消息。普通图片仍用 qq_image.send_image。"
+        "response 必填，只能是文本或 null。有文本必须填写 sticker 表情名称，按语境和情绪选择。"
+        '不回复时使用 {"response":null}；仅表达表情意图时 response 为 null，sticker 为列出的任一名称。'
+        "表情名称不代表一定有图片，不要推断或依赖名称是否对应文件。应用自行匹配，有图片时先于文本发送，无图片时跳过；需要传达的内容应写入 response。"
+        "quote 仅用于文本首段；没有文本时用于实际发送的表情。response 无文本且省略 sticker 时不能带非空 quote，不能引用系统消息。普通图片仍用 qq_image.send_image。"
         "QQ 内置表情在历史中显示为 [qqface:ID:名称]，例如 [qqface:178:斜眼笑]。"
         "可在 response 中原样使用已知标记，与文字混排；应用会转换为真实 QQ 表情。"
         "ID 和名称必须匹配，不要猜测；未知表情不能发送。/xyx、[斜眼笑] 等普通文字不会转换。"
-        "只有内置表情的 response 仍需 sticker 配置键，但不能满足直接 @ 的非空文本义务。"
-        "不得输出原始 JSON 以外的 assistant 文字。应用发起的内部交接总结改用该轮指定的 summary schema，不发送到 QQ。\n表情配置（值表示是否发送图片）："
-        + json.dumps(
-            {
-                key: "图片" if value is not None else None
-                for key, value in stickers.items()
-            },
-            ensure_ascii=False,
-        )
+        "只有内置表情的 response 仍需 sticker 表情名称，但不能满足直接 @ 的非空文本义务。"
+        "不得输出原始 JSON 以外的 assistant 文字。应用发起的内部交接总结改用该轮指定的 summary schema，不发送到 QQ。\n可选表情名称："
+        + json.dumps(list(stickers), ensure_ascii=False)
     )

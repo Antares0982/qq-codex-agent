@@ -37,6 +37,8 @@ QQ 内置表情映射 `qq_agent/faces.json` 提取自 [NapCat v4.18.38 的 face_
 
 `stickers/` 随包发布资源，`qq_agent.stickers` 启动时加载并校验配置和图片，不支持热重载。新增表情时加入图片，更新 `stickers/sticker_config.json`，压缩后重新打包部署，无需修改代码。
 
+developer 提示词仅序列化配置的名称列表，不包含文件路径或是否有图的标记；同一组名称的图片映射变化不改变提示词快照。文件映射由应用解析回复及发送时使用，协议见 [群聊 JSON 回复](../specs/groups.md#json-回复与纠错)。
+
 ```sh
 uv run --frozen python compress_stickers.py stickers/example.png
 uv run --frozen python compress_stickers.py stickers/

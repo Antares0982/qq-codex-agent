@@ -38,7 +38,7 @@ def parse_reply(text, stickers, required=False):
         not isinstance(quote, str) or not 1 <= len(quote) <= 128 or not quote.strip()
     ):
         raise ValueError("quote 必须是消息 ID 字符串或 null")
-    if quote is not None and not response and sticker is None:
+    if quote is not None and not response and name is None:
         raise ValueError("沉默时不能指定 quote")
     return response, sticker, quote
 

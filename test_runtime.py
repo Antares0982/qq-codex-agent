@@ -505,7 +505,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert "<permissions instructions>" in content
                 if mode == "upgrade" and index == 0:
                     assert "LEGACY_APPLICATION_RULES" in content
-                    assert "全部可用表情名称" not in content
+                    assert "可选表情名称" not in content
                     continue
                 assert "qq_member" in content
                 assert (
@@ -513,6 +513,8 @@ async def test_runtime_prompts(tmp_path, mode):
                     in content
                 )
                 assert all(name in content for name in runtime.stickers)
+                assert "可选表情名称" in content
+                assert "值表示是否发送图片" not in content
                 assert "probe-0" in content
                 updates = [
                     part["text"]

@@ -613,6 +613,10 @@ class TestAgent:
         await self.execute(message)
         assert injections() == before + 1
         assert "新增表情" in self.group_instructions()
+        before = injections()
+        self.agent.runtime.stickers["新增表情"] = None
+        await self.execute(message)
+        assert injections() == before
         for prompt in ("first", "second", "first", ""):
             with self.agent.db:
                 self.agent.db.execute(

@@ -590,6 +590,15 @@ class TestImages:
         assert all("error" in response for response in responses[4:])
 
 
+def test_sticker_instructions():
+    catalog = {"平静": None, "开心": PNG}
+    instructions = stickers.sticker_instructions(catalog)
+    assert json.loads(instructions.rsplit("\n", 1)[1].split("：", 1)[1]) == list(
+        catalog
+    )
+    assert instructions == stickers.sticker_instructions({"平静": PNG, "开心": None})
+
+
 def test_sticker_resources():
     catalog = stickers.load_stickers()
     assert catalog

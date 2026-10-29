@@ -1372,6 +1372,20 @@ async def test_quote_delivery(group_agent):
     assert len(env.deliveries) == before
 
 
+@pytest.mark.parametrize("sticker", [None, PNG])
+async def test_quote_sticker_intent(group_agent, sticker):
+    env = group_agent
+    env.agent.runtime.stickers = {"表情": sticker}
+    reply = '{"response":null,"sticker":"表情","quote":"1"}'
+    assert parse_reply(reply, env.agent.runtime.stickers) == ("", sticker, "1")
+    env.scripts.append([reply])
+    await execute(env, event(group=10, mention=False))
+    assert len(env.deliveries) == int(sticker is not None)
+    assert env.thread.turn.call_count == 1
+    if sticker is not None:
+        assert env.deliveries[0]["message"][0] == {"type": "reply", "data": {"id": "1"}}
+
+
 async def test_quote_batch(group_agent):
     env = group_agent
     await receive(env, event(group=10, mention=False), dispatch=False)
