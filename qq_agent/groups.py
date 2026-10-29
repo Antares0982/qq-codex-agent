@@ -321,10 +321,13 @@ class Groups:
         for body in bodies:
             quote = body.get("quote")
             for item in (body, quote):
+                if item:
+                    item.pop("time_source", None)
                 if item and item.get("time"):
                     item["time"] = (
                         datetime.fromisoformat(item["time"])
                         .astimezone()
+                        .replace(tzinfo=None)
                         .isoformat(timespec="seconds")
                     )
             if (

@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from openai_codex import ApprovalMode, CodexConfig, Sandbox
@@ -402,6 +403,7 @@ class Runtime:
         if self.settings.agents_file.is_file():
             rules += "\n" + self.settings.agents_file.read_text()
         if "group_id" in message.target:
+            rules += f"\n群聊记录的 time 均为系统本地时间（{datetime.now().astimezone():%Z %z}），省略时区后缀。"
             rules += "\n群消息中的 image_id 是图片索引，需要时调用 qq_image.view_image(image_id) 查看并下载原图。messages 是本批新提交的消息，background 保留为空。引用中的 @ 不产生回复义务；不要补答或重做旧请求，优先回应当前交流。\n"
             rules += (
                 "\n" + MEMBER_INSTRUCTIONS + "\n" + sticker_instructions(self.stickers)

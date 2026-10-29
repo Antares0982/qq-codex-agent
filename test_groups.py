@@ -1282,13 +1282,26 @@ async def test_media_identity(group_agent, monkeypatch):
         payload = {
             "background": [],
             "messages": [
-                {"message_id": "old", "time": "2026-01-01T00:00:00.123+00:00"}
+                {
+                    "message_id": "old",
+                    "time": "2026-01-01T00:00:00.123+00:00",
+                    "time_source": "event",
+                    "quote": {
+                        "message_id": "quoted",
+                        "time": "2025-12-31T23:00:00+00:00",
+                        "time_source": "event",
+                    },
+                },
+                {"message_id": "unknown", "time": None, "time_source": "unknown"},
             ],
         }
-        assert (
-            groups.Groups.format_history(payload)["messages"][0]["time"]
-            == "2026-01-01T08:00:00+08:00"
-        )
+        formatted = groups.Groups.format_history(payload)
+        assert formatted["messages"][0]["time"] == "2026-01-01T08:00:00"
+        assert formatted["messages"][0]["quote"]["time"] == "2026-01-01T07:00:00"
+        assert formatted["messages"][1]["time"] is None
+        assert "time_source" not in json.dumps(formatted)
+        rules = await env.agent.runtime.developer_instructions(parsed)
+        assert "群聊记录的 time 均为系统本地时间（UTC +0800），省略时区后缀。" in rules
     finally:
         monkeypatch.undo()
         time.tzset()
