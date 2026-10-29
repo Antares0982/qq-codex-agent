@@ -13,9 +13,6 @@ from .faces import face_label
 from .messages import Message, is_command, media_key, parse_message
 
 
-BACKGROUND_SECONDS = 300
-BACKGROUND_COUNT = 40
-BACKGROUND_CHARS = 16000
 HISTORY_SECONDS = 14 * 86400
 SYSTEM_PLACEHOLDER = "<redacted system message>"
 
@@ -492,30 +489,10 @@ class Groups:
         ).fetchall()
         rows = sorted([*rows, *low], key=lambda row: row[5])
         identifiers = {row[0] for row in rows}
-        background, size = [], 0
-        for identifier, body in self.db.execute(
-            "SELECT id,body FROM group_messages WHERE key=? AND ready!=0 AND segment=? AND created>=? AND sequence <= (SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence DESC LIMIT ?",
-            (
-                message.key,
-                segment,
-                now - BACKGROUND_SECONDS,
-                message.identifier,
-                BACKGROUND_COUNT + len(rows),
-            ),
-        ):
-            if identifier in identifiers:
-                continue
-            if (
-                len(background) >= BACKGROUND_COUNT
-                or size + len(body) > BACKGROUND_CHARS
-            ):
-                break
-            background.append(json.loads(body))
-            size += len(body)
         payload = json.dumps(
             self.format_history(
                 {
-                    "background": list(reversed(background)),
+                    "background": [],
                     "messages": [json.loads(row[1]) for row in rows],
                 }
             ),
@@ -567,6 +544,27 @@ class Groups:
             "SELECT payload FROM group_batches WHERE id=?", (message.batch,)
         ).fetchone()
         payload = row[0] if row else None
+        if payload is not None:
+            value = json.loads(payload)
+            if value["background"]:
+                background = {body["message_id"]: body for body in value["background"]}
+                for body in value["messages"]:
+                    quote = body.get("quote")
+                    if quote and quote.keys() == {"message_id"}:
+                        quoted = background.get(quote["message_id"])
+                        if quoted:
+                            body["quote"] = {
+                                key: item
+                                for key, item in quoted.items()
+                                if key != "quote"
+                            }
+                value["background"] = []
+                payload = json.dumps(value, ensure_ascii=False)
+                with self.db:
+                    self.db.execute(
+                        "UPDATE group_batches SET payload=? WHERE id=?",
+                        (payload, message.batch),
+                    )
         if payload is None:
             rows = self.db.execute(
                 "SELECT body FROM group_messages WHERE batch=? ORDER BY sequence",

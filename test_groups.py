@@ -809,7 +809,8 @@ async def test_middle_mention(group_agent):
     batch = env.agent.queue.get_nowait()
     assert not batch.mentioned and not batch.direct
     payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
-    assert any(row["message_id"] == "2" for row in payload["background"])
+    assert payload["background"] == []
+    assert not {"1", "2", "3"} & {row["message_id"] for row in payload["messages"]}
 
 
 async def test_backoff_results(group_agent):
@@ -864,28 +865,21 @@ async def test_candidate_expiry(group_agent):
     assert batch.mentioned
 
 
-async def test_background_limits(group_agent):
+@pytest.mark.parametrize("status", ["submitted", "completed", "unknown"])
+async def test_history_once(group_agent, status):
     env = group_agent
-    for identifier in range(1, 45):
-        message = parse_message(
-            event(group=10, identifier=identifier, mention=False), env.agent.settings
-        )
-        env.agent.groups.record(message)
-        await env.agent.groups.prepare(message)
-        env.agent.groups.observe(message, False)
-        with env.agent.db:
-            env.agent.db.execute(
-                "UPDATE group_messages SET consumed=1 WHERE id=?", (message.identifier,)
-            )
-    await receive(env, event(group=10, identifier=45, mention=False))
+    await receive(env, event(group=10, mention=False))
+    first = env.agent.queue.get_nowait()
+    original = env.agent.groups.input(first)[0].text
+    env.agent.groups.status(first, status)
+    await receive(env, event(group=10, identifier=2))
     batch = env.agent.queue.get_nowait()
     payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
-    assert len(payload["background"]) == 40
-    assert payload["background"][0]["message_id"] == "5"
-    original = env.agent.groups.input(batch)[0].text
+    assert payload["background"] == []
+    assert [row["message_id"] for row in payload["messages"]] == ["2"]
     with env.agent.db:
         env.agent.db.execute("UPDATE group_messages SET body='{}'")
-    assert env.agent.groups.input(batch)[0].text == original
+    assert env.agent.groups.input(first)[0].text == original
 
 
 async def test_pending_expiry(group_agent):
@@ -899,6 +893,62 @@ async def test_pending_expiry(group_agent):
     assert env.agent.db.execute("SELECT status FROM group_batches").fetchone() == (
         "expired",
     )
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+async def test_low_after_expiry(group_agent, frozen):
+    env = group_agent
+    with patch("qq_agent.groups.time.time", return_value=10000):
+        incoming = event(group=10, identifier=1, mention=False, text="")
+        incoming["message"] = [{"type": "face", "data": {"id": "178"}}]
+        await receive(env, incoming)
+        await receive(
+            env, event(group=10, identifier=2, mention=False), dispatch=frozen
+        )
+    with patch("qq_agent.groups.time.time", return_value=10120):
+        if frozen:
+            await env.agent.turns.execute(env.agent.queue.get_nowait())
+        await drain(env)
+        env.agent.flush_group("group-10")
+        await drain(env)
+        assert env.agent.queue.empty() and not env.agent.group_windows
+        env.thread.turn.assert_not_awaited()
+        assert env.agent.db.execute(
+            "SELECT id FROM group_messages WHERE consumed=0 AND batch IS NULL"
+        ).fetchall() == [("99:group-10:1",)]
+        await receive(env, event(group=10, identifier=3, mention=False))
+        batch = env.agent.queue.get_nowait()
+        payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+        assert payload["background"] == []
+        assert [row["message_id"] for row in payload["messages"]] == ["1", "3"]
+
+
+async def test_legacy_background(group_agent):
+    env = group_agent
+    await receive(env, event(group=10, mention=False))
+    first = env.agent.queue.get_nowait()
+    old = json.loads(env.agent.groups.input(first)[0].text.split("\n", 1)[1])
+    env.agent.groups.status(first, "completed")
+    await receive(env, event(group=10, identifier=2, reply="1", mention=False))
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    quote = payload["messages"][0]["quote"]
+    payload["messages"][0]["quote"] = {"message_id": "1"}
+    payload["background"] = old["messages"]
+    with env.agent.db:
+        env.agent.db.execute(
+            "UPDATE group_batches SET payload=? WHERE id=?",
+            (json.dumps(payload), batch.batch),
+        )
+    actual = env.agent.groups.input(batch)[0].text
+    payload = json.loads(actual.split("\n", 1)[1])
+    assert payload["background"] == []
+    assert [row["message_id"] for row in payload["messages"]] == ["2"]
+    assert payload["messages"][0]["quote"] == quote
+    assert env.agent.groups.input(batch)[0].text == actual
+    assert env.agent.db.execute(
+        "SELECT payload FROM group_batches WHERE id=?", (batch.batch,)
+    ).fetchone() == (actual.split("\n", 1)[1],)
 
 
 async def test_failed_no_retry(group_agent):
@@ -945,6 +995,7 @@ async def test_busy_candidates(group_agent):
         batch = env.agent.queue.get_nowait()
         assert batch.mentioned
         payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+        assert payload["background"] == []
         assert [row["message_id"] for row in payload["messages"]] == ["2"]
         assert len(env.agent.groups.candidates(key)) == 1
     finally:
@@ -1082,6 +1133,15 @@ async def test_low_backlog(group_agent):
         len({row["content"][0]["sticker_id"] for row in payload["messages"][:100]}) == 1
     )
     env.bot.image.assert_not_called()
+    await env.agent.turns.execute(batch)
+    env.agent.flush_group("group-10")
+    await drain(env)
+    assert env.agent.queue.empty()
+    await receive(env, event(group=10, identifier=112, mention=False))
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert payload["background"] == []
+    assert [row["message_id"] for row in payload["messages"]] == ["112"]
 
 
 async def test_face_history(group_agent):
