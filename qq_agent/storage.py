@@ -30,6 +30,7 @@ def open_database(settings):
         CREATE TABLE IF NOT EXISTS activity (key TEXT PRIMARY KEY, received REAL NOT NULL, message_gen INTEGER NOT NULL, thread_gen INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS context_usage (thread TEXT PRIMARY KEY, tokens INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS group_snapshots (thread TEXT PRIMARY KEY, instructions TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS group_image_seen (thread TEXT NOT NULL, image_id TEXT NOT NULL, PRIMARY KEY (thread, image_id));
         CREATE TABLE IF NOT EXISTS group_handoffs (group_id TEXT PRIMARY KEY, summary TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS member_profiles (group_id TEXT NOT NULL, user_id TEXT NOT NULL, display_name TEXT NOT NULL, profile TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (group_id, user_id));
         CREATE TABLE IF NOT EXISTS group_prompts (group_id TEXT PRIMARY KEY, prompt TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at REAL NOT NULL);

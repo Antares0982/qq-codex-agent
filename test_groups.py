@@ -1,11 +1,16 @@
 import asyncio
 import json
 from collections import deque
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from openai_codex import ImageInput, TextInput
+from openai_codex._inputs import _to_wire_input
+from openai_codex.errors import JsonRpcError
+from openai_codex.generated.v2_all import ThreadItem
 
 import image_tool
 from qq_agent.agent import Agent
@@ -59,8 +64,24 @@ async def group_agent(tmp_path):
 
     async def start(inputs, **kwargs):
         script = scripts.popleft() if scripts else ['{"response":null}']
+        turn_id = f"turn-{len(turns)}"
 
-        async def stream():
+        async def stream() -> AsyncIterator[NS]:
+            notification = NS(
+                method="item/completed",
+                payload=NS(
+                    thread_id=thread.id,
+                    item=ThreadItem.model_validate(
+                        {
+                            "type": "userMessage",
+                            "id": "user-" + turn_id,
+                            "content": _to_wire_input(inputs),
+                        }
+                    ),
+                ),
+            )
+            agent.runtime.observe_codex(notification)
+            yield notification
             for index, value in enumerate(script):
                 if callable(value):
                     await value()
@@ -83,7 +104,7 @@ async def group_agent(tmp_path):
             yield turn_done()
 
         turn = NS(
-            id=f"turn-{len(turns)}",
+            id=turn_id,
             stream=stream,
             steer=AsyncMock(),
             interrupt=AsyncMock(),
@@ -1578,3 +1599,240 @@ async def test_low_during_window(group_agent):
     batch = env.agent.queue.get_nowait()
     history = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
     assert [row["message_id"] for row in history["messages"]] == ["1", "2"]
+
+
+async def test_inline_images(group_agent):
+    env = group_agent
+    incoming = event(group=10, text="看图", mention=False)
+    incoming["message"] += [
+        {"type": "image", "data": {"file": source, "sub_type": subtype}}
+        for source, subtype in [
+            ("sticker", 1),
+            ("broken", 0),
+            ("a", 0),
+            ("a", 0),
+            ("b", 0),
+            ("c", 0),
+            ("d", 0),
+            ("e", 0),
+            ("f", 0),
+        ]
+    ]
+    env.bot.image.side_effect = lambda source: b"broken" if source == "broken" else PNG
+    first = await execute(env, incoming)
+    submitted = env.thread.turn.call_args.args[0]
+    assert sum(isinstance(part, ImageInput) for part in submitted) == 5
+    ids = dict(env.agent.db.execute("SELECT source,id FROM received_images"))
+    labels = [
+        json.loads(part.text.split("：", 1)[1])
+        for part in submitted
+        if isinstance(part, TextInput) and part.text.startswith("下面这张图片对应：")
+    ]
+    assert [label["image_id"] for label in labels] == [
+        ids[source] for source in "abcde"
+    ]
+    assert all(not label["quoted"] for label in labels)
+    for index, part in enumerate(submitted):
+        if isinstance(part, ImageInput):
+            assert isinstance(submitted[index - 1], TextInput)
+    notice = submitted[-1].text
+    assert ids["f"] in notice and "超出" in notice
+    assert ids["broken"] in notice and "失败" in notice
+    assert "qq_image.view_image(image_id)" in notice
+    assert [call.args[0] for call in env.bot.image.call_args_list] == [
+        "broken",
+        *"abcde",
+    ]
+    assert env.agent.runtime.seen_images(env.thread.id) == {
+        ids[source] for source in "abcde"
+    }
+
+    env.bot.image.reset_mock()
+    env.bot.image.side_effect = None
+    incoming["message_id"] = 2
+    await execute(env, incoming)
+    submitted = env.thread.turn.call_args.args[0]
+    assert sum(isinstance(part, ImageInput) for part in submitted) == 2
+    assert [call.args[0] for call in env.bot.image.call_args_list] == ["broken", "f"]
+    assert "此前已自动展示" in submitted[-1].text
+    assert ids["sticker"] not in env.agent.runtime.seen_images(env.thread.id)
+
+    # Reopening preserves confirmed image identities.
+    reopened = open_database(env.agent.settings)
+    assert {
+        row[0] for row in reopened.execute("SELECT image_id FROM group_image_seen")
+    } == env.agent.runtime.seen_images(env.thread.id)
+    reopened.close()
+    env.thread.id = "new-thread"
+    env.bot.image.reset_mock()
+    incoming["message_id"] = 3
+    await execute(env, incoming)
+    assert (
+        sum(isinstance(part, ImageInput) for part in env.thread.turn.call_args.args[0])
+        == 5
+    )
+    env.bot.image.assert_not_awaited()
+    assert first.batch is not None
+
+
+async def test_image_events(group_agent):
+    env = group_agent
+    runtime = env.agent.runtime
+    message = parse_message(event(group=10), env.agent.settings)
+    folder = env.agent.settings.workspace_dir / "events"
+    folder.mkdir()
+    context = ImageTurn(message, folder)
+    env.agent.turns.contexts[message.key] = context
+    with env.agent.db:
+        env.agent.db.executemany(
+            "INSERT INTO received_images (id,key,source,created) VALUES (?,?,'source',strftime('%s','now'))",
+            [("image", "group-10"), ("foreign", "group-11")],
+        )
+    await env.agent.turns.images.view_image(
+        context,
+        {
+            "action": "view_image",
+            "image_id": "image",
+            "token": context.token,
+        },
+    )
+    assert runtime.seen_images(env.thread.id) == set()
+    body = {
+        "message_id": "current",
+        "content": [{"image_id": "image"}],
+        "quote": {"message_id": "quoted", "content": [{"image_id": "image"}]},
+    }
+    text = "群聊消息记录：\n" + json.dumps({"messages": [body]})
+    inputs, ids = await env.agent.turns.images.attach_images(context, text, set(), 5)
+    assert ids == ["image"]
+    label = json.loads(inputs[1].text.split("：", 1)[1])
+    assert label["quoted"] and label["message_id"] == "quoted"
+    runtime.image_inputs[env.thread.id] = {text: ids}
+    assert runtime.seen_images(env.thread.id) == {"image"}
+    assert not env.agent.db.execute("SELECT * FROM group_image_seen").fetchall()
+
+    def notify(kind, identifier, method="item/completed", content=None):
+        item = {"type": kind, "id": identifier}
+        if content is not None:
+            item["content"] = _to_wire_input(content)
+        runtime.observe_codex(
+            NS(
+                method=method,
+                payload=NS(
+                    thread_id=env.thread.id,
+                    item=ThreadItem.model_validate(item),
+                ),
+            )
+        )
+
+    # Pre-turn compaction leaves pending admissions intact.
+    notify("contextCompaction", "before")
+    assert runtime.seen_images(env.thread.id) == {"image"}
+    notify("userMessage", "user", content=inputs)
+    assert not runtime.image_inputs[env.thread.id]
+    assert env.agent.db.execute("SELECT * FROM group_image_seen").fetchall() == [
+        (env.thread.id, "image")
+    ]
+    notify("contextCompaction", "failed", method="item/started")
+    assert runtime.seen_images(env.thread.id) == {"image"}
+    notify("contextCompaction", "after")
+    assert runtime.seen_images(env.thread.id) == set()
+    notify("userMessage", "user", content=inputs)
+    assert runtime.seen_images(env.thread.id) == set()
+    runtime.image_inputs[env.thread.id][text] = ids
+    notify("userMessage", "next-user", content=inputs)
+    notify("contextCompaction", "after")
+    assert runtime.seen_images(env.thread.id) == {"image"}
+
+    with pytest.raises(ValueError, match="当前群"):
+        await env.agent.turns.images.read_received(context, "foreign", context.token)
+    env.agent.turns.contexts.clear()
+    with pytest.raises(ValueError, match="当前群任务"):
+        await env.agent.turns.images.read_received(context, "image", context.token)
+
+
+async def test_image_rejection(group_agent):
+    env = group_agent
+    incoming = event(group=10, mention=False)
+    incoming["message"].append({"type": "image", "data": {"file": "source"}})
+    env.thread.turn.side_effect = JsonRpcError(-32600, "rejected")
+    await execute(env, incoming)
+    assert not env.agent.runtime.seen_images(env.thread.id)
+    assert not env.agent.runtime.image_inputs
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "ended"])
+async def test_image_steering(group_agent, outcome):
+    env = group_agent
+    first = await execute(env, event(group=10, mention=False))
+    incoming = event(group=10, identifier=2)
+    incoming["message"].append({"type": "image", "data": {"file": "source"}})
+    await receive(env, incoming)
+    second = env.agent.queue.get_nowait()
+    env.agent.queue.task_done()
+    env.agent.pending[first.key] = deque([second])
+    env.agent.wake[first.key] = asyncio.Event()
+    run = GroupTurn(env.agent.turns, first)
+    folder = env.agent.db.execute("SELECT folder FROM sessions").fetchone()[0]
+    run.context = ImageTurn(first, env.agent.settings.workspace_dir / folder)
+    env.agent.turns.contexts[first.key] = run.context
+    run.thread = env.thread
+    run.turn = NS(steer=AsyncMock(side_effect=lambda _: run.finished.set()))
+    if outcome == "rejected":
+        run.turn.steer.side_effect = JsonRpcError(-32600, "no active turn")
+    elif outcome == "ended":
+
+        async def download(_):
+            run.finished.set()
+            return PNG
+
+        env.bot.image.side_effect = download
+    async with asyncio.timeout(2) as deadline:
+        await run.steer(deadline)
+    submitted = []
+    if outcome == "ended":
+        run.turn.steer.assert_not_awaited()
+    else:
+        submitted = run.turn.steer.call_args.args[0]
+        assert sum(isinstance(part, ImageInput) for part in submitted) == 1
+    if outcome == "accepted":
+        assert not env.agent.pending[first.key]
+        assert env.agent.runtime.seen_images(env.thread.id)
+        assert not env.agent.db.execute("SELECT * FROM group_image_seen").fetchall()
+        env.agent.runtime.observe_codex(
+            NS(
+                method="item/completed",
+                payload=NS(
+                    thread_id=env.thread.id,
+                    item=ThreadItem.model_validate(
+                        {
+                            "type": "userMessage",
+                            "id": "steered",
+                            "content": _to_wire_input(submitted),
+                        }
+                    ),
+                ),
+            )
+        )
+        assert (
+            env.agent.db.execute("SELECT count(*) FROM group_image_seen").fetchone()[0]
+            == 1
+        )
+    else:
+        assert list(env.agent.pending[first.key]) == [second]
+        assert not env.agent.runtime.seen_images(env.thread.id)
+    env.agent.pending.clear()
+    env.agent.turns.contexts.clear()
+
+
+async def test_image_correction(group_agent):
+    env = group_agent
+    env.scripts.extend([["invalid"], ['{"response":null}']])
+    incoming = event(group=10, mention=False)
+    incoming["message"].append({"type": "image", "data": {"file": "source"}})
+    await execute(env, incoming)
+    calls = env.thread.turn.call_args_list
+    assert len(calls) == 2
+    assert sum(isinstance(part, ImageInput) for part in calls[0].args[0]) == 1
+    assert calls[1].args[0] == []
+    env.bot.image.assert_awaited_once()

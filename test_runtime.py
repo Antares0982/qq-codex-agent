@@ -18,6 +18,7 @@ from openai_codex.generated.v2_all import (
 from qq_agent.config import GroupSettings, Settings
 from qq_agent.logging import read_diagnostics
 from qq_agent.messages import ImageTurn, Message
+from qq_agent.images import Images
 from qq_agent.profiles import Profiles
 from qq_agent.runtime import (
     GROUP_BASE_INSTRUCTIONS,
@@ -27,6 +28,7 @@ from qq_agent.runtime import (
     load_skills,
 )
 from qq_agent.storage import open_database
+from test_agent import PNG
 
 
 @pytest.mark.parametrize("target", [{}, {"group_id": 10}])
@@ -412,9 +414,40 @@ async def test_runtime_prompts(tmp_path, mode):
                 if index == 1 and mode == "manual":
                     with runtime.watch_codex():
                         assert await runtime.compact(thread)
+                with db:
+                    db.execute(
+                        "INSERT OR IGNORE INTO received_images (id,key,source,created) VALUES ('probe-image','group-10','source',strftime('%s','now'))"
+                    )
+                images = Images(
+                    db, NS(image=AsyncMock(return_value=PNG)), {message.key: context}
+                )
+                text = "群聊消息记录：\n" + json.dumps(
+                    {
+                        "messages": [
+                            {
+                                "message_id": f"probe-{index}",
+                                "content": [{"image_id": "probe-image"}],
+                            }
+                        ]
+                    }
+                )
+                inputs, image_ids = await images.attach_images(
+                    context,
+                    text,
+                    runtime.seen_images(thread.id),
+                    settings.group_image_limit,
+                )
+                expected_image = (
+                    index == 0
+                    or (index == 1 and mode == "manual")
+                    or (index == 2 and mode in {"pre_turn", "mid_turn", "local"})
+                )
+                assert bool(image_ids) == expected_image
+                if image_ids:
+                    runtime.image_inputs.setdefault(thread.id, {})[text] = image_ids
                 with runtime.watch_codex():
                     turn = await thread.turn(
-                        [TextInput(f"probe-{index}")],
+                        inputs,
                         approval_mode=ApprovalMode.auto_review,
                         model=model,
                         effort=ReasoningEffort.medium,
@@ -426,6 +459,26 @@ async def test_runtime_prompts(tmp_path, mode):
                             completed = True
                 assert completed
                 await asyncio.sleep(0)
+                assert not runtime.image_inputs.get(thread.id)
+                assert runtime.seen_images(thread.id) == (
+                    set()
+                    if index == 1 and mode in {"pre_turn", "mid_turn"}
+                    else {"probe-image"}
+                )
+                if expected_image:
+                    content = next(
+                        item["content"]
+                        for item in requests[-1]["input"]
+                        if item.get("role") == "user"
+                        and any(part.get("text") == text for part in item["content"])
+                    )
+                    image_index = next(
+                        i
+                        for i, part in enumerate(content)
+                        if part["type"] == "input_image"
+                    )
+                    assert "probe-image" in content[image_index - 1]["text"]
+                    assert content[image_index]["image_url"].startswith("data:image/")
                 await runtime.transcripts.close()
                 saved = (settings.state_dir / "latest-transcript.md").read_text()
                 assert turn.id in saved and "请求 token 统计" in saved

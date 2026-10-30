@@ -165,6 +165,7 @@ class GroupTurn:
 
     async def steer(self, deadline):
         assert self.turn is not None
+        assert self.thread is not None
         key = self.message.key
         pending, wake = self.owner.pending[key], self.owner.wake[key]
         while not self.finished.is_set() and not self.tripped:
@@ -179,14 +180,18 @@ class GroupTurn:
                 if self.finished.is_set() or self.tripped:
                     return
                 required = self.required or message.mentioned
-                inputs = self.groups.input(message)
+                inputs, text = await self.prepare_input(message)
+                if self.finished.is_set() or self.tripped:
+                    self.runtime.image_inputs.get(self.thread.id, {}).pop(text, None)
+                    return
                 version = self.required_version + int(message.mentioned)
-                self.input_versions[inputs[0].text] = version
+                self.input_versions[text] = version
                 pending.popleft()
                 self.groups.status(message, "submitting")
                 try:
                     await self.turn.steer(inputs)
                 except JsonRpcError as error:
+                    self.runtime.image_inputs.get(self.thread.id, {}).pop(text, None)
                     if (
                         error.code == -32600
                         and "no active turn" in error.message.lower()
@@ -209,6 +214,19 @@ class GroupTurn:
                 deadline.reschedule(
                     asyncio.get_running_loop().time() + self.owner.settings.task_timeout
                 )
+
+    async def prepare_input(self, message):
+        assert self.context is not None and self.thread is not None
+        text = self.groups.input(message)[0].text
+        inputs, ids = await self.owner.images.attach_images(
+            self.context,
+            text,
+            self.runtime.seen_images(self.thread.id),
+            self.owner.settings.group_image_limit,
+        )
+        if ids:
+            self.runtime.image_inputs.setdefault(self.thread.id, {})[text] = ids
+        return inputs, text
 
     async def stream(self):
         assert self.turn is not None
@@ -278,6 +296,7 @@ class GroupTurn:
                 await self.runtime.update_group(
                     self.thread, message, self.owner.profiles
                 )
+                inputs, text = await self.prepare_input(message)
                 self.required = message.mentioned
                 first = True
                 while True:
@@ -306,6 +325,9 @@ class GroupTurn:
                     except JsonRpcError:
                         self.starting = False
                         if first:
+                            self.runtime.image_inputs.get(self.thread.id, {}).pop(
+                                text, None
+                            )
                             self.groups.status(message, "pending")
                         raise
                     self.starting = False
@@ -382,6 +404,7 @@ class GroupTurn:
                     raise SystemExit("Interrupt failed; runtime must restart") from None
             if self.thread is not None:
                 await self.runtime.release_thread(self.thread.id)
+                self.runtime.image_inputs.pop(self.thread.id, None)
             LOG.info(
                 "Group task ended chat=%s status=%s seconds=%.1f",
                 message.key,

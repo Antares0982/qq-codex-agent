@@ -32,6 +32,10 @@
 
 生成图片从 Codex 结构化事件提取 base64，在应用内解码并原子写入工作区 `artifacts/`，图片索引及交付记录持久保存。提醒图片通过 `pics` 包资源加载。
 
+群图片自动附图由 `GroupTurn.prepare_input` 在 thread 和活动上下文建立后组装，首次 turn 和 steering 共用；冻结 JSON 保持不变，后接文字标签和 SDK `ImageInput`。`Images.read_received` 共用工具下载、鉴权、缓存及首帧预览逻辑，自动附图不经过 MCP 调用。
+
+`group_image_seen` 按 `(thread, image_id)` 持久保存已确认自动提交的图片。提交期间 `Runtime.image_inputs` 按 thread 和输入文本预留 ID，`watch_codex` 按通知顺序在 `userMessage` 完成时登记并移除预留，`contextCompaction` 完成时清空该 thread 的已确认记录，保留尚未消费的输入预留。明确 RPC 拒绝释放预留，任务收尾释放剩余预留；不在下载完成或 RPC 返回时登记，避免轮前压缩与输入确认错序。新表增量创建，旧会话从空记录开始，不回填历史图片。
+
 清理按文件系统 `max(atime, mtime)` 判断，不额外追踪读取；清理文件时同步清除过期或已不存在文件的图片索引及发送记录。保留范围见 [图片与文件](../specs/images.md)。
 
 ## 群聊候选与节奏

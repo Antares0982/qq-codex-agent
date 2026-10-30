@@ -67,6 +67,8 @@ class Runtime:
         self.group_name = group_name
         self.stickers = load_stickers()
         self.compactions = {}
+        self.image_inputs = {}
+        self.image_compactions = set()
         self.usage_ready = {}
         self.transcripts = Transcripts(settings.state_dir)
 
@@ -105,11 +107,31 @@ class Runtime:
         if event.method == "turn/completed":
             self.transcripts.completed(thread_id, payload.turn.id)
         if event.method == "item/completed":
-            if payload.item.root.type == "contextCompaction":
+            item = payload.item.root
+            if item.type == "contextCompaction":
                 with self.db:
                     self.db.execute(
                         "DELETE FROM group_snapshots WHERE thread=?", (thread_id,)
                     )
+                    identity = (thread_id, item.id)
+                    if identity not in self.image_compactions:
+                        self.db.execute(
+                            "DELETE FROM group_image_seen WHERE thread=?", (thread_id,)
+                        )
+                        self.image_compactions.add(identity)
+            elif item.type == "userMessage":
+                pending = self.image_inputs.get(thread_id, {})
+                for content in item.content:
+                    part = content.root
+                    if part.type == "text" and part.text in pending:
+                        with self.db:
+                            self.db.executemany(
+                                "INSERT OR IGNORE INTO group_image_seen VALUES (?, ?)",
+                                [
+                                    (thread_id, image_id)
+                                    for image_id in pending.pop(part.text)
+                                ],
+                            )
             return
         if event.method == "thread/tokenUsage/updated":
             tokens = payload.token_usage.last.total_tokens
@@ -144,6 +166,17 @@ class Runtime:
                 and not payload.turn.error
                 and not state["failed"]
             )
+
+    def seen_images(self, thread_id):
+        seen = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT image_id FROM group_image_seen WHERE thread=?", (thread_id,)
+            )
+        }
+        for ids in self.image_inputs.get(thread_id, {}).values():
+            seen.update(ids)
+        return seen
 
     async def context_tokens(self, thread_id):
         row = self.db.execute(
@@ -404,7 +437,7 @@ class Runtime:
             rules += "\n" + self.settings.agents_file.read_text()
         if "group_id" in message.target:
             rules += f"\n群聊记录的 time 均为系统本地时间（{datetime.now().astimezone():%Z %z}），省略时区后缀。"
-            rules += "\n群消息中的 image_id 是图片索引，需要时调用 qq_image.view_image(image_id) 查看并下载原图。messages 是本批新提交的消息，background 保留为空。引用中的 @ 不产生回复义务；不要补答或重做旧请求，优先回应当前交流。\n"
+            rules += "\n群消息中的 image_id 是图片索引，自动附图前的说明将图片与 image_id、来源 message_id 关联，quoted 表示来自引用，first_frame 表示仅展示动画首帧。记住图片对应的 image_id，后续相同 ID 可结合此前图片理解；重复图片不自动重发，压缩后再次出现时可以重新附图。不确定图片内容、图片未展示或需要原文件时调用 qq_image.view_image(image_id) 查看并下载原图。sticker_id 不自动附图，需要时也传给该工具的 image_id 参数。messages 是本批新提交的消息，background 保留为空。引用中的 @ 不产生回复义务；不要补答或重做旧请求，优先回应当前交流。\n"
             rules += (
                 "\n" + MEMBER_INSTRUCTIONS + "\n" + sticker_instructions(self.stickers)
             )

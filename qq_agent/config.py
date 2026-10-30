@@ -50,6 +50,7 @@ class Settings:
     group_prompt_allow_members: bool = False
     agent_admin_qq: str | None = None
     model_auto_compact_token_limit: int = 258000
+    group_image_limit: int = 5
 
     def check_prompts(self, required=False):
         for key in ("agents_file", "private_agents_file", "group_agents_file"):
@@ -131,7 +132,12 @@ class Settings:
             or url.username
         ):
             raise ValueError("napcat_url must be a loopback ws URL without credentials")
-        for key in ("queue_limit", "task_timeout", "model_auto_compact_token_limit"):
+        for key in (
+            "queue_limit",
+            "task_timeout",
+            "model_auto_compact_token_limit",
+            "group_image_limit",
+        ):
             value = getattr(settings, key)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{key} must be positive")

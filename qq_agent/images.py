@@ -1,9 +1,12 @@
 import base64
 import hashlib
 import io
+import json
 import time
 
+import aiohttp
 from PIL import Image
+from openai_codex import ImageInput, TextInput
 
 from image_assets import OUTPUT_LIMIT, read_image, save_image
 
@@ -31,15 +34,18 @@ class Images:
             raise ValueError("查看群图片需要 image_id 和当前任务 token。")
         if not isinstance(request["image_id"], str):
             raise ValueError("image_id 必须是字符串。")
+        return await self.read_received(context, request["image_id"], request["token"])
+
+    async def read_received(self, context, image_id, token):
         async with context.lock:
             if (
                 self.contexts.get(context.message.key) is not context
-                or request["token"] != context.token
+                or token != context.token
             ):
                 raise ValueError("图片工具不属于当前群任务。")
             row = self.db.execute(
                 "SELECT source,folder,path,created FROM received_images WHERE id=? AND key=?",
-                (request["image_id"], context.message.key),
+                (image_id, context.message.key),
             ).fetchone()
             if not row:
                 raise ValueError("图片索引不存在或不属于当前群。")
@@ -58,7 +64,7 @@ class Images:
                 with self.db:
                     self.db.execute(
                         "UPDATE received_images SET folder=?,path=? WHERE id=?",
-                        (context.folder.name, path, request["image_id"]),
+                        (context.folder.name, path, image_id),
                     )
             preview = io.BytesIO()
             with Image.open(io.BytesIO(data)) as picture:
@@ -69,7 +75,7 @@ class Images:
             return {
                 "ok": True,
                 "path": path,
-                "image_id": request["image_id"],
+                "image_id": image_id,
                 "first_frame": animated,
                 "image": {
                     "type": "image",
@@ -77,6 +83,79 @@ class Images:
                     "data": base64.b64encode(preview.getvalue()).decode(),
                 },
             }
+
+    async def attach_images(self, context, text, seen, limit):
+        inputs: list[TextInput | ImageInput] = [TextInput(text)]
+        attached, omitted, failed, repeated = [], [], [], []
+        visited = set()
+        payload = json.loads(text.split("\n", 1)[1])
+        for message in payload["messages"]:
+            for quoted, body in ((True, message.get("quote", {})), (False, message)):
+                for part in body.get("content", []):
+                    if not isinstance(part, dict) or "image_id" not in part:
+                        continue
+                    image_id = part["image_id"]
+                    if image_id in visited:
+                        continue
+                    visited.add(image_id)
+                    if image_id in seen:
+                        repeated.append(image_id)
+                        continue
+                    if len(attached) >= limit:
+                        omitted.append(image_id)
+                        continue
+                    try:
+                        result = await self.read_received(
+                            context, image_id, context.token
+                        )
+                    except (
+                        ValueError,
+                        OSError,
+                        RuntimeError,
+                        TimeoutError,
+                        aiohttp.ClientError,
+                    ) as error:
+                        LOG.warning(
+                            "Group image unavailable id=%s error=%s",
+                            image_id,
+                            log_text(error),
+                        )
+                        failed.append(image_id)
+                        continue
+                    label = json.dumps(
+                        {
+                            "image_id": image_id,
+                            "message_id": body["message_id"],
+                            "quoted": quoted,
+                            "first_frame": result["first_frame"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    inputs.extend(
+                        [
+                            TextInput("下面这张图片对应：" + label),
+                            ImageInput(
+                                "data:image/png;base64," + result["image"]["data"]
+                            ),
+                        ]
+                    )
+                    attached.append(image_id)
+        notices = []
+        for ids, reason in (
+            (repeated, "此前已自动展示，本批未重复附图"),
+            (omitted, "超出本批自动附图预算，未展示"),
+            (failed, "图片读取失败，未展示"),
+        ):
+            if ids:
+                notices.append(reason + "：" + json.dumps(ids, ensure_ascii=False))
+        if notices:
+            inputs.append(
+                TextInput(
+                    "\n".join(notices)
+                    + "\n需要查看或重看时调用 qq_image.view_image(image_id)；读取失败的图片可能仍不可用。"
+                )
+            )
+        return inputs, attached
 
     def list_images(self, context):
         rows = self.db.execute(

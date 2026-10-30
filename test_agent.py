@@ -1014,7 +1014,14 @@ class TestAgent:
         assert settings.group_prompt_allow_members is False
         assert settings.agent_admin_qq is None
         assert settings.model_auto_compact_token_limit == 258000
+        assert settings.group_image_limit == 5
         original = path.read_text()
+        path.write_text(original + "group_image_limit=7\n")
+        assert Settings.load(path).group_image_limit == 7
+        for value in ("true", "0", "-1", "1.5", '"5"'):
+            path.write_text(original + f"group_image_limit={value}\n")
+            with pytest.raises(ValueError, match="group_image_limit"):
+                Settings.load(path)
         for value in ("0", "-1", "true", "1.5", '"258000"', "[]"):
             path.write_text(original + f"model_auto_compact_token_limit={value}\n")
             with pytest.raises(ValueError, match="model_auto_compact_token_limit"):
