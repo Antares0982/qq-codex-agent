@@ -4,6 +4,7 @@ import ipaddress
 import json
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -58,7 +59,7 @@ class OneBot:
         self.settings = settings
         self.ws = None
         self.pending = {}
-        self.on_sent = None
+        self.on_sent: Callable[..., Awaitable[None]] | None = None
 
     async def call(self, action, params):
         ws = self.ws
@@ -100,7 +101,7 @@ class OneBot:
             )
             receipts.append(receipt)
             if self.on_sent:
-                self.on_sent(
+                await self.on_sent(
                     message,
                     receipt,
                     [("sticker" if sticker else "image", "outgoing")],
@@ -130,7 +131,7 @@ class OneBot:
                 )
                 receipts.append(receipt)
                 if self.on_sent:
-                    self.on_sent(
+                    await self.on_sent(
                         message,
                         receipt,
                         parts,

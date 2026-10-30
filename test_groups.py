@@ -517,6 +517,122 @@ async def test_required_version(group_agent):
         await run.notice()
 
 
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize("response", [None, "较早的回复"])
+async def test_steering_reply_order(group_agent, started, response):
+    env = group_agent
+    await receive(env, event(group=10, mention=False))
+    first = env.agent.queue.get_nowait()
+    await receive(env, event(group=10, identifier=2))
+    second = env.agent.queue.get_nowait()
+    env.agent.pending[first.key] = deque([second])
+    env.agent.wake[first.key] = asyncio.Event()
+    run = GroupTurn(env.agent.turns, first)
+    run.context = ImageTurn(first, env.agent.settings.workspace_dir)
+    run.thread = env.thread
+
+    def notification(method, item):
+        return NS(method=method, payload=NS(item=NS(root=item)))
+
+    async def stream():
+        old = NS(
+            type="agentMessage",
+            id="old",
+            phase=None,
+            text=json.dumps({"response": response, "sticker": "平静"}),
+        )
+        if started:
+            yield notification("item/started", old)
+        yield notification("item/completed", old)
+        assert run.required and not run.repair and run.errors == 0
+        yield notification(
+            "item/completed",
+            NS(
+                type="userMessage",
+                id="new-user",
+                content=[
+                    NS(
+                        root=NS(
+                            type="text", text=env.agent.groups.input(second)[0].text
+                        )
+                    )
+                ],
+            ),
+        )
+        yield notification(
+            "item/completed",
+            NS(type="agentMessage", id="silent", phase=None, text='{"response":null}'),
+        )
+        assert run.required and run.repair and run.errors == 1
+        yield notification(
+            "item/completed",
+            NS(
+                type="agentMessage",
+                id="reply",
+                phase=None,
+                text='{"response":"收到新消息","sticker":"平静"}',
+            ),
+        )
+        assert not run.required and not run.repair
+        yield turn_done()
+
+    run.turn = NS(
+        stream=stream, steer=AsyncMock(side_effect=lambda _: run.finished.set())
+    )
+    try:
+        async with asyncio.timeout(2) as deadline:
+            await run.steer(deadline)
+            run.finished.clear()
+            await run.stream()
+        assert run.required_version == run.consumed_version == 1
+    finally:
+        await run.notice()
+
+
+@pytest.mark.parametrize(
+    "info,expected",
+    [
+        ({"card": " 群里\n助手 ", "nickname": "QQ助手"}, "群里 助手"),
+        ({"nickname": "QQ助手"}, "QQ助手"),
+        ({}, "99"),
+        (TimeoutError(), "99"),
+    ],
+)
+async def test_bot_history_name(group_agent, info, expected):
+    env = group_agent
+    original = env.bot.call.side_effect
+
+    async def call(action, params):
+        if action == "get_group_member_info" and params["user_id"] == 99:
+            if isinstance(info, Exception):
+                raise info
+            return info
+        return await original(action, params)
+
+    env.bot.call.side_effect = call
+    env.scripts.append(['{"response":"你好","sticker":"开心"}'])
+    await execute(env, event(group=10))
+    assert (
+        f"当前群昵称是 {expected}。"
+        in (env.codex.thread_start.call_args.kwargs["base_instructions"])
+    )
+    await receive(env, event(group=10, identifier=2, reply="1002", mention=False))
+    batch = env.agent.queue.get_nowait()
+    records = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])[
+        "messages"
+    ]
+    own = [record for record in records if record["sender_id"] == "99"]
+    assert len(own) == 2
+    assert all(record["sender_name"] == expected for record in own)
+    env.agent.groups.status(batch, "submitted")
+    await receive(env, event(group=10, identifier=3, reply="1002", mention=False))
+    batch = env.agent.queue.get_nowait()
+    records = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])[
+        "messages"
+    ]
+    assert records[0]["quote"]["sender_name"] == expected
+
+
 async def test_reminder_timing(group_agent):
     from qq_agent import replies
 
@@ -1342,7 +1458,7 @@ async def test_system_echo(group_agent):
         assert env.agent.db.execute(
             "SELECT count(*) FROM group_messages"
         ).fetchone() == (0,)
-        env.agent.groups.sent(
+        await env.agent.groups.sent(
             trigger, {"message_id": identifier}, [("text", "reply")], system=system
         )
     rows = env.agent.db.execute("SELECT body,category FROM group_messages").fetchall()

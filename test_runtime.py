@@ -652,7 +652,9 @@ async def test_runtime_prompts(tmp_path, mode):
         await runner.cleanup()
 
 
-async def test_group_correction(tmp_path):
+@pytest.mark.parametrize("steering", [False, True])
+async def test_group_correction(tmp_path, steering):
+    from collections import deque
     from qq_agent.agent import Agent
     from qq_agent.onebot import OneBot
     from test_agent import event
@@ -661,6 +663,7 @@ async def test_group_correction(tmp_path):
     injected = asyncio.Event()
     entered = asyncio.Event()
     release = asyncio.Event()
+    steered = asyncio.Event()
 
     async def respond(request):
         body = await request.json()
@@ -674,6 +677,9 @@ async def test_group_correction(tmp_path):
 
         await emit({"type": "response.created", "response": {"id": str(number)}})
         if number == 1:
+            if steering:
+                entered.set()
+                await release.wait()
             await emit(
                 {
                     "type": "response.output_item.done",
@@ -681,8 +687,15 @@ async def test_group_correction(tmp_path):
                         "type": "message",
                         "role": "assistant",
                         "id": "bad",
-                        "phase": "commentary",
-                        "content": [{"type": "output_text", "text": "invalid JSON"}],
+                        "phase": "final_answer" if steering else "commentary",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"response":null}'
+                                if steering
+                                else "invalid JSON",
+                            }
+                        ],
                     },
                 }
             )
@@ -788,6 +801,14 @@ async def test_group_correction(tmp_path):
             codex.account = AsyncMock(return_value=NS(account=object()))
             agent = Agent(settings, bot, codex)
             original_inject = agent.runtime.inject
+            original_steer = codex._client.turn_steer
+
+            async def steer(*args, **kwargs):
+                result = await original_steer(*args, **kwargs)
+                steered.set()
+                return result
+
+            codex._client.turn_steer = steer
 
             async def inject(thread, text):
                 await original_inject(thread, text)
@@ -796,16 +817,44 @@ async def test_group_correction(tmp_path):
 
             agent.runtime.inject = inject
 
-            agent.receive(event(group=10))
+            agent.receive(event(group=10, mention=not steering))
             await asyncio.gather(*agent.receivers.values())
             await asyncio.gather(*agent.group_timers.values())
             message = agent.queue.get_nowait()
+            if steering:
+                agent.pending[message.key] = deque()
+                agent.wake[message.key] = asyncio.Event()
             task = asyncio.create_task(agent.turns.execute(message))
             await asyncio.wait_for(entered.wait(), 20)
-            await asyncio.wait_for(injected.wait(), 10)
+            if steering:
+                agent.receive(event(group=10, identifier=2))
+                await asyncio.gather(*agent.receivers.values())
+                await asyncio.gather(*agent.group_timers.values())
+                agent.pending[message.key].append(agent.queue.get_nowait())
+                agent.wake[message.key].set()
+                await asyncio.wait_for(steered.wait(), 10)
+            else:
+                await asyncio.wait_for(injected.wait(), 10)
             release.set()
             await asyncio.wait_for(task, 20)
             assert len(requests) == 2
+            if steering:
+                assert not injected.is_set()
+                history = [
+                    item
+                    for item in requests[1]["input"]
+                    if item.get("role") in {"user", "assistant"}
+                ]
+                assert [item["role"] for item in history[-3:]] == [
+                    "user",
+                    "assistant",
+                    "user",
+                ]
+                assert history[-2]["content"][0]["text"] == '{"response":null}'
+                assert agent.db.execute(
+                    "SELECT DISTINCT status FROM group_batches"
+                ).fetchall() == [("completed",)]
+                return
             assert any(
                 item.get("role") == "developer"
                 and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)

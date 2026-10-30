@@ -638,12 +638,19 @@ class Groups:
                 (key,),
             )
 
-    def sent(self, message, receipt, parts, image=None, *, system=False, quote=None):
+    async def sent(
+        self, message, receipt, parts, image=None, *, system=False, quote=None
+    ):
         if "group_id" not in message.target:
             return
         identifier = receipt.get("message_id") if isinstance(receipt, dict) else None
         if type(identifier) not in (int, str) or not str(identifier):
             raise RuntimeError("Missing QQ message receipt")
+        nickname = (
+            message.bot_id
+            if system
+            else await self.inputs.group_name(message.target, message.bot_id)
+        )
         echoed = self.db.execute(
             "SELECT event_time FROM system_messages WHERE id=?",
             (f"{message.bot_id}:{message.key}:{identifier}",),
@@ -652,7 +659,7 @@ class Groups:
             message,
             identifier=f"{message.bot_id}:{message.key}:{identifier}",
             sender_id=message.bot_id,
-            sender_name=message.bot_id,
+            sender_name=nickname,
             parts=parts,
             timestamp=echoed[0] if echoed and echoed[0] else time.time(),
             time_source="event" if echoed and echoed[0] else "sent",

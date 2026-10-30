@@ -57,6 +57,8 @@ class GroupTurn:
         self.lock = asyncio.Lock()
         self.required = False
         self.required_version = 0
+        self.consumed_version = 0
+        self.input_versions = {}
         self.visible = False
         self.errors = 0
         self.repair = False
@@ -177,10 +179,13 @@ class GroupTurn:
                 if self.finished.is_set() or self.tripped:
                     return
                 required = self.required or message.mentioned
+                inputs = self.groups.input(message)
+                version = self.required_version + int(message.mentioned)
+                self.input_versions[inputs[0].text] = version
                 pending.popleft()
                 self.groups.status(message, "submitting")
                 try:
-                    await self.turn.steer(self.groups.input(message))
+                    await self.turn.steer(inputs)
                 except JsonRpcError as error:
                     if (
                         error.code == -32600
@@ -197,8 +202,7 @@ class GroupTurn:
                     self.owner.mark(message, "interrupted")
                     raise
                 self.required = required
-                if message.mentioned:
-                    self.required_version += 1
+                self.required_version = version
                 self.submitted.append(message)
                 self.groups.status(message, "submitted")
                 self.owner.mark(message, "running")
@@ -217,18 +221,23 @@ class GroupTurn:
                     self.message.key,
                     log_text(event.payload),
                 )
-            elif event.method == "item/started":
+            elif event.method in {"item/started", "item/completed"}:
                 item = event.payload.item.root
-                if item.type == "agentMessage":
-                    versions[item.id] = self.required_version
-            elif event.method == "item/completed":
-                item = event.payload.item.root
+                if item.type == "userMessage":
+                    for content in item.content:
+                        part = content.root
+                        if part.type == "text" and part.text in self.input_versions:
+                            self.consumed_version = self.input_versions.pop(part.text)
+                if event.method == "item/started":
+                    if item.type == "agentMessage":
+                        versions[item.id] = self.consumed_version
+                    continue
                 if item.id in delivered:
                     continue
                 delivered.add(item.id)
                 if item.type == "agentMessage":
                     saw_reply = True
-                await self.deliver(item, versions.get(item.id))
+                await self.deliver(item, versions.get(item.id, self.consumed_version))
                 if self.tripped:
                     return None, saw_reply
             elif event.method == "turn/completed":
@@ -286,6 +295,7 @@ class GroupTurn:
                         (self.thread.id,),
                     ).fetchone()
                     self.starting = True
+                    self.consumed_version = self.required_version
                     try:
                         self.turn = await self.thread.turn(
                             inputs if first else [],
