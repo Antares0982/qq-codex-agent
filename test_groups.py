@@ -516,102 +516,6 @@ async def test_restart_batches(group_agent):
     assert env.agent.db.execute("SELECT total FROM group_state").fetchone() == (2,)
 
 
-async def test_required_version(group_agent):
-    env = group_agent
-    message = parse_message(event(group=10), env.agent.settings)
-    run = GroupTurn(env.agent.turns, message)
-    folder = env.agent.settings.workspace_dir / "revision"
-    folder.mkdir()
-    run.context = ImageTurn(message, folder)
-    run.thread = env.thread
-    run.required = True
-    run.required_version = 2
-    item = NS(
-        type="agentMessage",
-        text='{"response":"较早的回复","sticker":"平静"}',
-        phase=None,
-    )
-    try:
-        await run.deliver(item, version=1)
-        assert run.required
-        await run.deliver(item, version=2)
-        assert not run.required
-    finally:
-        await run.notice()
-
-
-@pytest.mark.parametrize("started", [False, True])
-@pytest.mark.parametrize("response", [None, "较早的回复"])
-async def test_steering_reply_order(group_agent, started, response):
-    env = group_agent
-    await receive(env, event(group=10, mention=False))
-    first = env.agent.queue.get_nowait()
-    await receive(env, event(group=10, identifier=2))
-    second = env.agent.queue.get_nowait()
-    env.agent.pending[first.key] = deque([second])
-    env.agent.wake[first.key] = asyncio.Event()
-    run = GroupTurn(env.agent.turns, first)
-    run.context = ImageTurn(first, env.agent.settings.workspace_dir)
-    run.thread = env.thread
-
-    def notification(method, item):
-        return NS(method=method, payload=NS(item=NS(root=item)))
-
-    async def stream():
-        old = NS(
-            type="agentMessage",
-            id="old",
-            phase=None,
-            text=json.dumps({"response": response, "sticker": "平静"}),
-        )
-        if started:
-            yield notification("item/started", old)
-        yield notification("item/completed", old)
-        assert run.required and not run.repair and run.errors == 0
-        yield notification(
-            "item/completed",
-            NS(
-                type="userMessage",
-                id="new-user",
-                content=[
-                    NS(
-                        root=NS(
-                            type="text", text=env.agent.groups.input(second)[0].text
-                        )
-                    )
-                ],
-            ),
-        )
-        yield notification(
-            "item/completed",
-            NS(type="agentMessage", id="silent", phase=None, text='{"response":null}'),
-        )
-        assert run.required and run.repair and run.errors == 1
-        yield notification(
-            "item/completed",
-            NS(
-                type="agentMessage",
-                id="reply",
-                phase=None,
-                text='{"response":"收到新消息","sticker":"平静"}',
-            ),
-        )
-        assert not run.required and not run.repair
-        yield turn_done()
-
-    run.turn = NS(
-        stream=stream, steer=AsyncMock(side_effect=lambda _: run.finished.set())
-    )
-    try:
-        async with asyncio.timeout(2) as deadline:
-            await run.steer(deadline)
-            run.finished.clear()
-            await run.stream()
-        assert run.required_version == run.consumed_version == 1
-    finally:
-        await run.notice()
-
-
 @pytest.mark.parametrize(
     "info,expected",
     [
@@ -692,55 +596,6 @@ async def test_reminder_timing(group_agent):
         2,
         1,
     )
-
-
-@pytest.mark.parametrize("low", [False, True])
-async def test_steer_rejection(group_agent, low):
-    from openai_codex.errors import JsonRpcError
-
-    env = group_agent
-    await receive(env, event(group=10, identifier=1, mention=False))
-    first = env.agent.queue.get_nowait()
-    await receive(env, event(group=10, identifier=2))
-    second = env.agent.queue.get_nowait()
-    with env.agent.db:
-        env.agent.db.execute(
-            "UPDATE group_state SET total=100,own=?", (0 if low else 50,)
-        )
-    env.agent.pending[first.key] = deque([second])
-    env.agent.wake[first.key] = asyncio.Event()
-    folder = env.agent.settings.workspace_dir / "steer"
-    folder.mkdir()
-    run = GroupTurn(env.agent.turns, first)
-    run.context = ImageTurn(first, folder)
-    run.thread = env.thread
-    run.turn = NS(steer=AsyncMock(side_effect=JsonRpcError(-32600, "no active turn")))
-    async with asyncio.timeout(1) as deadline:
-        before = deadline.when()
-        await run.steer(deadline)
-        assert before == deadline.when()
-    assert env.agent.pending[first.key][0].batch == second.batch
-    assert env.agent.db.execute(
-        "SELECT status FROM group_batches WHERE id=?", (second.batch,)
-    ).fetchone() == ("pending",)
-    assert not run.required
-    run.turn.steer.side_effect = TimeoutError()
-    async with asyncio.timeout(1) as deadline:
-        with pytest.raises(TimeoutError):
-            await run.steer(deadline)
-    assert not env.agent.pending[first.key]
-    assert env.agent.db.execute(
-        "SELECT status FROM group_batches WHERE id=?", (second.batch,)
-    ).fetchone() == ("unknown",)
-    assert second.batch not in [
-        message.batch for message in env.agent.groups.pending(first.key)
-    ]
-    texts = [
-        call.args[1]["items"][0]["content"][0]["text"]
-        for call in env.codex._client.request.call_args_list
-        if call.args[0] == "thread/inject_items"
-    ]
-    assert texts == []
 
 
 async def test_history_cleanup(group_agent):
@@ -1128,19 +983,21 @@ async def test_busy_candidates(group_agent):
     env.agent.jobs[key] = busy
     try:
         await receive(env, event(group=10, identifier=1, mention=False))
-        assert env.agent.queue.empty()
-        assert len(env.agent.groups.candidates(key)) == 1
         await receive(env, event(group=10, identifier=2))
-        batch = env.agent.queue.get_nowait()
-        assert batch.mentioned
-        payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
-        assert payload["background"] == []
-        assert [row["message_id"] for row in payload["messages"]] == ["2"]
-        assert len(env.agent.groups.candidates(key)) == 1
+        await receive(env, event(group=10, identifier=3, mention=False))
+        assert env.agent.queue.empty()
+        assert len(env.agent.groups.candidates(key)) == 3
+        assert not env.agent.groups.pending(key)
     finally:
         busy.cancel()
         await asyncio.gather(busy, return_exceptions=True)
         env.agent.jobs.pop(key)
+    env.agent.flush_group(key)
+    await drain(env)
+    batch = env.agent.queue.get_nowait()
+    assert batch.mentioned
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert [row["message_id"] for row in payload["messages"]] == ["1", "2", "3"]
 
 
 async def test_slow_preparation(group_agent):
@@ -1165,6 +1022,7 @@ async def test_cadence_upgrade(group_agent):
     with patch("qq_agent.groups.time.time", return_value=10000):
         await receive(env, event(group=10, identifier=1, mention=False))
         ordinary = env.agent.queue.get_nowait()
+        env.agent.mark(ordinary, "failed")
         await receive(env, event(group=10, identifier=2))
         direct = env.agent.queue.get_nowait()
         message = parse_message(event(group=10, identifier=3), env.agent.settings)
@@ -1769,70 +1627,6 @@ async def test_image_rejection(group_agent):
     assert not env.agent.runtime.image_inputs
 
 
-@pytest.mark.parametrize("outcome", ["accepted", "rejected", "ended"])
-async def test_image_steering(group_agent, outcome):
-    env = group_agent
-    first = await execute(env, event(group=10, mention=False))
-    incoming = event(group=10, identifier=2)
-    incoming["message"].append({"type": "image", "data": {"file": "source"}})
-    await receive(env, incoming)
-    second = env.agent.queue.get_nowait()
-    env.agent.queue.task_done()
-    env.agent.pending[first.key] = deque([second])
-    env.agent.wake[first.key] = asyncio.Event()
-    run = GroupTurn(env.agent.turns, first)
-    folder = env.agent.db.execute("SELECT folder FROM sessions").fetchone()[0]
-    run.context = ImageTurn(first, env.agent.settings.workspace_dir / folder)
-    env.agent.turns.contexts[first.key] = run.context
-    run.thread = env.thread
-    run.turn = NS(steer=AsyncMock(side_effect=lambda _: run.finished.set()))
-    if outcome == "rejected":
-        run.turn.steer.side_effect = JsonRpcError(-32600, "no active turn")
-    elif outcome == "ended":
-
-        async def download(_):
-            run.finished.set()
-            return PNG
-
-        env.bot.image.side_effect = download
-    async with asyncio.timeout(2) as deadline:
-        await run.steer(deadline)
-    submitted = []
-    if outcome == "ended":
-        run.turn.steer.assert_not_awaited()
-    else:
-        submitted = run.turn.steer.call_args.args[0]
-        assert sum(isinstance(part, ImageInput) for part in submitted) == 1
-    if outcome == "accepted":
-        assert not env.agent.pending[first.key]
-        assert env.agent.runtime.seen_images(env.thread.id)
-        assert not env.agent.db.execute("SELECT * FROM group_image_seen").fetchall()
-        env.agent.runtime.observe_codex(
-            NS(
-                method="item/completed",
-                payload=NS(
-                    thread_id=env.thread.id,
-                    item=ThreadItem.model_validate(
-                        {
-                            "type": "userMessage",
-                            "id": "steered",
-                            "content": _to_wire_input(submitted),
-                        }
-                    ),
-                ),
-            )
-        )
-        assert (
-            env.agent.db.execute("SELECT count(*) FROM group_image_seen").fetchone()[0]
-            == 1
-        )
-    else:
-        assert list(env.agent.pending[first.key]) == [second]
-        assert not env.agent.runtime.seen_images(env.thread.id)
-    env.agent.pending.clear()
-    env.agent.turns.contexts.clear()
-
-
 async def test_image_correction(group_agent):
     env = group_agent
     env.scripts.extend([["invalid"], ['{"response":null}']])
@@ -2012,3 +1806,146 @@ async def test_own_backlog(group_agent):
         "messages"
     ]
     assert [record["message_id"] for record in records] == ["500", "2"]
+
+
+@pytest.mark.parametrize("kind", ["mention", "reply", "multiple"])
+@pytest.mark.parametrize("correcting", [False, True])
+async def test_group_followup(group_agent, kind, correcting):
+    env = group_agent
+    entered, release = asyncio.Event(), asyncio.Event()
+    next_entered, next_release = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        entered.set()
+        await release.wait()
+
+    async def hold_next():
+        next_entered.set()
+        await next_release.wait()
+
+    if correcting:
+        env.scripts.append(["invalid"])
+    env.scripts.extend(
+        [
+            ['{"response":"first","sticker":"平静"}', hold],
+            [hold_next, '{"response":"second","sticker":"平静"}'],
+            ['{"response":"third","sticker":"平静"}'],
+        ]
+    )
+    await receive(env, event(group=10, identifier=1, mention=False))
+    worker = asyncio.create_task(env.agent.work())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        incoming = event(
+            group=10,
+            identifier=2,
+            mention=kind != "reply",
+            reply="1001" if kind == "reply" else None,
+        )
+        incoming["message"].append({"type": "image", "data": {"file": "source"}})
+        await receive(env, incoming)
+        incoming = event(group=10, identifier=3, mention=False)
+        incoming["message"].append({"type": "image", "data": {"file": "source"}})
+        await receive(env, incoming)
+        if kind == "multiple":
+            await receive(env, event(group=10, identifier=4))
+        assert env.agent.queue.empty()
+        assert not env.agent.groups.pending("group-10")
+        assert env.thread.turn.call_count == 1 + int(correcting)
+        env.bot.image.assert_not_awaited()
+        release.set()
+        await asyncio.wait_for(next_entered.wait(), 3)
+        inputs = env.thread.turn.call_args.args[0]
+        records = json.loads(inputs[0].text.split("\n", 1)[1])["messages"]
+        external = [row["message_id"] for row in records if row["sender_id"] != "99"]
+        assert external == (["2", "3", "4"] if kind == "multiple" else ["2", "3"])
+        assert sum(isinstance(part, ImageInput) for part in inputs) == 1
+        assert env.agent.runtime.seen_images(env.thread.id)
+        await receive(env, event(group=10, identifier=5))
+        assert env.thread.turn.call_count == 2 + int(correcting)
+        next_release.set()
+        async with asyncio.timeout(3):
+            while env.thread.turn.call_count < 3 + int(correcting) or env.agent.jobs:
+                await asyncio.sleep(0.01)
+        final = json.loads(env.thread.turn.call_args.args[0][0].text.split("\n", 1)[1])[
+            "messages"
+        ]
+        assert [row["message_id"] for row in final if row["sender_id"] != "99"] == ["5"]
+        for turn in env.turns:
+            turn.steer.assert_not_awaited()
+        assert (
+            env.codex._client.request.call_args_list[-1].args[0] == "thread/unsubscribe"
+        )
+    finally:
+        release.set()
+        next_release.set()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+async def test_followup_stop(group_agent):
+    env = group_agent
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        entered.set()
+        await release.wait()
+
+    env.scripts.extend([[hold], ['{"response":"new","sticker":"平静"}']])
+    await receive(env, event(group=10, identifier=1, mention=False))
+    worker = asyncio.create_task(env.agent.work())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await receive(env, event(group=10, identifier=2))
+        await receive(env, event(group=10, identifier=3, mention=False))
+        env.agent.receive(event(group=10, identifier=4, text="/stop"))
+        env.agent.receive(event(group=10, identifier=5))
+        await asyncio.gather(*env.agent.receivers.values())
+        await asyncio.gather(*env.agent.controls)
+        await drain(env)
+        async with asyncio.timeout(3):
+            while env.thread.turn.call_count < 2 or env.agent.jobs:
+                await asyncio.sleep(0.01)
+        records = json.loads(
+            env.thread.turn.call_args.args[0][0].text.split("\n", 1)[1]
+        )["messages"]
+        assert [row["message_id"] for row in records] == ["5"]
+        assert env.agent.db.execute(
+            "SELECT status FROM messages WHERE id IN ('99:group-10:2','99:group-10:3')"
+        ).fetchall() == [("canceled",), ("canceled",)]
+        env.turns[0].steer.assert_not_awaited()
+        env.turns[0].interrupt.assert_awaited_once()
+    finally:
+        release.set()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+async def test_followup_silence(group_agent):
+    env = group_agent
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        entered.set()
+        await release.wait()
+
+    env.scripts.extend(
+        [[hold, '{"response":null}'], ['{"response":"reply","sticker":"平静"}']]
+    )
+    await receive(env, event(group=10, identifier=1, mention=False))
+    worker = asyncio.create_task(env.agent.work())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await receive(env, event(group=10, identifier=2))
+        release.set()
+        async with asyncio.timeout(3):
+            while env.thread.turn.call_count < 2 or env.agent.jobs:
+                await asyncio.sleep(0.01)
+        assert env.thread.turn.call_count == 2
+        assert all(call.args[0] for call in env.thread.turn.call_args_list)
+        assert len(env.deliveries) == 1
+        assert env.deliveries[0]["message"][0]["data"]["text"] == "reply"
+    finally:
+        release.set()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)

@@ -1,10 +1,13 @@
 import asyncio
+import base64
+import io
 import json
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import web
+from PIL import Image
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, TextInput
 from openai_codex.generated.v2_all import (
     CommandExecResponse,
@@ -28,7 +31,6 @@ from qq_agent.runtime import (
     load_skills,
 )
 from qq_agent.storage import open_database
-from test_agent import PNG
 
 
 @pytest.mark.parametrize("target", [{}, {"group_id": 10}])
@@ -136,6 +138,8 @@ async def test_skill_permissions(tmp_path, target):
     "mode", ["plain", "manual", "pre_turn", "mid_turn", "local", "upgrade"]
 )
 async def test_runtime_prompts(tmp_path, mode):
+    original = io.BytesIO()
+    Image.new("RGBA", (1000, 1000), (255, 0, 0, 128)).save(original, "PNG")
     requests = []
     compactions = []
     local_compact = False
@@ -419,7 +423,9 @@ async def test_runtime_prompts(tmp_path, mode):
                         "INSERT OR IGNORE INTO received_images (id,key,source,created) VALUES ('probe-image','group-10','source',strftime('%s','now'))"
                     )
                 images = Images(
-                    db, NS(image=AsyncMock(return_value=PNG)), {message.key: context}
+                    db,
+                    NS(image=AsyncMock(return_value=original.getvalue())),
+                    {message.key: context},
                 )
                 text = "群聊消息记录：\n" + json.dumps(
                     {
@@ -478,7 +484,16 @@ async def test_runtime_prompts(tmp_path, mode):
                         if part["type"] == "input_image"
                     )
                     assert "probe-image" in content[image_index - 1]["text"]
-                    assert content[image_index]["image_url"].startswith("data:image/")
+                    url = content[image_index]["image_url"]
+                    assert url.startswith("data:image/webp;base64,")
+                    preview = base64.b64decode(url.split(",", 1)[1])
+                    assert len(preview) <= 200_000
+                    with Image.open(io.BytesIO(preview)) as picture:
+                        assert picture.size == (800, 800) and picture.format == "WEBP"
+                        assert picture.convert("RGBA").getchannel("A").getextrema() == (
+                            128,
+                            128,
+                        )
                 await runtime.transcripts.close()
                 saved = (settings.state_dir / "latest-transcript.md").read_text()
                 assert turn.id in saved and "请求 token 统计" in saved
@@ -693,6 +708,7 @@ async def test_runtime_prompts(tmp_path, mode):
             for forbidden in (
                 "observation_interval_seconds",
                 "message_ttl_seconds",
+                "pending_message_limit",
                 "conversation_gap_seconds",
                 "backoff_until",
                 "silences",
@@ -705,9 +721,8 @@ async def test_runtime_prompts(tmp_path, mode):
         await runner.cleanup()
 
 
-@pytest.mark.parametrize("steering", [False, True])
-async def test_group_correction(tmp_path, steering):
-    from collections import deque
+@pytest.mark.parametrize("followup", [False, True])
+async def test_group_correction(tmp_path, followup):
     from qq_agent.agent import Agent
     from qq_agent.onebot import OneBot
     from test_agent import event
@@ -716,7 +731,6 @@ async def test_group_correction(tmp_path, steering):
     injected = asyncio.Event()
     entered = asyncio.Event()
     release = asyncio.Event()
-    steered = asyncio.Event()
 
     async def respond(request):
         body = await request.json()
@@ -730,7 +744,7 @@ async def test_group_correction(tmp_path, steering):
 
         await emit({"type": "response.created", "response": {"id": str(number)}})
         if number == 1:
-            if steering:
+            if followup:
                 entered.set()
                 await release.wait()
             await emit(
@@ -740,12 +754,12 @@ async def test_group_correction(tmp_path, steering):
                         "type": "message",
                         "role": "assistant",
                         "id": "bad",
-                        "phase": "final_answer" if steering else "commentary",
+                        "phase": "final_answer" if followup else "commentary",
                         "content": [
                             {
                                 "type": "output_text",
                                 "text": '{"response":null}'
-                                if steering
+                                if followup
                                 else "invalid JSON",
                             }
                         ],
@@ -854,13 +868,7 @@ async def test_group_correction(tmp_path, steering):
             codex.account = AsyncMock(return_value=NS(account=object()))
             agent = Agent(settings, bot, codex)
             original_inject = agent.runtime.inject
-            original_steer = codex._client.turn_steer
-
-            async def steer(*args, **kwargs):
-                result = await original_steer(*args, **kwargs)
-                steered.set()
-                return result
-
+            steer = AsyncMock(side_effect=codex._client.turn_steer)
             codex._client.turn_steer = steer
 
             async def inject(thread, text):
@@ -870,99 +878,122 @@ async def test_group_correction(tmp_path, steering):
 
             agent.runtime.inject = inject
 
-            agent.receive(event(group=10, mention=not steering))
-            await asyncio.gather(*agent.receivers.values())
-            await asyncio.gather(*agent.group_timers.values())
-            message = agent.queue.get_nowait()
-            if steering:
-                agent.pending[message.key] = deque()
-                agent.wake[message.key] = asyncio.Event()
-            task = asyncio.create_task(agent.turns.execute(message))
-            await asyncio.wait_for(entered.wait(), 20)
-            if steering:
-                agent.receive(event(group=10, identifier=2))
+            try:
+                agent.receive(event(group=10, mention=not followup))
                 await asyncio.gather(*agent.receivers.values())
                 await asyncio.gather(*agent.group_timers.values())
-                agent.pending[message.key].append(agent.queue.get_nowait())
-                agent.wake[message.key].set()
-                await asyncio.wait_for(steered.wait(), 10)
-            else:
-                await asyncio.wait_for(injected.wait(), 10)
-            release.set()
-            await asyncio.wait_for(task, 20)
-            assert len(requests) == 2
-            if steering:
-                assert not injected.is_set()
-                history = [
-                    item
-                    for item in requests[1]["input"]
-                    if item.get("role") in {"user", "assistant"}
-                ]
-                assert [item["role"] for item in history[-3:]] == [
-                    "user",
-                    "assistant",
-                    "user",
-                ]
-                assert history[-2]["content"][0]["text"] == '{"response":null}'
-                assert agent.db.execute(
-                    "SELECT DISTINCT status FROM group_batches"
-                ).fetchall() == [("completed",)]
-                return
-            assert any(
-                item.get("role") == "developer"
-                and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
-                for item in requests[1]["input"]
-            )
-            assert (
-                len(
-                    [
-                        item
+                task = asyncio.create_task(
+                    agent.work()
+                    if followup
+                    else agent.turns.execute(agent.queue.get_nowait())
+                )
+                await asyncio.wait_for(entered.wait(), 20)
+                if followup:
+                    agent.receive(event(group=10, identifier=2))
+                    agent.receive(event(group=10, identifier=3, mention=False))
+                    await asyncio.gather(*agent.receivers.values())
+                    await asyncio.gather(*agent.group_timers.values())
+                    assert agent.queue.empty()
+                    assert len(requests) == 1
+                    steer.assert_not_awaited()
+                else:
+                    await asyncio.wait_for(injected.wait(), 10)
+                release.set()
+                if followup:
+                    async with asyncio.timeout(20):
+                        while len(requests) < 2 or agent.jobs:
+                            await asyncio.sleep(0.01)
+                else:
+                    await asyncio.wait_for(task, 20)
+                assert len(requests) == 2
+                if followup:
+                    steer.assert_not_awaited()
+                    assert not injected.is_set()
+                    records = [
+                        json.loads(content["text"].split("\n", 1)[1])["messages"]
                         for item in requests[1]["input"]
                         if item.get("role") == "user"
-                        and "群聊消息记录" in json.dumps(item, ensure_ascii=False)
+                        for content in item.get("content", [])
+                        if content.get("text", "").startswith("群聊消息记录：\n")
                     ]
-                )
-                == 1
-            )
-            assert (
-                len(
-                    [
-                        call
-                        for call in bot.call.call_args_list
-                        if call.args[0] == "send_msg"
+                    assert [row["message_id"] for row in records[-1]] == ["2", "3"]
+                    history = [
+                        item
+                        for item in requests[1]["input"]
+                        if item.get("role") in {"user", "assistant"}
                     ]
+                    assert [item["role"] for item in history[-3:]] == [
+                        "user",
+                        "assistant",
+                        "user",
+                    ]
+                    assert history[-2]["content"][0]["text"] == '{"response":null}'
+                    assert agent.db.execute(
+                        "SELECT DISTINCT status FROM group_batches"
+                    ).fetchall() == [("completed",)]
+                    return
+                assert any(
+                    item.get("role") == "developer"
+                    and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
+                    for item in requests[1]["input"]
                 )
-                == 1
-            )
-            assert agent.db.execute("SELECT status FROM group_batches").fetchone() == (
-                "completed",
-            )
-            agent.receive(event(group=10, identifier=2, mention=False, reply="123"))
-            await asyncio.gather(*agent.receivers.values())
-            await asyncio.gather(*agent.group_timers.values())
-            await asyncio.wait_for(agent.turns.execute(agent.queue.get_nowait()), 20)
-            assert len(requests) == 4
-            encoded = json.dumps(requests, ensure_ascii=False)
-            for forbidden in (
-                "observation_interval_seconds",
-                "message_ttl_seconds",
-                "conversation_gap_seconds",
-                "backoff_until",
-                "silences",
-                "参与度偏低",
-            ):
-                assert forbidden not in encoded
-            assert any(
-                item.get("role") == "developer"
-                and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
-                for item in requests[3]["input"]
-            )
-            assert all(
-                not item.get("role") == "user"
-                or "上一条回复解析失败" not in json.dumps(item, ensure_ascii=False)
-                for body in requests
-                for item in body["input"]
-            )
+                assert (
+                    len(
+                        [
+                            item
+                            for item in requests[1]["input"]
+                            if item.get("role") == "user"
+                            and "群聊消息记录" in json.dumps(item, ensure_ascii=False)
+                        ]
+                    )
+                    == 1
+                )
+                assert (
+                    len(
+                        [
+                            call
+                            for call in bot.call.call_args_list
+                            if call.args[0] == "send_msg"
+                        ]
+                    )
+                    == 1
+                )
+                assert agent.db.execute(
+                    "SELECT status FROM group_batches"
+                ).fetchone() == ("completed",)
+                agent.receive(event(group=10, identifier=2, mention=False, reply="123"))
+                await asyncio.gather(*agent.receivers.values())
+                await asyncio.gather(*agent.group_timers.values())
+                await asyncio.wait_for(
+                    agent.turns.execute(agent.queue.get_nowait()), 20
+                )
+                assert len(requests) == 4
+                encoded = json.dumps(requests, ensure_ascii=False)
+                for forbidden in (
+                    "observation_interval_seconds",
+                    "message_ttl_seconds",
+                    "pending_message_limit",
+                    "conversation_gap_seconds",
+                    "backoff_until",
+                    "silences",
+                    "参与度偏低",
+                ):
+                    assert forbidden not in encoded
+                assert any(
+                    item.get("role") == "developer"
+                    and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
+                    for item in requests[3]["input"]
+                )
+                assert all(
+                    not item.get("role") == "user"
+                    or "上一条回复解析失败" not in json.dumps(item, ensure_ascii=False)
+                    for body in requests
+                    for item in body["input"]
+                )
+            finally:
+                if task and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
     finally:
         release.set()
         if task and not task.done():

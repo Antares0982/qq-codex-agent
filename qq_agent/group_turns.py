@@ -54,17 +54,12 @@ class GroupTurn:
         self.thread = None
         self.turn = None
         self.finished = asyncio.Event()
-        self.lock = asyncio.Lock()
         self.required = False
-        self.required_version = 0
-        self.consumed_version = 0
-        self.input_versions = {}
         self.visible = False
         self.errors = 0
         self.repair = False
         self.tripped = False
         self.reminder = None
-        self.steering = None
         self.submitted = []
         self.starting = False
 
@@ -106,114 +101,55 @@ class GroupTurn:
             ),
         )
 
-    async def deliver(self, item, version=None):
+    async def deliver(self, item):
         assert self.context is not None
         if item.type == "imageGeneration" and item.status == "completed":
             self.owner.images.save_generated(self.context.folder, item)
             return
         if item.type != "agentMessage":
             return
-        async with self.lock:
-            await self.notice(self.visible)
-            LOG.info(
-                "Assistant chat=%s phase=%s text=%s",
-                self.message.key,
-                item.phase,
-                log_text(item.text),
+        await self.notice(self.visible)
+        LOG.info(
+            "Assistant chat=%s phase=%s text=%s",
+            self.message.key,
+            item.phase,
+            log_text(item.text),
+        )
+        try:
+            text, sticker, quote = parse_reply(
+                item.text,
+                self.runtime.stickers,
+                self.required,
             )
-            try:
-                text, sticker, quote = parse_reply(
-                    item.text,
-                    self.runtime.stickers,
-                    self.required
-                    and (version is None or version == self.required_version),
-                )
-                if quote is not None and not self.groups.can_quote(
-                    self.message.key, quote
-                ):
-                    raise ValueError(
-                        "quote 必须引用本群可见历史中的消息，不能引用系统消息"
-                    )
-            except (ValueError, TypeError, RecursionError) as error:
-                await self.correct(error)
-                return
-            self.errors = 0
-            self.repair = False
-            if sticker is not None:
-                await self.replies.bot.send(
-                    self.message,
-                    image=sticker,
-                    sticker=True,
-                    **({"quote": quote} if quote is not None and not text else {}),
-                )
-                self.context.chat_output = True
-                if not self.visible:
-                    self.visible = True
-                    await self.notice(True)
-            if text:
-                await self.replies.bot.send(
-                    self.message,
-                    text=text,
-                    **({"quote": quote} if quote is not None else {}),
-                )
-                if version is None or version == self.required_version:
-                    self.required = False
-                self.context.chat_output = True
-                if not self.visible:
-                    self.visible = True
-                    await self.notice(True)
-
-    async def steer(self, deadline):
-        assert self.turn is not None
-        assert self.thread is not None
-        key = self.message.key
-        pending, wake = self.owner.pending[key], self.owner.wake[key]
-        while not self.finished.is_set() and not self.tripped:
-            if not pending:
-                wake.clear()
-                await wake.wait()
-                continue
-            message = pending[0]
-            if message.batch is None or not message.direct:
-                return
-            async with self.lock:
-                if self.finished.is_set() or self.tripped:
-                    return
-                required = self.required or message.mentioned
-                inputs, text = await self.prepare_input(message)
-                if self.finished.is_set() or self.tripped:
-                    self.runtime.image_inputs.get(self.thread.id, {}).pop(text, None)
-                    return
-                version = self.required_version + int(message.mentioned)
-                self.input_versions[text] = version
-                pending.popleft()
-                self.groups.status(message, "submitting")
-                try:
-                    await self.turn.steer(inputs)
-                except JsonRpcError as error:
-                    self.runtime.image_inputs.get(self.thread.id, {}).pop(text, None)
-                    if (
-                        error.code == -32600
-                        and "no active turn" in error.message.lower()
-                    ):
-                        self.groups.status(message, "pending")
-                        pending.appendleft(message)
-                        return
-                    self.groups.status(message, "pending")
-                    self.owner.mark(message, "failed")
-                    raise
-                except BaseException:
-                    self.groups.status(message, "unknown")
-                    self.owner.mark(message, "interrupted")
-                    raise
-                self.required = required
-                self.required_version = version
-                self.submitted.append(message)
-                self.groups.status(message, "submitted")
-                self.owner.mark(message, "running")
-                deadline.reschedule(
-                    asyncio.get_running_loop().time() + self.owner.settings.task_timeout
-                )
+            if quote is not None and not self.groups.can_quote(self.message.key, quote):
+                raise ValueError("quote 必须引用本群可见历史中的消息，不能引用系统消息")
+        except (ValueError, TypeError, RecursionError) as error:
+            await self.correct(error)
+            return
+        self.errors = 0
+        self.repair = False
+        if sticker is not None:
+            await self.replies.bot.send(
+                self.message,
+                image=sticker,
+                sticker=True,
+                **({"quote": quote} if quote is not None and not text else {}),
+            )
+            self.context.chat_output = True
+            if not self.visible:
+                self.visible = True
+                await self.notice(True)
+        if text:
+            await self.replies.bot.send(
+                self.message,
+                text=text,
+                **({"quote": quote} if quote is not None else {}),
+            )
+            self.required = False
+            self.context.chat_output = True
+            if not self.visible:
+                self.visible = True
+                await self.notice(True)
 
     async def prepare_input(self, message):
         assert self.context is not None and self.thread is not None
@@ -230,7 +166,7 @@ class GroupTurn:
 
     async def stream(self):
         assert self.turn is not None
-        delivered, versions = set(), {}
+        delivered = set()
         saw_reply = False
         async for event in self.turn.stream():
             if event.method == "error":
@@ -239,23 +175,14 @@ class GroupTurn:
                     self.message.key,
                     log_text(event.payload),
                 )
-            elif event.method in {"item/started", "item/completed"}:
+            elif event.method == "item/completed":
                 item = event.payload.item.root
-                if item.type == "userMessage":
-                    for content in item.content:
-                        part = content.root
-                        if part.type == "text" and part.text in self.input_versions:
-                            self.consumed_version = self.input_versions.pop(part.text)
-                if event.method == "item/started":
-                    if item.type == "agentMessage":
-                        versions[item.id] = self.consumed_version
-                    continue
                 if item.id in delivered:
                     continue
                 delivered.add(item.id)
                 if item.type == "agentMessage":
                     saw_reply = True
-                await self.deliver(item, versions.get(item.id, self.consumed_version))
+                await self.deliver(item)
                 if self.tripped:
                     return None, saw_reply
             elif event.method == "turn/completed":
@@ -314,7 +241,6 @@ class GroupTurn:
                         (self.thread.id,),
                     ).fetchone()
                     self.starting = True
-                    self.consumed_version = self.required_version
                     try:
                         self.turn = await self.thread.turn(
                             inputs if first else [],
@@ -344,14 +270,7 @@ class GroupTurn:
                         usage[0] if usage else "unknown",
                     )
                     self.visible = False
-                    async with asyncio.TaskGroup() as tasks:
-                        if message.key in self.owner.pending:
-                            self.steering = tasks.create_task(self.steer(deadline))
-                        streaming = tasks.create_task(self.stream())
-                        turn_status, saw_reply = await streaming
-                        if self.steering:
-                            self.steering.cancel()
-                    self.steering = None
+                    turn_status, saw_reply = await self.stream()
                     await self.notice()
                     if self.tripped:
                         break
@@ -384,9 +303,6 @@ class GroupTurn:
                 await self.replies.safe_send(message, "哎呀！宕机了……")
         finally:
             await self.notice()
-            if self.steering:
-                self.steering.cancel()
-                await asyncio.gather(self.steering, return_exceptions=True)
             if self.starting:
                 self.groups.status(message, "unknown")
             for submitted in self.submitted:

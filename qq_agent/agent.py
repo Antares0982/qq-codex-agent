@@ -264,7 +264,7 @@ class Agent:
                 busy = key in self.jobs or any(
                     message.batch in self.scheduled for message in batches
                 )
-                if busy and not direct:
+                if busy:
                     LOG.debug(
                         "Group observation waiting chat=%s reason=busy candidates=%d",
                         key,
@@ -302,14 +302,8 @@ class Agent:
                         len(candidates),
                         direct,
                     )
-                    selected = (
-                        [message for message in candidates if message.direct]
-                        if busy
-                        else candidates
-                    )
-                    self.groups.freeze(selected[-1], direct_only=busy)
-                    if len(selected) == len(candidates):
-                        self.group_windows.pop(key, None)
+                    self.groups.freeze(candidates[-1])
+                    self.group_windows.pop(key, None)
                 for message in self.groups.pending(key, retry=False):
                     if message.batch in self.scheduled:
                         continue

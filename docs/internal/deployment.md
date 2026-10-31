@@ -232,7 +232,7 @@ nix flake update qq-codex-agent --flake ./hosts/rpi5
 
 先停止服务并备份状态目录、旧程序版本及旧加密配置。每群删除 `request_interval_minutes`、`request_message_count`、`participation_ratio`，改为 [配置与权限](../specs/configuration.md) 的三个秒级字段；不按旧值换算。主配置及可选 allowlist 文件都要检查；旧字段会阻止启动。
 
-数据库自动备份到 `sessions.pre-cadence-v3.sqlite` 后事务升级，保留 thread、工作目录、图片索引、成员／群记忆及交接摘要，不主动清空会话。旧可识别的普通积压接受时效检查，旧直接 @ 保留义务，无法确认的旧引用保守按直接互动保留；进行中或提交结果未知的批次不重放。重启等待外部消息唤醒，不自动补跑。
+数据库自动备份到 `sessions.pre-cadence-v3.sqlite` 后事务升级，保留 thread、工作目录、图片索引、成员／群记忆及交接摘要，不主动清空会话。旧可识别的普通积压接受当前条数上限检查，旧直接 @ 保留义务，无法确认的旧引用保守按直接互动保留；进行中或提交结果未知的批次不重放。重启等待外部消息唤醒，不自动补跑。
 
 RPi 的 `qq-codex-allowlist.age` 实为完整应用 TOML。使用 Nix 仓库的 agenix 编辑流程，只迁移群节奏字段，验证其他配置语义一致；明文不得写入 Git、Nix store 或日志。保留接收者、服务权限及挂载路径。先发布应用、更新 RPi 应用 source input，再将新程序和新密文配置同代部署。配置检查不解密，因此还须在受限临时环境中用新 Settings 解析明文，只输出成功／失败。
 

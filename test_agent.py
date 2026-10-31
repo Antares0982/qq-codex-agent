@@ -2718,7 +2718,7 @@ class TestAgent:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
 
-    async def test_parallel_steering(self):
+    async def test_parallel_updates(self):
         turns, queues, entered = {}, {}, {}
         for key in ("group-10", "private-1"):
             queues[key] = asyncio.Queue()
@@ -2762,33 +2762,23 @@ class TestAgent:
                 "Other",
             )
             for _ in range(100):
-                if (
-                    turns["group-10"].steer.await_count == 1
-                    and turns["private-1"].steer.await_count == 1
-                ):
+                if turns["private-1"].steer.await_count == 1:
                     break
                 await asyncio.sleep(0.01)
-            assert turns["group-10"].steer.await_count == 1
+            turns["group-10"].steer.assert_not_awaited()
+            await asyncio.gather(*self.agent.receivers.values())
+            assert threads["group-10"].turn.await_count == 1
+            assert not self.agent.groups.pending("group-10")
             assert turns["private-1"].steer.await_count == 1
             assert not any(
                 call.args[0] == "set_msg_emoji_like"
                 for call in self.bot.call.call_args_list
             )
-            texts = [
-                call.args[0][0].text for call in turns["group-10"].steer.call_args_list
+            candidates = self.agent.groups.candidates("group-10")
+            assert [(message.sender_id, message.text) for message in candidates] == [
+                ("1", "first"),
+                ("2", "second"),
             ]
-            records = [
-                record
-                for text in texts
-                for record in json.loads(text.split("\n", 1)[1])["messages"]
-            ]
-            assert [
-                (record["sender_id"], record["content"][0]) for record in records
-            ] == [("1", "first"), ("2", "second")]
-            assert all(
-                len(call.args[0]) == 1
-                for call in turns["group-10"].steer.call_args_list
-            )
             steered = turns["private-1"].steer.call_args.args[0]
             assert len(steered) == 3
             assert "引用 QQ 用户 Other（ID: 2）" in steered[0].text
@@ -2823,7 +2813,9 @@ class TestAgent:
                 assert output[0]["ok"]
                 assert self.bot.send.call_args.args[0].key == context.message.key
             await self.agent.commands.control(
-                parse_message(event(group=10, text="/new blank"), self.settings)
+                parse_message(
+                    event(group=10, identifier=4, text="/new blank"), self.settings
+                )
             )
             turns["group-10"].interrupt.assert_awaited_once()
             turns["private-1"].interrupt.assert_not_awaited()
@@ -2832,7 +2824,7 @@ class TestAgent:
             queues["private-1"].put_nowait(turn_done())
             await asyncio.wait_for(asyncio.gather(*self.agent.jobs.values()), 2)
             statuses = dict(self.agent.db.execute("SELECT id, status FROM messages"))
-            assert statuses["99:group-10:3"] == "interrupted"
+            assert statuses["99:group-10:3"] == "canceled"
             assert statuses["99:private-1:2"] == "completed"
         finally:
             worker.cancel()

@@ -461,7 +461,7 @@ class Groups:
             delay,
         )
 
-    def freeze(self, message, direct_only=False):
+    def freeze(self, message):
         self.expire(message.key)
         now = time.time()
         row = self.db.execute(
@@ -470,8 +470,8 @@ class Groups:
         ).fetchone()
         generation = (row[1] + int(now - row[0] > 7200)) if row else 0
         rows = self.db.execute(
-            "SELECT id,body,message,priority,segment,sequence FROM group_messages WHERE key=? AND own=0 AND batch IS NULL AND consumed=0 AND ready=1 AND (?=0 OR priority=1) AND sequence <= (SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence",
-            (message.key, direct_only, message.identifier),
+            "SELECT id,body,message,priority,segment,sequence FROM group_messages WHERE key=? AND own=0 AND batch IS NULL AND consumed=0 AND ready=1 AND sequence <= (SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence",
+            (message.key, message.identifier),
         ).fetchall()
         if not rows:
             raise ValueError("No eligible group messages")
