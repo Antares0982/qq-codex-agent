@@ -117,12 +117,12 @@ private_users = ["123456789"]
 
 [groups."987654321"]
 observation_interval_seconds = 60
-message_ttl_seconds = 120
+pending_message_limit = 100
 conversation_gap_seconds = 300
 
 [groups."876543210"]
 observation_interval_seconds = 60
-message_ttl_seconds = 120
+pending_message_limit = 100
 conversation_gap_seconds = 300
 ```
 
@@ -239,3 +239,10 @@ RPi 的 `qq-codex-allowlist.age` 实为完整应用 TOML。使用 Nix 仓库的 
 回滚需停服并同时恢复旧程序、对应旧配置及迁移前数据库；不能只回滚密文或二进制。Pi 系统只在 Pi 构建和切换，本机只做配置评估与本机架构应用包构建。
 
 群消息分类升级通过 SQLite 增量增加 category 及系统消息元数据。保留旧 thread、历史内容、图片 ID 和冻结批次，不回写或清空已经发给模型的旧上下文；新消息才使用系统过滤、稳定媒体 ID 和 sticker_id。
+
+
+## 群消息积压配置迁移
+
+升级条数保留版本前，将完整配置及独立白名单内每群的 `message_ttl_seconds` 删除，改为 `pending_message_limit = 100`，或省略以使用默认值。旧字段会阻止启动并提示迁移，不能把秒数直接当成条数。观察间隔和片段间隔继续使用秒，保留规则以 [群聊协议](../specs/groups.md) 为准。
+
+此升级无需改表、清空数据库或新建 thread，不恢复已淘汰、取消或已处理消息。旧版明确未提交的批次在重新调度时按新条数限制检查；结果未知的任务不重跑。更新真实配置和切换服务属于部署操作，不随源码修改自动执行。

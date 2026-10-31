@@ -20,5 +20,5 @@ group_image_limit = 5
 # 群表存在即开放全员参与；不再支持 users。顶层配置放在群表之前。
 # [groups."987654321"]
 # observation_interval_seconds = 60
-# message_ttl_seconds = 120
+# pending_message_limit = 100
 # conversation_gap_seconds = 300

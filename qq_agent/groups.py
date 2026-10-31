@@ -168,6 +168,7 @@ class Groups:
                 "UPDATE group_state SET total=total+1, own=own+?, count=count+? WHERE key=?",
                 (own, not own and message.category == "normal", message.key),
             )
+        self.expire(message.key)
         return True
 
     async def resolve_body(self, body, target):
@@ -298,6 +299,7 @@ class Groups:
                     message.identifier,
                 ),
             )
+        self.expire(message.key)
         return readable
 
     def can_quote(self, key, identifier):
@@ -348,29 +350,19 @@ class Groups:
         ]
 
     def expire(self, key):
-        config = self.settings.groups[key[6:]]
-        cutoff = time.time() - config.message_ttl_seconds
+        limit = self.settings.groups[key[6:]].pending_message_limit
         with self.db:
-            expired_batches = [
-                row[0]
-                for row in self.db.execute(
-                    "SELECT b.id FROM group_batches b WHERE b.key=? AND b.status='pending' AND b.priority=0 AND EXISTS (SELECT 1 FROM group_messages m WHERE m.batch=b.id AND ((m.category='normal' AND m.created<=?) OR (m.category='normal' AND m.segment<(SELECT segment FROM group_state WHERE key=?))))",
-                    (key, cutoff, key),
-                )
-            ]
             rows = self.db.execute(
-                "SELECT id FROM group_messages WHERE key=? AND own=0 AND category='normal' AND consumed=0 AND priority=0 AND batch IS NULL AND (created<=? OR segment<(SELECT segment FROM group_state WHERE key=?))",
-                (key, cutoff, key),
+                "SELECT m.id,m.batch FROM group_messages m WHERE m.key=? AND m.consumed=0 AND m.priority=0 AND m.ready!=0 AND (m.batch IS NULL OR EXISTS (SELECT 1 FROM group_batches b WHERE b.id=m.batch AND b.status='pending')) ORDER BY m.sequence DESC LIMIT -1 OFFSET ?",
+                (key, limit),
             ).fetchall()
-            for batch in expired_batches:
+            for batch in {row[1] for row in rows if row[1] is not None}:
                 self.db.execute(
-                    "UPDATE group_messages SET batch=NULL WHERE batch=? AND category='low' AND priority=0",
+                    "UPDATE messages SET status='received' WHERE id IN (SELECT id FROM group_messages WHERE batch=?)",
                     (batch,),
                 )
-                rows.extend(
-                    self.db.execute(
-                        "SELECT id FROM group_messages WHERE batch=?", (batch,)
-                    ).fetchall()
+                self.db.execute(
+                    "UPDATE group_messages SET batch=NULL WHERE batch=?", (batch,)
                 )
                 self.db.execute(
                     "UPDATE group_batches SET status='expired' WHERE id=?", (batch,)
@@ -379,15 +371,22 @@ class Groups:
                     "UPDATE messages SET status='expired' WHERE id=(SELECT json_extract(message,'$.identifier') FROM group_batches WHERE id=?)",
                     (batch,),
                 )
-            for (identifier,) in rows:
+            for identifier, _ in rows:
                 self.db.execute(
                     "UPDATE group_messages SET consumed=1 WHERE id=?", (identifier,)
                 )
                 self.db.execute(
                     "UPDATE messages SET status='expired' WHERE id=?", (identifier,)
                 )
+            if rows:
+                self.db.execute(
+                    "UPDATE group_state SET count=(SELECT count(*) FROM group_messages WHERE key=? AND own=0 AND consumed=0 AND ready=1 AND batch IS NULL) WHERE key=?",
+                    (key, key),
+                )
         if rows:
-            LOG.info("Group candidates expired chat=%s count=%d", key, len(rows))
+            LOG.info(
+                "Group backlog trimmed chat=%s count=%d limit=%d", key, len(rows), limit
+            )
 
     def candidates(self, key):
         self.expire(key)

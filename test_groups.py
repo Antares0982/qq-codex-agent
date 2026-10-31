@@ -208,11 +208,13 @@ def test_reply_errors(payload, required):
         {"observation_interval_seconds": 0},
         {"observation_interval_seconds": True},
         {"observation_interval_seconds": 0.5},
-        {"message_ttl_seconds": -1},
+        {"pending_message_limit": -1},
         {"conversation_gap_seconds": float("inf")},
         {"conversation_gap_seconds": float("nan")},
-        {"message_ttl_seconds": 30},
-        {"conversation_gap_seconds": 60},
+        {"pending_message_limit": True},
+        {"pending_message_limit": 0},
+        {"pending_message_limit": 1.5},
+        {"conversation_gap_seconds": 30},
     ],
 )
 def test_group_config(options):
@@ -761,8 +763,10 @@ async def test_history_cleanup(group_agent):
     await receive(env, event(group=10, mention=False))
     assert env.agent.db.execute("SELECT total,count FROM group_state").fetchone() == (
         2,
-        1,
+        0,
     )
+    batch = env.agent.queue.get_nowait()
+    assert '"message_id": "2"' in env.agent.groups.input(batch)[0].text
 
 
 async def test_state_upgrade(group_agent):
@@ -903,10 +907,10 @@ async def test_idle_boundary(group_agent):
         await receive(env, event(group=10, identifier=2, mention=False, text="新话题"))
     batch = env.agent.queue.get_nowait()
     payload = env.agent.groups.input(batch)[0].text
-    assert "新话题" in payload and "旧讨论" not in payload
+    assert "新话题" in payload and "旧讨论" in payload
     assert env.agent.db.execute(
         "SELECT status FROM messages WHERE id='99:group-10:1'"
-    ).fetchone() == ("expired",)
+    ).fetchone() == ("received",)
     assert env.agent.db.execute("SELECT count(*) FROM group_messages").fetchone() == (
         2,
     )
@@ -988,15 +992,18 @@ async def test_direct_bypasses_backoff(group_agent):
     assert env.agent.queue.get_nowait().mentioned
 
 
-async def test_candidate_expiry(group_agent):
+async def test_candidate_age(group_agent):
     env = group_agent
     with patch("qq_agent.groups.time.time", return_value=10000):
         await receive(env, event(group=10, identifier=1, mention=False), dispatch=False)
         await receive(env, event(group=10, identifier=2), dispatch=False)
     with patch("qq_agent.groups.time.time", return_value=10120):
         candidates = env.agent.groups.candidates("group-10")
-        assert [message.identifier for message in candidates] == ["99:group-10:2"]
-        assert candidates[0].mentioned
+        assert [message.identifier for message in candidates] == [
+            "99:group-10:1",
+            "99:group-10:2",
+        ]
+        assert candidates[1].mentioned
     await drain(env)
     batch = env.agent.queue.get_nowait()
     assert batch.mentioned
@@ -1019,45 +1026,40 @@ async def test_history_once(group_agent, status):
     assert env.agent.groups.input(first)[0].text == original
 
 
-async def test_pending_expiry(group_agent):
+async def test_pending_age(group_agent):
     env = group_agent
     with patch("qq_agent.groups.time.time", return_value=10000):
         await receive(env, event(group=10, mention=False))
     batch = env.agent.queue.get_nowait()
     with patch("qq_agent.groups.time.time", return_value=10120):
         await env.agent.turns.execute(batch)
-    env.thread.turn.assert_not_awaited()
+    env.thread.turn.assert_awaited_once()
     assert env.agent.db.execute("SELECT status FROM group_batches").fetchone() == (
-        "expired",
+        "completed",
     )
 
 
 @pytest.mark.parametrize("frozen", [False, True])
-async def test_low_after_expiry(group_agent, frozen):
+async def test_trimmed_batch(group_agent, frozen):
     env = group_agent
-    with patch("qq_agent.groups.time.time", return_value=10000):
-        incoming = event(group=10, identifier=1, mention=False, text="")
-        incoming["message"] = [{"type": "face", "data": {"id": "178"}}]
-        await receive(env, incoming)
-        await receive(
-            env, event(group=10, identifier=2, mention=False), dispatch=frozen
-        )
-    with patch("qq_agent.groups.time.time", return_value=10120):
-        if frozen:
-            await env.agent.turns.execute(env.agent.queue.get_nowait())
-        await drain(env)
-        env.agent.flush_group("group-10")
-        await drain(env)
-        assert env.agent.queue.empty() and not env.agent.group_windows
+    env.agent.settings.groups["10"].pending_message_limit = 2
+    incoming = event(group=10, identifier=1, mention=False, text="")
+    incoming["message"] = [{"type": "face", "data": {"id": "178"}}]
+    await receive(env, incoming)
+    await receive(env, event(group=10, identifier=2, mention=False), dispatch=frozen)
+    old = env.agent.queue.get_nowait() if frozen else None
+    snapshot = env.agent.groups.input(old)[0].text if old else None
+    await receive(env, event(group=10, identifier=3, mention=False))
+    if old:
+        assert env.agent.groups.input(old)[0].text == snapshot
+        await env.agent.turns.execute(old)
         env.thread.turn.assert_not_awaited()
-        assert env.agent.db.execute(
-            "SELECT id FROM group_messages WHERE consumed=0 AND batch IS NULL"
-        ).fetchall() == [("99:group-10:1",)]
-        await receive(env, event(group=10, identifier=3, mention=False))
-        batch = env.agent.queue.get_nowait()
-        payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
-        assert payload["background"] == []
-        assert [row["message_id"] for row in payload["messages"]] == ["1", "3"]
+    batch = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
+    assert [row["message_id"] for row in payload["messages"]] == ["2", "3"]
+    assert env.agent.db.execute(
+        "SELECT status FROM messages WHERE id='99:group-10:1'"
+    ).fetchone() == ("expired",)
 
 
 async def test_legacy_background(group_agent):
@@ -1193,8 +1195,8 @@ async def test_cadence_upgrade(group_agent):
         }
     with patch("qq_agent.groups.time.time", return_value=10120):
         batches = env.agent.groups.pending("group-10")
-        assert len(batches) == 1 and batches[0].batch == direct.batch
-        assert batches[0].direct and batches[0].mentioned
+        assert {batch.batch for batch in batches} == {ordinary.batch, direct.batch}
+        assert next(batch for batch in batches if batch.batch == direct.batch).mentioned
         candidates = env.agent.groups.candidates("group-10")
         assert len(candidates) == 1 and candidates[0].mentioned
     assert env.agent.db.execute("PRAGMA user_version").fetchone() == (3,)
@@ -1211,7 +1213,12 @@ async def test_cadence_upgrade(group_agent):
 
 @pytest.mark.parametrize(
     "field",
-    ["request_message_count", "request_interval_minutes", "participation_ratio"],
+    [
+        "request_message_count",
+        "request_interval_minutes",
+        "participation_ratio",
+        "message_ttl_seconds",
+    ],
 )
 def test_legacy_config(field, tmp_path):
     path = tmp_path / "config.toml"
@@ -1265,9 +1272,10 @@ async def test_low_backlog(group_agent):
     await receive(env, event(group=10, identifier=111, mention=False))
     batch = env.agent.queue.get_nowait()
     payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
-    assert len(payload["messages"]) == 111
+    assert len(payload["messages"]) == 100
+    assert payload["messages"][0]["message_id"] == "11"
     assert (
-        len({row["content"][0]["sticker_id"] for row in payload["messages"][:100]}) == 1
+        len({row["content"][0]["sticker_id"] for row in payload["messages"][:89]}) == 1
     )
     env.bot.image.assert_not_called()
     await env.agent.turns.execute(batch)
@@ -1924,3 +1932,83 @@ async def test_compressed_preview(group_agent, animated, ended):
             + ";base64,"
             + result["image"]["data"]
         )
+
+
+async def test_pending_limit(group_agent):
+    env = group_agent
+    key = "group-10"
+    env.agent.resetting.add(key)
+    await receive(env, event(group=10, identifier=0), dispatch=False)
+    for identifier in range(1, 101):
+        await receive(
+            env, event(group=10, identifier=identifier, mention=False), dispatch=False
+        )
+    assert len(env.agent.groups.candidates(key)) == 101
+    await receive(env, event(group=10, identifier=101, mention=False), dispatch=False)
+    system = parse_message(
+        event(group=10, identifier=102, text="/status"), env.agent.settings
+    )
+    env.agent.groups.system(system)
+    candidates = env.agent.groups.candidates(key)
+    assert [message.identifier for message in candidates] == [
+        f"99:{key}:{index}" for index in [0, *range(2, 102)]
+    ]
+    assert env.agent.db.execute("SELECT count(*) FROM group_messages").fetchone() == (
+        102,
+    )
+    assert env.agent.db.execute(
+        "SELECT status FROM messages WHERE id='99:group-10:1'"
+    ).fetchone() == ("expired",)
+    env.agent.db.close()
+    env.agent.db = open_database(env.agent.settings)
+    env.agent.groups.db = env.agent.db
+    assert len(env.agent.groups.candidates(key)) == 101
+    assert env.agent.groups.candidates(key)[0].mentioned
+
+
+async def test_trimmed_direct(group_agent):
+    env = group_agent
+    key = "group-10"
+    env.agent.settings.groups["10"].pending_message_limit = 1
+    env.agent.resetting.add(key)
+    await receive(env, event(group=10, identifier=1, mention=False), dispatch=False)
+    await receive(env, event(group=10, identifier=2), dispatch=False)
+    old = env.agent.groups.freeze(env.agent.groups.candidates(key)[-1])
+    snapshot = env.agent.groups.input(old)[0].text
+    await receive(env, event(group=10, identifier=3, mention=False), dispatch=False)
+    assert not env.agent.groups.eligible(old)
+    assert env.agent.groups.input(old)[0].text == snapshot
+    candidates = env.agent.groups.candidates(key)
+    assert [message.identifier for message in candidates] == [
+        "99:group-10:2",
+        "99:group-10:3",
+    ]
+    new = env.agent.groups.freeze(candidates[-1])
+    assert new.mentioned and new.batch != old.batch
+    env.agent.groups.status(new, "submitting")
+    await receive(env, event(group=10, identifier=4, mention=False), dispatch=False)
+    assert env.agent.db.execute(
+        "SELECT status FROM group_batches WHERE id=?", (new.batch,)
+    ).fetchone() == ("submitting",)
+    assert env.agent.groups.input(new)[0].text.count('"message_id"') == 2
+
+
+async def test_own_backlog(group_agent):
+    env = group_agent
+    key = "group-10"
+    env.agent.settings.groups["10"].pending_message_limit = 1
+    env.agent.resetting.add(key)
+    await receive(env, event(group=10, identifier=1, mention=False), dispatch=False)
+    message = env.agent.groups.candidates(key)[0]
+    await env.agent.groups.sent(message, {"message_id": 500}, [("text", "reply")])
+    assert not env.agent.groups.candidates(key)
+    await receive(
+        env, event(group=10, identifier=2, reply="500", mention=False), dispatch=False
+    )
+    candidates = env.agent.groups.candidates(key)
+    assert len(candidates) == 1 and candidates[0].direct and not candidates[0].mentioned
+    batch = env.agent.groups.freeze(candidates[0])
+    records = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])[
+        "messages"
+    ]
+    assert [record["message_id"] for record in records] == ["500", "2"]

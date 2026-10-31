@@ -16,19 +16,21 @@ def qq_id(value):
 @dataclass
 class GroupSettings:
     observation_interval_seconds: int = 60
-    message_ttl_seconds: int = 120
+    pending_message_limit: int = 100
     conversation_gap_seconds: int = 300
 
     def __post_init__(self):
         values = (
             self.observation_interval_seconds,
-            self.message_ttl_seconds,
+            self.pending_message_limit,
             self.conversation_gap_seconds,
         )
         if any(type(value) is not int or value <= 0 for value in values):
-            raise ValueError("Group intervals must be positive integers")
-        if not values[0] <= values[1] <= values[2]:
-            raise ValueError("Group intervals must satisfy observation <= ttl <= gap")
+            raise ValueError(
+                "Group intervals and pending limit must be positive integers"
+            )
+        if values[0] > values[2]:
+            raise ValueError("Group intervals must satisfy observation <= gap")
 
 
 @dataclass
@@ -94,13 +96,14 @@ class Settings:
                 "request_interval_minutes",
                 "request_message_count",
                 "participation_ratio",
+                "message_ttl_seconds",
             }:
                 raise ValueError(
-                    "Migrate group settings to observation_interval_seconds, message_ttl_seconds, conversation_gap_seconds"
+                    "Migrate group settings to observation_interval_seconds, pending_message_limit, conversation_gap_seconds"
                 )
             if not isinstance(entry, dict) or entry.keys() - {
                 "observation_interval_seconds",
-                "message_ttl_seconds",
+                "pending_message_limit",
                 "conversation_gap_seconds",
             }:
                 raise ValueError("Unknown group settings; users is no longer supported")
