@@ -4,6 +4,8 @@
 
 ```sh
 uv sync --frozen
+ruff format <本次修改的 Python 文件>
+ruff format --check <本次修改的 Python 文件>
 uv run --frozen pyright
 uv run --frozen pytest -v
 uv run --frozen python check_runtime.py

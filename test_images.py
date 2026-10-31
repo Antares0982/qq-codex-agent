@@ -19,7 +19,7 @@ from PIL.GifImagePlugin import GifImageFile
 import compress_stickers
 import image_assets
 import image_tool
-from qq_agent import cleanup, replies, stickers
+from qq_agent import cleanup, compression, replies, stickers
 from qq_agent.agent import Agent
 from qq_agent.config import GroupSettings, Settings
 from qq_agent.messages import ImageTurn, parse_message
@@ -606,9 +606,9 @@ def test_sticker_resources():
     for name, data in catalog.items():
         if data is None:
             continue
-        assert len(data) <= compress_stickers.BYTE_LIMIT
+        assert len(data) <= compression.BYTE_LIMIT
         with Image.open(io.BytesIO(data)) as picture:
-            assert picture.width * picture.height <= compress_stickers.PIXEL_LIMIT
+            assert picture.width * picture.height <= compression.PIXEL_LIMIT
             if name in {"生气", "开心", "逗我呢", "让我想想"}:
                 assert picture.convert("RGBA").getchannel("A").getextrema() == (0, 255)
             if name == "让我想想":
@@ -650,12 +650,22 @@ def test_sticker_config(tmp_path, linked):
         assert "新增表情" in stickers.sticker_instructions(loaded)
 
 
-@pytest.mark.parametrize("format", ["PNG", "JPEG", "WEBP", "GIF"])
-def test_compress_images(tmp_path, monkeypatch, format):
+@pytest.mark.parametrize(
+    "format,animated",
+    [
+        ("PNG", False),
+        ("JPEG", False),
+        ("WEBP", False),
+        ("GIF", True),
+        ("PNG", True),
+        ("WEBP", True),
+    ],
+)
+def test_compress_images(tmp_path, monkeypatch, format, animated):
     rng = random.Random(42)
     frames = [
         Image.frombytes("RGB", (80, 80), rng.randbytes(80 * 80 * 3)).convert("RGBA")
-        for _ in range(3 if format == "GIF" else 1)
+        for _ in range(3 if animated else 1)
     ]
     for frame in frames:
         if format != "JPEG":
@@ -664,13 +674,13 @@ def test_compress_images(tmp_path, monkeypatch, format):
             if format != "GIF":
                 alpha.paste(128, (20, 0, 40, 80))
             frame.putalpha(alpha)
-    durations = [80, 120, 200] if format == "GIF" else [0]
-    data = compress_stickers.encode_frames(frames, format, durations, 0, None)
+    durations = [80, 120, 200] if animated else [0]
+    data = compression.encode_frames(frames, format, durations, 0, None)
     path = tmp_path / ("test." + format.lower())
     path.write_bytes(data)
-    monkeypatch.setattr(compress_stickers, "BYTE_LIMIT", 5000)
-    monkeypatch.setattr(compress_stickers, "PIXEL_LIMIT", 3600)
-    before, after, _, size = compress_stickers.compress_image(path)
+    monkeypatch.setattr(compression, "BYTE_LIMIT", 5000)
+    monkeypatch.setattr(compression, "PIXEL_LIMIT", 3600)
+    target, before, after, _, size = compress_stickers.compress_image(path)
     assert before == len(data) and after <= 5000
     assert size[0] * size[1] <= 3600
     with Image.open(io.BytesIO(data)) as source:
@@ -678,16 +688,18 @@ def test_compress_images(tmp_path, monkeypatch, format):
         for index in range(getattr(source, "n_frames", 1)):
             source.seek(index)
             expected.append(
-                compress_stickers.resize_frame(
-                    source.convert("RGBA"), size, format == "GIF"
-                )
+                compression.resize_frame(source.convert("RGBA"), size, format == "GIF")
             )
-    compress_stickers.validate_output(
-        path.read_bytes(), format, expected, durations, 0 if format == "GIF" else None
+    compression.validate_output(
+        target.read_bytes(),
+        Image.open(target).format,
+        expected,
+        durations,
+        0 if animated else None,
     )
-    compressed = path.read_bytes()
-    compress_stickers.compress_image(path)
-    assert path.read_bytes() == compressed
+    compressed = target.read_bytes()
+    compress_stickers.compress_image(target)
+    assert target.read_bytes() == compressed
 
 
 def test_compress_failure(tmp_path):
@@ -695,7 +707,7 @@ def test_compress_failure(tmp_path):
     Image.new("RGBA", (1000, 1000), (255, 0, 0, 128)).save(path)
     original = path.read_bytes()
     with patch.object(
-        compress_stickers, "validate_output", side_effect=ValueError("invalid output")
+        compress_stickers, "compress_bytes", side_effect=ValueError("invalid output")
     ):
         with pytest.raises(ValueError, match="invalid output"):
             compress_stickers.compress_image(path)
@@ -722,9 +734,9 @@ def test_compress_cli(tmp_path, monkeypatch, capsys, mode):
         sys, "argv", ["compress_stickers.py", *([] if mode == "default" else arguments)]
     )
     compress_stickers.main()
-    with Image.open(target) as result:
-        assert result.width * result.height <= compress_stickers.PIXEL_LIMIT
-    assert (sibling.read_bytes() == original) == (mode == "file")
+    with Image.open(next(folder.glob("target.*"))) as result:
+        assert result.width * result.height <= compression.PIXEL_LIMIT
+    assert (sibling.exists() and sibling.read_bytes() == original) == (mode == "file")
     assert (folder / "notes.txt").read_text() == "untouched"
     assert "ERROR" not in capsys.readouterr().out
 
@@ -746,3 +758,69 @@ def test_compress_cli_failure(tmp_path, monkeypatch, kind):
         compress_stickers.main()
     assert error.value.code != 0
     assert (path.read_bytes() if path.exists() else None) == before
+
+
+@pytest.mark.parametrize("failure", [None, "conflict", "config"])
+def test_compress_conversion(tmp_path, monkeypatch, failure):
+    root = tmp_path / "stickers"
+    root.mkdir()
+    monkeypatch.setattr(compress_stickers, "STICKER_ROOT", root)
+    path = root / "sample.png"
+    Image.new("RGBA", (1000, 1000), (255, 0, 0, 128)).save(path)
+    original = path.read_bytes()
+    config = root / "sticker_config.json"
+    config.write_text('{"one":"sample.png","two":"sample.png","none":null}')
+    previous = config.read_bytes()
+    target = path.with_suffix(".webp")
+    if failure == "conflict":
+        target.write_bytes(b"keep")
+        with pytest.raises(ValueError, match="already exists"):
+            compress_stickers.compress_image(path)
+        assert target.read_bytes() == b"keep"
+    elif failure == "config":
+        write = compress_stickers.write_atomic
+
+        def fail_config(destination, *args, **kwargs):
+            if destination == config:
+                raise OSError("config unavailable")
+            return write(destination, *args, **kwargs)
+
+        monkeypatch.setattr(compress_stickers, "write_atomic", fail_config)
+        with pytest.raises(OSError, match="config unavailable"):
+            compress_stickers.compress_image(path)
+    else:
+        result, *_ = compress_stickers.compress_image(path)
+        assert result == target and not path.exists()
+        assert json.loads(config.read_text()) == {
+            "one": "sample.webp",
+            "two": "sample.webp",
+            "none": None,
+        }
+        with Image.open(target) as image:
+            assert image.size == (800, 800)
+            assert image.convert("RGBA").getchannel("A").getextrema() == (128, 128)
+    if failure:
+        assert path.read_bytes() == original and config.read_bytes() == previous
+
+
+def test_compress_dimensions(monkeypatch):
+    source = Image.frombytes(
+        "RGB", (160, 120), random.Random(42).randbytes(160 * 120 * 3)
+    )
+    stream = io.BytesIO()
+    source.save(stream, "PNG")
+    monkeypatch.setattr(compression, "PIXEL_LIMIT", 6400)
+    monkeypatch.setattr(compression, "BYTE_LIMIT", 4000)
+    data, format, _, size = compression.compress_bytes(stream.getvalue())
+    assert size == (92, 69) and format == "WEBP"
+    assert len(data) <= 4000
+
+
+def test_compress_poster(monkeypatch):
+    frames = [Image.new("RGBA", (80, 80), color) for color in ("red", "blue", "green")]
+    data = compression.encode_frames(frames, "PNG", [0, 80, 120], 2, None, True)
+    monkeypatch.setattr(compression, "PIXEL_LIMIT", 1600)
+    result, format, _, size = compression.compress_bytes(data)
+    compression.validate_output(
+        result, format, [frame.resize(size) for frame in frames], [0, 80, 120], 2, True
+    )

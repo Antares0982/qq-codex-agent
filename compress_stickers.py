@@ -1,138 +1,80 @@
-"""Compress an image or directory in place."""
+"""Compress an image or directory, updating converted filenames."""
 
 import argparse
-import io
-import math
+import json
 import os
 import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageChops
+from qq_agent.compression import FORMATS, compress_bytes
+from qq_agent.stickers import unique_names
 
-BYTE_LIMIT = 200_000
-PIXEL_LIMIT = 640_000
-EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-
-
-def resize_frame(frame, size, gif):
-    resized = frame.resize(size, Image.Resampling.LANCZOS)
-    if gif:
-        resized.putalpha(frame.getchannel("A").resize(size, Image.Resampling.NEAREST))
-    return resized
+EXTENSIONS = {*FORMATS.values(), ".jpeg"}
+STICKER_ROOT = Path(__file__).parent / "stickers"
 
 
-def encode_frames(frames, format, durations, loop, level):
-    encoded = []
-    for frame in frames:
-        if format == "GIF":
-            picture = frame.convert("RGB").quantize(colors=level or 255)
-            picture.paste(
-                255, mask=frame.getchannel("A").point(lambda a: 255 if a == 0 else 0)
-            )
-            picture.info["transparency"] = 255
-        elif format == "PNG" and level:
-            picture = frame.convert("RGB").quantize(colors=level)
-            if frame.getchannel("A").getextrema() != (255, 255):
-                picture = picture.convert("RGB")
-                picture.putalpha(frame.getchannel("A"))
+def write_atomic(path, data, mode, replace=True):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=".sticker-", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+        os.chmod(temporary, mode)
+        if replace:
+            os.replace(temporary, path)
         else:
-            picture = (
-                frame
-                if frame.getchannel("A").getextrema() != (255, 255)
-                else frame.convert("RGB")
-            )
-        encoded.append(picture)
-    options = {}
-    if format in {"PNG", "GIF", "JPEG"}:
-        options["optimize"] = True
-    if format == "GIF":
-        options.update(transparency=255, background=255, disposal=2)
-    if format == "JPEG":
-        options.update(quality=level or 100, subsampling=0)
-    if format == "WEBP":
-        options.update(
-            lossless=level is None, quality=level or 100, method=6, exact=True
-        )
-    if len(encoded) > 1:
-        options.update(save_all=True, append_images=encoded[1:], duration=durations)
-        if loop is not None:
-            options["loop"] = loop
-    output = io.BytesIO()
-    encoded[0].save(output, format=format, **options)
-    return output.getvalue()
-
-
-def validate_output(data, format, frames, durations, loop):
-    if len(data) > BYTE_LIMIT:
-        raise ValueError("Compressed image exceeds byte limit")
-    with Image.open(io.BytesIO(data)) as result:
-        if result.format != format or result.size != frames[0].size:
-            raise ValueError("Image format or size changed unexpectedly")
-        if result.width * result.height > PIXEL_LIMIT:
-            raise ValueError("Compressed image exceeds pixel limit")
-        if getattr(result, "n_frames", 1) != len(frames):
-            raise ValueError("Animation frame count changed")
-        if len(frames) > 1 and result.info.get("loop") != loop:
-            raise ValueError("Animation loop changed")
-        for index, frame in enumerate(frames):
-            result.seek(index)
-            decoded = result.convert("RGBA")
-            if len(frames) > 1 and result.info.get("duration", 0) != durations[index]:
-                raise ValueError("Animation timing changed")
-            if ImageChops.difference(
-                decoded.getchannel("A"), frame.getchannel("A")
-            ).getbbox():
-                raise ValueError("Image transparency changed")
+            os.link(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def compress_image(path):
-    if path.is_symlink() or not path.is_file():
+    path = path.absolute()
+    if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_file():
         raise ValueError("Expected a regular image file")
     original = path.read_bytes()
-    with Image.open(io.BytesIO(original)) as source:
-        format = source.format
-        if format not in {"PNG", "JPEG", "GIF", "WEBP"}:
-            raise ValueError("Unsupported image format")
-        size = source.size
-        if len(original) <= BYTE_LIMIT and size[0] * size[1] <= PIXEL_LIMIT:
-            return len(original), len(original), size, size
-        loop = source.info.get("loop")
-        frames, durations = [], []
-        for index in range(getattr(source, "n_frames", 1)):
-            source.seek(index)
-            frames.append(source.convert("RGBA"))
-            durations.append(source.info.get("duration", 0))
-    scale = min(1.0, math.sqrt(PIXEL_LIMIT / (size[0] * size[1])))
-    levels = (
-        (None, 256, 128)
-        if format == "PNG"
-        else (None, 128, 64)
-        if format == "GIF"
-        else (None, 95, 90, 85, 80)
+    data, format, old_size, size = compress_bytes(original)
+    suffix = FORMATS[format]
+    target = (
+        path
+        if path.suffix.lower() in ({".jpg", ".jpeg"} if format == "JPEG" else {suffix})
+        else path.with_suffix(suffix)
     )
-    while True:
-        target = (max(1, int(size[0] * scale)), max(1, int(size[1] * scale)))
-        resized = [resize_frame(frame, target, format == "GIF") for frame in frames]
-        for level in levels:
-            data = encode_frames(resized, format, durations, loop, level)
-            if len(data) <= BYTE_LIMIT:
-                validate_output(data, format, resized, durations, loop)
-                temporary = None
-                try:
-                    with tempfile.NamedTemporaryFile(
-                        dir=path.parent, prefix=".sticker-", delete=False
-                    ) as stream:
-                        temporary = Path(stream.name)
-                        stream.write(data)
-                    os.chmod(temporary, path.stat().st_mode & 0o777)
-                    os.replace(temporary, path)
-                finally:
-                    if temporary is not None:
-                        temporary.unlink(missing_ok=True)
-                return len(original), len(data), size, target
-        if target == (1, 1):
-            raise ValueError("Cannot meet size limit while preserving animation")
-        scale *= 0.9
+    config = None
+    mapping = None
+    if target != path:
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"Converted file already exists: {target}")
+        root = STICKER_ROOT.absolute()
+        if path.is_relative_to(root):
+            config = root / "sticker_config.json"
+            if config.is_symlink():
+                raise ValueError("Expected a regular sticker configuration")
+            mapping = json.loads(config.read_text(), object_pairs_hook=unique_names)
+            if not isinstance(mapping, dict):
+                raise ValueError("Invalid sticker configuration")
+            old_name, new_name = (
+                path.relative_to(root).as_posix(),
+                target.relative_to(root).as_posix(),
+            )
+            mapping = {
+                key: new_name if value == old_name else value
+                for key, value in mapping.items()
+            }
+    if data != original or target != path:
+        write_atomic(target, data, path.stat().st_mode & 0o777, replace=target == path)
+        if target != path:
+            if config is not None:
+                write_atomic(
+                    config,
+                    (json.dumps(mapping, ensure_ascii=False, indent=2) + "\n").encode(),
+                    config.stat().st_mode & 0o777,
+                )
+            path.unlink()
+    return target, len(original), len(data), old_size, size
 
 
 def main():
@@ -151,9 +93,9 @@ def main():
     failed = False
     for path in paths:
         try:
-            before, after, old_size, new_size = compress_image(path)
+            target, before, after, old_size, new_size = compress_image(path)
             print(
-                f"{path}: {before:,} -> {after:,} bytes; {old_size} -> {new_size}",
+                f"{path} -> {target}: {before:,} -> {after:,} bytes; {old_size} -> {new_size}",
                 flush=True,
             )
         except (OSError, ValueError) as error:
