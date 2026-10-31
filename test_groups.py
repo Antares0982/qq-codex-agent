@@ -1836,3 +1836,91 @@ async def test_image_correction(group_agent):
     assert sum(isinstance(part, ImageInput) for part in calls[0].args[0]) == 1
     assert calls[1].args[0] == []
     env.bot.image.assert_awaited_once()
+
+
+@pytest.mark.parametrize("animated", [False, True])
+@pytest.mark.parametrize("ended", [False, True])
+async def test_compressed_preview(group_agent, animated, ended):
+    import base64
+    import io
+    import threading
+
+    from PIL import Image
+
+    from qq_agent import images
+
+    env = group_agent
+    original = io.BytesIO()
+    picture = Image.new("RGBA", (1000, 1000), (255, 0, 0, 128))
+    options = (
+        {
+            "save_all": True,
+            "append_images": [Image.new("RGBA", picture.size, "blue")],
+            "duration": [80, 120],
+            "loop": 0,
+        }
+        if animated
+        else {}
+    )
+    picture.save(original, "PNG", **options)
+    data = original.getvalue()
+    env.bot.image.return_value = data
+    incoming = event(group=10, mention=False)
+    incoming["message"].append({"type": "image", "data": {"file": "source"}})
+    await receive(env, incoming)
+    message = env.agent.queue.get_nowait()
+    payload = json.loads(env.agent.groups.input(message)[0].text.split("\n", 1)[1])
+    image_id = payload["messages"][0]["content"][-1]["image_id"]
+    context = ImageTurn(message, env.agent.settings.workspace_dir)
+    env.agent.turns.contexts[message.key] = context
+    main_thread = threading.get_ident()
+    real_preview = images.image_preview
+
+    def preview(value):
+        assert threading.get_ident() != main_thread
+        return real_preview(value)
+
+    real_thread = asyncio.to_thread
+
+    async def complete(function, value):
+        result = await real_thread(function, value)
+        if ended:
+            env.agent.turns.contexts.clear()
+        return result
+
+    with (
+        patch.object(images, "image_preview", side_effect=preview),
+        patch.object(images.asyncio, "to_thread", side_effect=complete),
+    ):
+        if ended:
+            with pytest.raises(ValueError, match="任务已结束"):
+                await env.agent.turns.images.read_received(
+                    context, image_id, context.token
+                )
+            return
+        result = await env.agent.turns.images.read_received(
+            context, image_id, context.token
+        )
+        assert result["first_frame"] is animated
+        assert (context.folder / result["path"]).read_bytes() == data
+        encoded = base64.b64decode(result["image"]["data"])
+        assert len(encoded) <= 200_000
+        with Image.open(io.BytesIO(encoded)) as decoded:
+            assert decoded.size == (800, 800)
+            assert getattr(decoded, "n_frames", 1) == 1
+            assert decoded.format is not None
+            assert result["image"]["mimeType"] == "image/" + decoded.format.lower()
+            assert decoded.convert("RGBA").getchannel("A").getextrema() == (128, 128)
+        inputs, attached = await env.agent.turns.images.attach_images(
+            context, env.agent.groups.input(message)[0].text, set(), 5
+        )
+        assert attached == [image_id]
+        wire = _to_wire_input(inputs)
+        image = next(part for part in wire if part["type"] == "image")
+        assert (
+            image["url"]
+            == "data:"
+            + result["image"]["mimeType"]
+            + ";base64,"
+            + result["image"]["data"]
+        )

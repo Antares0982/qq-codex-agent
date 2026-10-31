@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import io
@@ -10,6 +11,7 @@ from openai_codex import ImageInput, TextInput
 
 from image_assets import OUTPUT_LIMIT, read_image, save_image
 
+from .compression import compress_bytes
 from .logging import LOG, log_text
 
 IMAGE_INSTRUCTIONS = """本会话通过 QQ 交付结果。用户无法直接访问你的硬盘、工作区路径、sandbox 链接或工具图片预览。
@@ -18,6 +20,22 @@ IMAGE_INSTRUCTIONS = """本会话通过 QQ 交付结果。用户无法直接访�
 多帧拼接、动图等任务：先生成所需帧，查询路径，使用代码加工并保存最终 GIF，再调用 send_image(path=最终文件路径)。中间帧不必发送；不能用 SVG 包装代替 PNG/GIF。工作区图片跨轮及 /new 保留，可以补发；超过 14 天未访问或修改的文件会被每日清理。
 只有 send_image 返回成功才能声称图片已发送。发送失败或结果未知时如实说明；不要自动重试结果未知的发送。resend=true 仅用于用户明确要求再次发送。
 命令沙箱不可用时，原图仍可通过上述工具查询和发送；需要加工的任务应明确说明加工失败，不声称动图已经完成。"""
+
+
+def image_preview(data):
+    with Image.open(io.BytesIO(data)) as picture:
+        animated = getattr(picture, "n_frames", 1) > 1
+        if animated:
+            picture.seek(0)
+            preview = io.BytesIO()
+            picture.convert("RGBA").save(preview, format="PNG")
+            data = preview.getvalue()
+    data, format, _, _ = compress_bytes(data)
+    return {
+        "type": "image",
+        "mimeType": "image/" + format.lower(),
+        "data": base64.b64encode(data).decode(),
+    }, animated
 
 
 class Images:
@@ -66,22 +84,18 @@ class Images:
                         "UPDATE received_images SET folder=?,path=? WHERE id=?",
                         (context.folder.name, path, image_id),
                     )
-            preview = io.BytesIO()
-            with Image.open(io.BytesIO(data)) as picture:
-                animated = getattr(picture, "n_frames", 1) > 1
-                picture.seek(0)
-                picture.thumbnail((1600, 1600))
-                picture.convert("RGBA").save(preview, format="PNG")
+            preview, animated = await asyncio.to_thread(image_preview, data)
+            if (
+                self.contexts.get(context.message.key) is not context
+                or token != context.token
+            ):
+                raise ValueError("任务已结束。")
             return {
                 "ok": True,
                 "path": path,
                 "image_id": image_id,
                 "first_frame": animated,
-                "image": {
-                    "type": "image",
-                    "mimeType": "image/png",
-                    "data": base64.b64encode(preview.getvalue()).decode(),
-                },
+                "image": preview,
             }
 
     async def attach_images(self, context, text, seen, limit):
@@ -135,7 +149,10 @@ class Images:
                         [
                             TextInput("下面这张图片对应：" + label),
                             ImageInput(
-                                "data:image/png;base64," + result["image"]["data"]
+                                "data:"
+                                + result["image"]["mimeType"]
+                                + ";base64,"
+                                + result["image"]["data"]
                             ),
                         ]
                     )
