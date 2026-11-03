@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import pytest
+from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import MessagePhase
 
 from qq_agent import agent as agent_module
@@ -465,3 +466,15 @@ async def test_profile_backup_failure(group_agent):
         open_database(settings)
     assert env.agent.turns.profiles.entries("10") == ["keep"]
     assert env.agent.db.execute("PRAGMA user_version").fetchone() == (4,)
+
+
+async def test_profile_retry_rejected(group_agent):
+    env = group_agent
+    job = summary_session(env)
+    previous = summary_turn("{}")
+    env.thread.turn.side_effect = [previous, JsonRpcError(-32602, "rejected")]
+    await env.agent.summarize_profile(job)
+    assert env.thread.turn.await_count == 2
+    previous.interrupt.assert_not_awaited()
+    assert env.agent.turns.profiles.entries("10") == ["old"]
+    assert not env.deliveries

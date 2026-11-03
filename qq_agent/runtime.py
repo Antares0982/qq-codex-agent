@@ -362,7 +362,6 @@ class Runtime:
                     await self.update_group(thread, message, profiles)
                 for attempt in range(3 if profiles is not None else 1):
                     starting = True
-                    completed = False
                     try:
                         turn = await thread.turn(
                             instructions if attempt == 0 else [],
@@ -375,6 +374,7 @@ class Runtime:
                         starting = False
                         raise
                     starting = False
+                    completed = False
                     LOG.info(
                         "Summary started chat=%s thread=%s turn=%s model=%s attempt=%d",
                         message.key,
