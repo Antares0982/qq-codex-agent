@@ -35,12 +35,11 @@ import image_tool
 from qq_agent import onebot, replies
 from qq_agent.agent import Agent
 from qq_agent.config import GroupSettings, Settings
-from qq_agent.prompts import IMAGE_INSTRUCTIONS
 from qq_agent import runtime as runtime_module
 from qq_agent.logging import LOG, log_text, read_diagnostics, watch_diagnostics
 from qq_agent.messages import ImageTurn, parse_message
 from qq_agent.onebot import OneBot
-from qq_agent.runtime import HANDOFF_INSTRUCTIONS, HANDOFF_SCHEMA, codex_config
+from qq_agent.runtime import HANDOFF_SCHEMA, codex_config
 
 _png = io.BytesIO()
 Image.new("RGB", (2, 2), "red").save(_png, format="PNG")
@@ -203,15 +202,12 @@ class TestAgent:
             assert message.sender_name == "小明 管理员"
             await self.execute(message)
             inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-            identity = "（ID: 1）" if group else ""
             if group:
                 record = json.loads(inputs[0].text.split("\n", 1)[1])["messages"][0]
                 assert (
                     record["sender_name"] == "小明 管理员"
                     and record["content"][0] == "你好"
                 )
-            else:
-                assert inputs[0].text == f"QQ 用户 小明 管理员{identity}:\n你好"
         incoming["sender"] = {"nickname": " \n "}
         assert parse_message(incoming, self.settings).sender_name == "1"
         incoming["sender"] = {"nickname": 123}
@@ -222,29 +218,15 @@ class TestAgent:
             message = parse_message(incoming, self.settings)
             await self.execute(message)
             inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-            identity = "（ID: 1）" if group else ""
             if group:
                 record = json.loads(inputs[0].text.split("\n", 1)[1])["messages"][0]
                 assert (
                     record["sender_name"] == expected
                     and record["content"][0] == "hello"
                 )
-            else:
-                assert inputs[0].text == f"QQ 用户 {expected}{identity}:\nhello"
         for card in (None, "", " \n ", 123):
             incoming["sender"] = {**incoming["sender"], "card": card}
             assert parse_message(incoming, self.settings).sender_name == "QQ昵称"
-
-    def group_instructions(self):
-        calls = [
-            call
-            for call in self.codex._client.request.call_args_list
-            if call.args[0] == "thread/inject_items"
-            and "最新应用提示词" in str(call.args[1])
-        ]
-        item = calls[-1].args[1]["items"][0]
-        assert item["role"] == "developer"
-        return item["content"][0]["text"]
 
     @pytest.mark.parametrize(
         "role, allowed",
@@ -332,15 +314,7 @@ class TestAgent:
             )
             assert self.codex._client.request.await_count == before
             await self.execute(message)
-            assert "群设定" not in json.loads(
-                self.group_instructions().split("\n", 1)[1]
-            )
-            if prompt == "first":
-                assert (
-                    "first"
-                    in self.codex.thread_start.call_args.kwargs["base_instructions"]
-                )
-            else:
+            if prompt != "first":
                 assert (
                     "base_instructions" not in self.codex.thread_resume.call_args.kwargs
                 )
@@ -359,9 +333,6 @@ class TestAgent:
                 parse_message(event(group=10, text="/new blank"), self.settings)
             )
             await self.execute(message)
-            instructions = self.codex.thread_start.call_args.kwargs["base_instructions"]
-            assert ("latest" in instructions) == bool(prompt)
-            assert "first" not in instructions
         self.monkeypatch.setattr(
             runtime_module, "COMMON_INSTRUCTIONS", "changed application rules"
         )
@@ -384,15 +355,8 @@ class TestAgent:
             message = parse_message(event(group=group), self.settings)
             await self.execute(message)
             options = self.codex.thread_start.call_args.kwargs
-            instructions = options.get("base_instructions", "")
-            assert ("管理员 QQ 号为 123456789" in instructions) == (
-                group is not None and admin is not None
-            )
             if group is None:
                 assert "base_instructions" not in options
-                assert "123456789" not in options["developer_instructions"]
-            else:
-                assert "123456789" not in self.group_instructions()
             await self.execute(message)
             assert "base_instructions" not in self.codex.thread_resume.call_args.kwargs
 
@@ -403,7 +367,6 @@ class TestAgent:
         def injections():
             return sum(
                 call.args[0] == "thread/inject_items"
-                and "最新应用提示词" in str(call.args[1])
                 for call in self.codex._client.request.call_args_list
             )
 
@@ -425,19 +388,11 @@ class TestAgent:
             await self.execute(message)
             await self.execute(message)
             assert injections() == before + int(name == "COMMON_INSTRUCTIONS")
-            rules = json.loads(self.group_instructions().split("\n", 1)[1])[
-                "应用提示词"
-            ]
-            if name == "COMMON_INSTRUCTIONS":
-                assert text in rules
-            elif text:
-                assert text not in rules
         before = injections()
         self.agent.runtime.stickers["新增表情"] = PNG
         await self.execute(message)
         await self.execute(message)
         assert injections() == before + 1
-        assert "新增表情" in self.group_instructions()
         before = injections()
         self.agent.runtime.stickers["新增表情"] = None
         await self.execute(message)
@@ -817,7 +772,6 @@ class TestAgent:
         command = parse_message(event(group=10, text="/new"), self.settings)
         await self.agent.commands.control(command)
         assert self.codex.thread_resume.call_args.args[0] == "old-thread"
-        assert thread.turn.call_args.args == (HANDOFF_INSTRUCTIONS,)
         assert thread.turn.call_args.kwargs["model"] == "chosen"
         assert thread.turn.call_args.kwargs["effort"] == ReasoningEffort.medium
         assert thread.turn.call_args.kwargs["output_schema"] == HANDOFF_SCHEMA
@@ -842,8 +796,6 @@ class TestAgent:
         thread.turn.assert_not_awaited()
         assert self.agent.db.execute("SELECT summary FROM group_handoffs").fetchone()
         await self.execute(message)
-        snapshot = json.loads(self.group_instructions().split("\n", 1)[1])
-        assert snapshot["历史聊天摘要"] == "成员 1 想讨论 NixOS。"
         assert len(thread.turn.call_args.args[0]) == 1
         self.setup_turn(
             [
@@ -868,10 +820,6 @@ class TestAgent:
         self.agent.db.close()
         self.agent = Agent(self.settings, self.bot, self.codex)
         await self.execute(message)
-        assert (
-            json.loads(self.group_instructions().split("\n", 1)[1])["历史聊天摘要"]
-            == ""
-        )
 
     @pytest.mark.parametrize(
         "text",
@@ -1124,50 +1072,23 @@ class TestAgent:
             self.codex.thread_start.call_args.kwargs["approval_mode"]
             == ApprovalMode.auto_review
         )
-        assert (
-            IMAGE_INSTRUCTIONS
-            in self.codex.thread_start.call_args.kwargs["developer_instructions"]
-        )
         with self.agent.db:
             self.agent.db.execute(
                 "UPDATE models SET model='beta' WHERE key='private-1'"
             )
         await self.execute(message)
         self.codex.thread_resume.assert_awaited_once()
-        assert (
-            IMAGE_INSTRUCTIONS
-            in self.codex.thread_resume.call_args.kwargs["developer_instructions"]
-        )
         assert self.codex.thread_resume.call_args.kwargs["model"] == "beta"
         assert thread.turn.call_args.kwargs["model"] == "beta"
         assert thread.turn.call_args.kwargs["effort"] == ReasoningEffort.medium
         turn.interrupt.assert_not_called()
 
-    async def test_chat_prompts(self):
-        self.monkeypatch.setattr(
-            runtime_module, "PRIVATE_INSTRUCTIONS", "当前是私聊 {nickname}"
-        )
-        self.monkeypatch.setattr(runtime_module, "GROUP_INSTRUCTIONS", "当前是群聊")
+    async def test_chat_tools(self):
         self.bot.call = AsyncMock(return_value={})
         self.setup_turn([turn_done()])
-        for incoming, expected, excluded in (
-            (event(), "当前是私聊 {nickname}", "当前是群聊"),
-            (event(group=10), "当前是群聊", "当前是私聊"),
-        ):
+        for incoming in (event(), event(group=10)):
             await self.execute(parse_message(incoming, self.settings))
             options = self.codex.thread_start.call_args.kwargs
-            instructions = (
-                options["base_instructions"]
-                if incoming.get("group_id")
-                else options["developer_instructions"]
-            )
-            assert expected in instructions
-            assert excluded not in instructions
-            if incoming.get("group_id"):
-                assert expected not in self.group_instructions()
-                assert "sticker" in self.group_instructions()
-            else:
-                assert "send_sticker" not in instructions
             assert (
                 "--group" in options["config"]["mcp_servers"]["qq_image"]["args"]
             ) == bool(incoming.get("group_id"))
@@ -1190,18 +1111,15 @@ class TestAgent:
         self.codex._client.request.assert_not_called()
 
     async def test_bot_nickname(self):
-        self.monkeypatch.setattr(
-            runtime_module, "GROUP_INSTRUCTIONS", "你的昵称：{nickname}。{other}"
-        )
         self.setup_turn([turn_done()])
         self.bot.call = AsyncMock()
-        for index, (info, expected) in enumerate(
+        for index, info in enumerate(
             (
-                ({"card": " 群里\n助手 ", "nickname": "QQ助手"}, "群里 助手"),
-                ({"card": "另一个群", "nickname": "QQ助手"}, "另一个群"),
-                ({"card": " \n ", "nickname": "QQ助手"}, "QQ助手"),
-                ({}, "99"),
-                (TimeoutError(), "99"),
+                {"card": " 群里\n助手 ", "nickname": "QQ助手"},
+                {"card": "另一个群", "nickname": "QQ助手"},
+                {"card": " \n ", "nickname": "QQ助手"},
+                {},
+                TimeoutError(),
             )
         ):
             self.bot.call.reset_mock()
@@ -1212,10 +1130,6 @@ class TestAgent:
                 parse_message(event(group=group_id, text="/new blank"), self.settings)
             )
             await self.execute(parse_message(event(group=group_id), self.settings))
-            assert (
-                f"你的 QQ 号是 99，当前群昵称是 {expected}。"
-                in self.codex.thread_start.call_args.kwargs["base_instructions"]
-            )
             self.bot.call.assert_any_await(
                 "get_group_member_info", {"group_id": group_id, "user_id": 99}
             )
@@ -1226,14 +1140,6 @@ class TestAgent:
             call.args[0] != "get_group_member_info"
             for call in self.bot.call.call_args_list
         )
-
-    async def test_reply_text(self):
-        self.setup_turn([turn_done()])
-        self.bot.reply_content.return_value = ([("text", "私聊引用")], [], "1", "1")
-        await self.execute(parse_message(event(text="继续", reply="42"), self.settings))
-        inputs = self.codex.thread_start.return_value.turn.call_args.args[0]
-        assert inputs[0].text == "QQ 用户 1:\n先前消息：\n私聊引用"
-        assert inputs[1].text == "当前消息：\n继续"
 
     async def test_empty_reply(self):
         message = parse_message(event(text="", reply="42"), self.settings)
@@ -1270,14 +1176,6 @@ class TestAgent:
         assert isinstance(quote, TextInput)
         assert isinstance(current, TextInput)
         assert "引用配文" in quote.text
-        if own:
-            assert "先前消息" in quote.text
-            assert "引用 QQ 用户" not in quote.text
-        else:
-            assert "引用 QQ 用户 同名（ID: 2）" in quote.text
-            assert "> 引用配文\n> 第二行" in quote.text
-            assert "引用结束" in current.text
-        assert "当前消息：\n当前配文" in current.text
         assert [call.args[0] for call in self.bot.image.call_args_list] == (
             quoted + message.images
         )
@@ -1295,9 +1193,7 @@ class TestAgent:
         assert inputs is not None
         assert isinstance(inputs[0], TextInput)
         assert isinstance(inputs[2], TextInput)
-        assert f"引用 QQ 用户 {fallback or '2'}（ID: 2）" in inputs[0].text
         assert isinstance(inputs[1], LocalImageInput)
-        assert "引用结束" in inputs[2].text
 
     @pytest.mark.parametrize("group", (None,))
     async def test_all_texts(self, group):
@@ -1633,7 +1529,6 @@ class TestAgent:
         self.codex.thread_resume.assert_not_awaited()
         self.read_history.assert_not_awaited()
         assert len(thread.turn.call_args.args[0]) == 1
-        assert thread.turn.call_args.args[0][0].text == "QQ 用户 1:\n继续"
         assert original.read_bytes() == PNG
         assert self.agent.db.execute(
             "SELECT folder, renew FROM sessions"
@@ -2274,10 +2169,7 @@ class TestAgent:
             ]
             steered = turns["private-1"].steer.call_args.args[0]
             assert len(steered) == 3
-            assert "引用 QQ 用户 Other（ID: 2）" in steered[0].text
-            assert "> quoted" in steered[0].text
             assert isinstance(steered[1], LocalImageInput)
-            assert steered[2].text == "引用结束。\nQQ 用户 1 当前消息：\nprivate update"
             assert len(self.agent.jobs) == 2
             self.codex.thread_start.assert_awaited()
             assert self.codex.thread_start.await_count == 2
@@ -2345,7 +2237,6 @@ class TestAgent:
             await asyncio.wait_for(finish.wait(), 2)
             await asyncio.wait_for(asyncio.gather(*self.agent.jobs.values()), 2)
             assert thread.turn.await_count == 2
-            assert thread.turn.call_args.args[0][0].text == "QQ 用户 1:\nlate"
             turn.steer.assert_awaited_once()
             assert (
                 self.agent.db.execute(

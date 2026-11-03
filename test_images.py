@@ -589,15 +589,6 @@ class TestImages:
         assert all("error" in response for response in responses[4:])
 
 
-def test_sticker_instructions():
-    catalog = {"平静": None, "开心": PNG}
-    instructions = stickers.sticker_instructions(catalog)
-    assert json.loads(instructions.rsplit("\n", 1)[1].split("：", 1)[1]) == list(
-        catalog
-    )
-    assert instructions == stickers.sticker_instructions({"平静": PNG, "开心": None})
-
-
 def test_sticker_resources():
     catalog = stickers.load_stickers()
     assert catalog
@@ -645,8 +636,6 @@ def test_sticker_config(tmp_path, linked):
         config.write_text('{"新增表情": "ok.png"}')
         loaded = stickers.load_stickers()
         assert loaded == {"新增表情": PNG}
-        config.write_text("{}")
-        assert "新增表情" in stickers.sticker_instructions(loaded)
 
 
 @pytest.mark.parametrize(

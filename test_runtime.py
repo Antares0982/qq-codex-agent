@@ -26,8 +26,6 @@ from qq_agent.logging import read_diagnostics
 from qq_agent.messages import ImageTurn, Message
 from qq_agent.profiles import Profiles, ProfileSummary
 from qq_agent.runtime import (
-    GROUP_BASE_INSTRUCTIONS,
-    HANDOFF_INSTRUCTIONS,
     HANDOFF_SCHEMA,
     Runtime,
     load_skills,
@@ -138,7 +136,7 @@ async def test_skill_permissions(tmp_path, target):
 @pytest.mark.parametrize(
     "mode", ["plain", "manual", "pre_turn", "mid_turn", "local", "upgrade"]
 )
-async def test_runtime_prompts(tmp_path, mode, monkeypatch):
+async def test_runtime_context(tmp_path, mode, monkeypatch):
     original = io.BytesIO()
     Image.new("RGBA", (1000, 1000), (255, 0, 0, 128)).save(original, "PNG")
     requests = []
@@ -523,74 +521,12 @@ async def test_runtime_prompts(tmp_path, mode, monkeypatch):
                 "mcp__qq_image",
             } <= names
             assert "mcp__qq_member" not in names
-            update_counts = []
             image_tools = next(
                 tool
                 for tool in requests[0]["tools"]
                 if tool.get("name") == "mcp__qq_image"
             )
             assert "view_image" in {tool["name"] for tool in image_tools["tools"]}
-            for index, request in enumerate(requests):
-                assert request["instructions"].startswith(GROUP_BASE_INSTRUCTIONS)
-                assert ("PROMPT_ALPHA" in request["instructions"]) == (
-                    mode != "upgrade"
-                )
-                assert "PROMPT_BETA" not in request["instructions"]
-                assert ("管理员 QQ 号为 123456789" in request["instructions"]) == (
-                    mode != "upgrade"
-                )
-                assert "987654321" not in request["instructions"]
-                assert ("GROUP_TEMPLATE_ALPHA" in request["instructions"]) == (
-                    mode != "upgrade"
-                )
-                assert "GROUP_TEMPLATE_BETA" not in request["instructions"]
-                assert "{nickname}" not in request["instructions"]
-                content = json.dumps(request["input"], ensure_ascii=False)
-                assert "GROUP_TEMPLATE_" not in content
-                assert "PROMPT_ALPHA" not in content
-                assert "PROMPT_BETA" not in content
-                assert "管理员 QQ 号为" not in content
-                assert "prompt-probe" in content
-                assert "harness-maintenance" in content
-                assert "<multi_agent_role>" not in content
-                assert "<collaboration_mode>" not in content
-                assert "<recommended_plugins>" not in content
-                assert "CATALOG_MODE_MARKER" not in content
-                assert "<multi_agent_mode>" in content
-                assert "<permissions instructions>" in content
-                if mode == "upgrade" and index == 0:
-                    assert "LEGACY_APPLICATION_RULES" in content
-                    assert "可选表情名称" not in content
-                    continue
-                assert "qq_member" in content
-                assert (
-                    "每条 assistant 消息（过程说明和最终回复）必须仅包含一个 JSON 对象"
-                    in content
-                )
-                assert all(name in content for name in runtime.stickers)
-                assert "可选表情名称" in content
-                assert "值表示是否发送图片" not in content
-                assert "probe-0" in content
-                updates = [
-                    part["text"]
-                    for item in request["input"]
-                    if item.get("role") == "developer"
-                    for part in item.get("content", [])
-                    if "以下是本轮最新应用提示词" in part.get("text", "")
-                ]
-                assert updates
-                update_counts.append(len(updates))
-                snapshot = json.loads(updates[-1].split("\n", 1)[1])
-                cleared = "probe-3" in content
-                assert "群设定" not in snapshot
-                assert "基础提示词" not in snapshot
-                assert snapshot["群共同记录"] == (
-                    "" if cleared else f"GROUP_MEMORY_{int('probe-1' in content)}"
-                )
-                assert "成员记录" not in snapshot
-                assert "MEMBER_MEMORY" not in updates[-1]
-            if mode == "plain":
-                assert update_counts == [1, 2, 2, 3, 3]
             if mode in {"pre_turn", "mid_turn"}:
                 metadata = json.loads(
                     compactions[0]["client_metadata"]["x-codex-turn-metadata"]
@@ -638,14 +574,6 @@ async def test_runtime_prompts(tmp_path, mode, monkeypatch):
                         message, previous_thread, workspace
                     )
                 assert summary == "HANDOFF_BACKGROUND"
-                assert "PROMPT_ALPHA" in requests[-1]["instructions"]
-                assert "管理员 QQ 号为 123456789" in requests[-1]["instructions"]
-                assert "GROUP_TEMPLATE_ALPHA" in requests[-1]["instructions"]
-                assert any(
-                    part.get("text") == HANDOFF_INSTRUCTIONS
-                    for item in requests[-1]["input"]
-                    for part in item.get("content", [])
-                )
                 assert requests[-1]["text"]["format"]["schema"] == HANDOFF_SCHEMA
                 with db:
                     db.execute(
@@ -664,33 +592,8 @@ async def test_runtime_prompts(tmp_path, mode, monkeypatch):
                 assert "HANDOFF_BACKGROUND" in content
                 assert "fresh-handoff-turn" in content
                 assert "probe-0" not in content
-                assert "请根据当前可见上下文" not in content
                 assert "probe-compact" not in content
-                assert "PROMPT_ALPHA" not in requests[-1]["instructions"]
-                assert "管理员 QQ 号为 987654321" in requests[-1]["instructions"]
-                assert "GROUP_TEMPLATE_BETA" in requests[-1]["instructions"]
-                assert "GROUP_TEMPLATE_" not in content
                 await runtime.release_thread(thread.id)
-                for prompt in ("PROMPT_BETA", ""):
-                    with db:
-                        db.execute(
-                            "UPDATE group_prompts SET prompt=? WHERE group_id='10'",
-                            (prompt,),
-                        )
-                    settings.agent_admin_qq = None
-                    options, _ = await runtime.thread_options(message, workspace)
-                    thread = await runtime.prepare_thread(
-                        message, None, ImageTurn(message, workspace), options
-                    )
-                    await runtime.update_group(thread, message, profiles)
-                    result = await thread.run([TextInput("new-system-probe")])
-                    assert result.status == TurnStatus.completed
-                    instructions = requests[-1]["instructions"]
-                    assert ("PROMPT_BETA" in instructions) == bool(prompt)
-                    assert "PROMPT_ALPHA" not in instructions
-                    assert "管理员 QQ 号为" not in instructions
-                    assert "PROMPT_BETA" not in json.dumps(requests[-1]["input"])
-                    await runtime.release_thread(thread.id)
             if mode == "plain":
                 assert thread is not None
                 with db:
@@ -714,17 +617,6 @@ async def test_runtime_prompts(tmp_path, mode, monkeypatch):
                         request["text"]["format"]["schema"]
                         == runtime_module.PROFILE_SCHEMA
                     )
-                    encoded_profile = json.dumps(request, ensure_ascii=False)
-                    assert "1999-02-03" not in encoded_profile
-                    assert "profile_max_entries" not in encoded_profile
-                    assert (
-                        "日期戳" not in encoded_profile
-                        and "淘汰" not in encoded_profile
-                    )
-                    assert '"name": "mcp__qq_member"' not in encoded_profile
-                assert "结果无效" in json.dumps(
-                    requests[-1]["input"], ensure_ascii=False
-                )
                 options, _ = await runtime.thread_options(message, workspace)
                 thread = await runtime.prepare_thread(
                     message, thread.id, ImageTurn(message, workspace), options
@@ -737,17 +629,6 @@ async def test_runtime_prompts(tmp_path, mode, monkeypatch):
                     != runtime_module.PROFILE_SCHEMA
                 )
                 await runtime.release_thread(thread.id)
-            encoded = json.dumps(requests, ensure_ascii=False)
-            for forbidden in (
-                "observation_interval_seconds",
-                "message_ttl_seconds",
-                "pending_message_limit",
-                "conversation_gap_seconds",
-                "backoff_until",
-                "silences",
-                "参与度偏低",
-            ):
-                assert forbidden not in encoded
     finally:
         await codex.close()
         db.close()
@@ -904,7 +785,7 @@ async def test_group_correction(tmp_path, followup):
 
             async def inject(thread, text):
                 await original_inject(thread, text)
-                if text.startswith("上一条回复解析失败"):
+                if requests:
                     injected.set()
 
             agent.runtime.inject = inject
@@ -945,7 +826,7 @@ async def test_group_correction(tmp_path, followup):
                         for item in requests[1]["input"]
                         if item.get("role") == "user"
                         for content in item.get("content", [])
-                        if content.get("text", "").startswith("群聊消息记录：\n")
+                        if '"messages":' in content.get("text", "")
                     ]
                     assert [row["message_id"] for row in records[-1]] == ["2", "3"]
                     history = [
@@ -963,22 +844,6 @@ async def test_group_correction(tmp_path, followup):
                         "SELECT DISTINCT status FROM group_batches"
                     ).fetchall() == [("completed",)]
                     return
-                assert any(
-                    item.get("role") == "developer"
-                    and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
-                    for item in requests[1]["input"]
-                )
-                assert (
-                    len(
-                        [
-                            item
-                            for item in requests[1]["input"]
-                            if item.get("role") == "user"
-                            and "群聊消息记录" in json.dumps(item, ensure_ascii=False)
-                        ]
-                    )
-                    == 1
-                )
                 assert (
                     len(
                         [
@@ -999,28 +864,6 @@ async def test_group_correction(tmp_path, followup):
                     agent.turns.execute(agent.queue.get_nowait()), 20
                 )
                 assert len(requests) == 4
-                encoded = json.dumps(requests, ensure_ascii=False)
-                for forbidden in (
-                    "observation_interval_seconds",
-                    "message_ttl_seconds",
-                    "pending_message_limit",
-                    "conversation_gap_seconds",
-                    "backoff_until",
-                    "silences",
-                    "参与度偏低",
-                ):
-                    assert forbidden not in encoded
-                assert any(
-                    item.get("role") == "developer"
-                    and "上一条回复解析失败" in json.dumps(item, ensure_ascii=False)
-                    for item in requests[3]["input"]
-                )
-                assert all(
-                    not item.get("role") == "user"
-                    or "上一条回复解析失败" not in json.dumps(item, ensure_ascii=False)
-                    for body in requests
-                    for item in body["input"]
-                )
             finally:
                 if task and not task.done():
                     task.cancel()

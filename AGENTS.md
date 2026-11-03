@@ -6,6 +6,7 @@
 
 - 修改前阅读相关代码和调用方，优先小范围修改；业务 SQL 和业务常量放在所属功能模块。所有进入 system/developer/user 消息的应用文本常量及插值模板统一放在 `qq_agent/prompts.py`，调用处 import；不再使用 `*.runtime.md`。
 - 组件显式组合，共用 SQLite 连接；调度状态由 `Agent` 管理，活动工具上下文由 `Turns` 管理。测试直接导入所属模块，在实际使用位置 mock。
+- 禁止对 prompt py 文件的字符串内容进行断言。
 - 使用 Python 3.13、uv、PATH 中的 Node.js 和锁定的 SDK/runtime；提交 `uv.lock`。
 - 提交前完成 [开发检查](docs/internal/development.md)：Pyright 必须 0 errors，完整 pytest、两种 runtime 自检及本机架构 Nix 应用包构建均必需。不得通过忽略错误、排除源码或跳过测试绕过检查。
 - 只在匹配架构的主机上构建 NixOS 系统；Pi 系统仅在 Pi 构建和切换。

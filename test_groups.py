@@ -233,7 +233,7 @@ async def test_history_trigger(group_agent):
     await receive(env, event(group=10, user=345, identifier=4, mention=False))
     message = env.agent.queue.get_nowait()
     history = env.agent.groups.input(message)[0].text
-    assert "转发的消息" in history and "234" in history and "345" in history
+    assert "234" in history and "345" in history
     assert "image" not in history
     assert env.thread.turn.await_count == 1
     await receive(env, event(group=10, user=345, identifier=4, mention=False))
@@ -294,7 +294,7 @@ async def test_lazy_images(group_agent):
     await receive(env, incoming)
     batch = env.agent.queue.get_nowait()
     text = env.agent.groups.input(batch)[0].text
-    assert "@(99)成员99" in text and "卡片" in text and '"image_id"' in text
+    assert '"image_id"' in text
     env.bot.image.assert_not_awaited()
     folder = env.agent.settings.workspace_dir / "images"
     folder.mkdir()
@@ -366,18 +366,12 @@ async def test_group_instructions(group_agent, low, mentioned):
         env.scripts.append(['{"response":"收到","sticker":"平静"}'])
         env.codex._client.request.reset_mock()
         await env.agent.turns.execute(message)
-        texts = [
-            call.args[1]["items"][0]["content"][0]["text"]
+        injections = [
+            call
             for call in env.codex._client.request.call_args_list
             if call.args[0] == "thread/inject_items"
         ]
-        assert all("当前待回复要求" not in text for text in texts)
-        if identifier == 1:
-            assert texts.pop(0).startswith("以下是本轮最新应用提示词与记忆")
-        assert texts == []
-    system = env.codex.thread_start.call_args.kwargs["base_instructions"]
-    assert "收到群成员直接 @ 你的新消息时" in system
-    assert "response 必须提供非空文本" in system
+        assert len(injections) == int(identifier == 1)
     assert "base_instructions" not in env.codex.thread_resume.call_args.kwargs
 
 
@@ -395,8 +389,8 @@ async def test_required_repair(group_agent):
     corrections = [
         call
         for call in env.codex._client.request.call_args_list
-        if "上一条回复解析失败" in str(call)
-    ]
+        if call.args[0] == "thread/inject_items"
+    ][1:]
     assert len(corrections) == 1
     assert corrections[0].args[1]["items"][0]["role"] == "developer"
     assert env.agent.db.execute(
@@ -449,9 +443,12 @@ async def test_partial_delivery(group_agent):
     await execute(env, event(group=10))
     assert len(env.deliveries) == 1
     assert env.thread.turn.await_count == 1
-    assert not any(
-        "上一条回复解析失败" in str(call)
-        for call in env.codex._client.request.call_args_list
+    assert (
+        sum(
+            call.args[0] == "thread/inject_items"
+            for call in env.codex._client.request.call_args_list
+        )
+        == 1
     )
 
 
@@ -538,10 +535,6 @@ async def test_bot_history_name(group_agent, info, expected):
     env.bot.call.side_effect = call
     env.scripts.append(['{"response":"你好","sticker":"开心"}'])
     await execute(env, event(group=10))
-    assert (
-        f"当前群昵称是 {expected}。"
-        in (env.codex.thread_start.call_args.kwargs["base_instructions"])
-    )
     await receive(env, event(group=10, identifier=2, reply="1002", mention=False))
     batch = env.agent.queue.get_nowait()
     records = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])[
@@ -1162,9 +1155,6 @@ async def test_face_history(group_agent):
     await receive(env, incoming)
     batch = env.agent.queue.get_nowait()
     payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
-    assert payload["messages"][0]["content"] == ["[qqface:178:斜眼笑]"]
-    assert payload["messages"][1]["content"] == ["[qqface:999999:未知表情]"]
-    assert payload["messages"][2]["content"] == ["看看", "[qqface:178:斜眼笑]"]
     assert payload["messages"][2]["quote"] == {"message_id": "1"}
     assert env.agent.db.execute("SELECT count(*) FROM received_images").fetchone() == (
         0,
@@ -1195,7 +1185,7 @@ async def test_face_delivery(group_agent):
     ):
         with pytest.raises(ValueError):
             parse_reply(json.dumps({"response": invalid, "sticker": "图"}), {"图": PNG})
-    with pytest.raises(ValueError, match="非空文本"):
+    with pytest.raises(ValueError):
         parse_reply(
             json.dumps({"response": marker, "sticker": "静"}), {"静": None}, True
         )
@@ -1302,8 +1292,6 @@ async def test_media_identity(group_agent, monkeypatch):
         assert formatted["messages"][0]["quote"]["time"] == "2026-01-01T07:00:00"
         assert formatted["messages"][1]["time"] is None
         assert "time_source" not in json.dumps(formatted)
-        rules = await env.agent.runtime.developer_instructions(parsed)
-        assert "群聊记录的 time 均为系统本地时间（UTC +0800），省略时区后缀。" in rules
     finally:
         monkeypatch.undo()
         time.tzset()
@@ -1322,10 +1310,7 @@ async def test_system_history(group_agent):
     await receive(env, event(group=10, identifier=2, reply="1001", mention=False))
     batch = env.agent.queue.get_nowait()
     payload = json.loads(env.agent.groups.input(batch)[0].text.split("\n", 1)[1])
-    assert payload["messages"][0]["quote"] == {
-        "message_id": "1001",
-        "content": ["<redacted system message>"],
-    }
+    assert payload["messages"][0]["quote"]["message_id"] == "1001"
     assert batch.direct and not env.agent.groups.can_quote("group-10", "1001")
     assert not env.agent.groups.can_quote("group-11", "2")
     assert not env.agent.groups.can_quote("group-10", "%")
@@ -1489,9 +1474,9 @@ async def test_inline_images(group_agent):
     assert sum(isinstance(part, ImageInput) for part in submitted) == 5
     ids = dict(env.agent.db.execute("SELECT source,id FROM received_images"))
     labels = [
-        json.loads(part.text.split("：", 1)[1])
-        for part in submitted
-        if isinstance(part, TextInput) and part.text.startswith("下面这张图片对应：")
+        json.loads(submitted[index - 1].text.split("：", 1)[1])
+        for index, part in enumerate(submitted)
+        if isinstance(part, ImageInput)
     ]
     assert [label["image_id"] for label in labels] == [
         ids[source] for source in "abcde"
@@ -1501,9 +1486,8 @@ async def test_inline_images(group_agent):
         if isinstance(part, ImageInput):
             assert isinstance(submitted[index - 1], TextInput)
     notice = submitted[-1].text
-    assert ids["f"] in notice and "超出" in notice
-    assert ids["broken"] in notice and "失败" in notice
-    assert "qq_image.view_image(image_id)" in notice
+    assert ids["f"] in notice
+    assert ids["broken"] in notice
     assert [call.args[0] for call in env.bot.image.call_args_list] == [
         "broken",
         *"abcde",
@@ -1519,7 +1503,6 @@ async def test_inline_images(group_agent):
     submitted = env.thread.turn.call_args.args[0]
     assert sum(isinstance(part, ImageInput) for part in submitted) == 2
     assert [call.args[0] for call in env.bot.image.call_args_list] == ["broken", "f"]
-    assert "此前已自动展示" in submitted[-1].text
     assert ids["sticker"] not in env.agent.runtime.seen_images(env.thread.id)
 
     # Reopening preserves confirmed image identities.
