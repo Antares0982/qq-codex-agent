@@ -32,7 +32,6 @@ async def group_agent(tmp_path):
         tmp_path / "token",
         tmp_path / "state",
         tmp_path / "work",
-        tmp_path / "AGENTS.md",
     )
     bot = OneBot(settings)
     deliveries = []
@@ -1057,7 +1056,7 @@ async def test_cadence_upgrade(group_agent):
         assert next(batch for batch in batches if batch.batch == direct.batch).mentioned
         candidates = env.agent.groups.candidates("group-10")
         assert len(candidates) == 1 and candidates[0].mentioned
-    assert env.agent.db.execute("PRAGMA user_version").fetchone() == (3,)
+    assert env.agent.db.execute("PRAGMA user_version").fetchone() == (5,)
     with sqlite3.connect(
         env.agent.settings.state_dir / "sessions.pre-cadence-v3.sqlite"
     ) as backup:
@@ -1066,7 +1065,7 @@ async def test_cadence_upgrade(group_agent):
     env.agent.db.close()
     env.agent.db = open_database(env.agent.settings)
     env.agent.groups.db = env.agent.db
-    assert env.agent.db.execute("PRAGMA user_version").fetchone() == (3,)
+    assert env.agent.db.execute("PRAGMA user_version").fetchone() == (5,)
 
 
 @pytest.mark.parametrize(

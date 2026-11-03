@@ -6,20 +6,21 @@ import json
 import time
 
 import aiohttp
-from PIL import Image
 from openai_codex import ImageInput, TextInput
+from PIL import Image
 
 from image_assets import OUTPUT_LIMIT, read_image, save_image
 
 from .compression import compress_bytes
 from .logging import LOG, log_text
-
-IMAGE_INSTRUCTIONS = """本会话通过 QQ 交付结果。用户无法直接访问你的硬盘、工作区路径、sandbox 链接或工具图片预览。
-生成图片完成后，应用自动把原图保存到当前会话工作区。调用 qq_image.list_images 查询真实路径、生成 ID 和顺序；不要猜测工具内部路径，不要自行搬运或解码 Base64。
-需要用户收到图片时，必须显式调用 qq_image.send_image。path 指定当前工作区中的 PNG/JPEG/GIF/WebP（最大 32 MiB）；省略 path 则发送最近生成的原图。此工具由应用直接上传，不依赖命令沙箱，也不要求 QQ 读取本地磁盘。
-多帧拼接、动图等任务：先生成所需帧，查询路径，使用代码加工并保存最终 GIF，再调用 send_image(path=最终文件路径)。中间帧不必发送；不能用 SVG 包装代替 PNG/GIF。工作区图片跨轮及 /new 保留，可以补发；超过 14 天未访问或修改的文件会被每日清理。
-只有 send_image 返回成功才能声称图片已发送。发送失败或结果未知时如实说明；不要自动重试结果未知的发送。resend=true 仅用于用户明确要求再次发送。
-命令沙箱不可用时，原图仍可通过上述工具查询和发送；需要加工的任务应明确说明加工失败，不声称动图已经完成。"""
+from .prompts import (
+    IMAGE_FAILED,
+    IMAGE_LABEL,
+    IMAGE_NOTICE,
+    IMAGE_OMITTED,
+    IMAGE_REPEATED,
+    IMAGE_REVIEW,
+)
 
 
 def image_preview(data):
@@ -147,7 +148,7 @@ class Images:
                     )
                     inputs.extend(
                         [
-                            TextInput("下面这张图片对应：" + label),
+                            TextInput(IMAGE_LABEL + label),
                             ImageInput(
                                 "data:"
                                 + result["image"]["mimeType"]
@@ -159,19 +160,18 @@ class Images:
                     attached.append(image_id)
         notices = []
         for ids, reason in (
-            (repeated, "此前已自动展示，本批未重复附图"),
-            (omitted, "超出本批自动附图预算，未展示"),
-            (failed, "图片读取失败，未展示"),
+            (repeated, IMAGE_REPEATED),
+            (omitted, IMAGE_OMITTED),
+            (failed, IMAGE_FAILED),
         ):
             if ids:
-                notices.append(reason + "：" + json.dumps(ids, ensure_ascii=False))
-        if notices:
-            inputs.append(
-                TextInput(
-                    "\n".join(notices)
-                    + "\n需要查看或重看时调用 qq_image.view_image(image_id)；读取失败的图片可能仍不可用。"
+                notices.append(
+                    IMAGE_NOTICE.format(
+                        reason=reason, ids=json.dumps(ids, ensure_ascii=False)
+                    )
                 )
-            )
+        if notices:
+            inputs.append(TextInput("\n".join(notices) + IMAGE_REVIEW))
         return inputs, attached
 
     def list_images(self, context):

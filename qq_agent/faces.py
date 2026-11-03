@@ -2,6 +2,7 @@ import json
 import re
 from importlib.resources import files
 
+from .prompts import FACE_ERROR, FACE_LABEL, UNKNOWN_FACE
 
 FACES: dict[str, str] = json.loads(
     files("qq_agent").joinpath("faces.json").read_text(encoding="utf-8")
@@ -9,7 +10,9 @@ FACES: dict[str, str] = json.loads(
 
 
 def face_label(identifier):
-    return f"[qqface:{identifier}:{FACES.get(identifier, '未知表情')}]"
+    return FACE_LABEL.format(
+        identifier=identifier, name=FACES.get(identifier, UNKNOWN_FACE)
+    )
 
 
 def parse_faces(text):
@@ -22,10 +25,7 @@ def parse_faces(text):
             continue
         match = re.fullmatch(r"\[qqface:([0-9]{1,10}):([^\[\]\r\n:]+)\]", value)
         if not match or FACES.get(match[1]) != match[2]:
-            raise ValueError(
-                "QQ 表情标记无效：使用已知的 [qqface:ID:名称]，"
-                "例如 [qqface:178:斜眼笑]；未知表情不能发送"
-            )
+            raise ValueError(FACE_ERROR)
         parts.append(("face", match[1]))
     return parts
 

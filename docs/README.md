@@ -16,4 +16,4 @@
 - [运维与排障](internal/operations.md)：日志、故障定位和 transcript 导出。
 - [技能与资源维护](internal/resources.md)：技能发现、提示词资源和表情压缩。
 
-仓库维护约定见 [AGENTS.md](../AGENTS.md)。运行时模板为 [公共](../AGENTS.runtime.md)、[私聊](../AGENTS.private.runtime.md)和[群聊](../AGENTS.group.runtime.md)，不属于上述维护文档。
+仓库维护约定见 [AGENTS.md](../AGENTS.md)。应用提示词统一在 [prompts.py](../qq_agent/prompts.py) 维护，不属于上述维护文档。

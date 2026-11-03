@@ -2,11 +2,9 @@
 
 ## 提示词资源
 
-默认修改根目录三份 `AGENTS*.runtime.md`，随应用重新部署。默认文件从应用包只读挂载，升级与回滚同时切换；不再复制到宿主 `/etc`。
+所有应用提示词在 [qq_agent/prompts.py](../../qq_agent/prompts.py) 维护，随 Python 包升级和回滚；集中维护规则见 [架构说明](architecture.md#提示词注入)。不再发布、挂载或读取三份 runtime Markdown，也不再提供 Nix 模板路径覆盖选项。旧默认路径配置仅用于迁移兼容并发出弃用提示，自定义路径必须先将定制合入源码。
 
-Nix 可用 `services.qq-codex-agent.agentsFile`、`privateAgentsFile`、`groupAgentsFile` 指定覆盖文件的绝对路径；不得把秘密放入 Nix store。首次迁移前比较 Pi 原有 `/etc/qq-codex-agent/AGENTS*.md`，将需要保留的定制显式配置为覆盖文件；旧文件不删除，但默认不再使用。模板更新何时生效见 [提示词契约](../specs/memory-prompts.md#更新时机)。
-
-应用同时注入 QQ 文件交付规则和 Pillow Python 路径。工作区内的 AGENTS.md 保持原生层级加载，会话目录显式标记为可信项目。Nix 文件或挂载目标变化仍需重新部署。
+应用同时注入 QQ 文件交付规则和 Pillow Python 路径。工作区内的 AGENTS.md 保持原生层级加载，会话目录显式标记为可信项目；技能发现文件继续留在技能目录。生效时机见 [提示词契约](../specs/memory-prompts.md#更新时机)。
 
 ## 内置与维护者技能
 

@@ -17,8 +17,6 @@ from .runtime import codex_config, load_skills, prepare_home
 async def run(settings, login):
     os.umask(0o077)
     os.environ.pop("NAPCAT_WS_TOKEN", None)
-    if not login:
-        settings.check_prompts()
     prepare_home(settings)
     codex = AsyncCodex(config=codex_config(settings))
     tokens = TokenClient(settings.auth_socket) if settings.auth_socket else None
@@ -58,6 +56,7 @@ async def run(settings, login):
         workers = [
             asyncio.create_task(bot.listen(agent.receive)),
             asyncio.create_task(agent.work()),
+            asyncio.create_task(agent.schedule_profiles()),
             asyncio.create_task(agent.cleanup.cleanup_files()),
             asyncio.create_task(watch_diagnostics(settings.state_dir)),
             asyncio.create_task(stop.wait()),

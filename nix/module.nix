@@ -12,20 +12,6 @@ let
   resources = "/var/lib/qq-codex-resources";
   home = "${work}/.home";
   app = cfg.package;
-  prompts = {
-    agents_file = {
-      file = cfg.agentsFile;
-      name = "AGENTS.md";
-    };
-    private_agents_file = {
-      file = cfg.privateAgentsFile;
-      name = "AGENTS.private.md";
-    };
-    group_agents_file = {
-      file = cfg.groupAgentsFile;
-      name = "AGENTS.group.md";
-    };
-  };
   runtime = pkgs.buildEnv {
     name = "qq-codex-runtime";
     paths =
@@ -73,7 +59,6 @@ let
           group_prompt_allow_members = cfg.groupPromptAllowMembers;
         }
         // lib.optionalAttrs (cfg.agentAdminQQ != null) { agent_admin_qq = cfg.agentAdminQQ; }
-        // lib.mapAttrs (_: prompt: "/etc/qq-codex-agent/${prompt.name}") prompts
       );
   requirements = (pkgs.formats.toml { }).generate "qq-codex-requirements.toml" {
     allowed_approval_policies = [ "on-request" ];
@@ -132,8 +117,7 @@ let
     ]
     ++ lib.optional (
       cfg.configFile == null && cfg.allowlistFile != null
-    ) "${cfg.allowlistFile}:/etc/qq-codex-private/allowlist.toml"
-    ++ lib.mapAttrsToList (_: prompt: "${prompt.file}:/etc/qq-codex-agent/${prompt.name}") prompts;
+    ) "${cfg.allowlistFile}:/etc/qq-codex-private/allowlist.toml";
     BindPaths = [
       state
       work
@@ -211,18 +195,6 @@ in
     napcatUrl = lib.mkOption {
       type = lib.types.str;
       default = "ws://127.0.0.1:3001";
-    };
-    agentsFile = lib.mkOption {
-      type = lib.types.str;
-      default = "${app}/share/qq-codex-agent/AGENTS.md";
-    };
-    privateAgentsFile = lib.mkOption {
-      type = lib.types.str;
-      default = "${app}/share/qq-codex-agent/AGENTS.private.md";
-    };
-    groupAgentsFile = lib.mkOption {
-      type = lib.types.str;
-      default = "${app}/share/qq-codex-agent/AGENTS.group.md";
     };
   };
   config = lib.mkIf cfg.enable {

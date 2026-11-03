@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import qq_id
 from .faces import face_label
+from .prompts import CARD_LABEL, FORWARD_LABEL, UNSUPPORTED_INPUT, UNSUPPORTED_LABEL
 
 
 def clean_name(value):
@@ -70,7 +71,7 @@ def is_command(message):
         message.text in {"/new", "/stop", "/status", "/help", "/compact"}
         or ("group_id" in message.target and message.text == "/new blank")
         or message.text.split(maxsplit=1)[:1]
-        in (["/model"], ["/profile"], ["/prompt"], ["/group-profile"])
+        in (["/model"], ["/prompt"], ["/group-profile"])
     )
 
 
@@ -81,9 +82,6 @@ class ImageTurn:
     token: str = field(default_factory=lambda: uuid.uuid4().hex)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tasks: set = field(default_factory=set)
-    profiles: list = field(default_factory=list)
-    blocked_members: set[str] = field(default_factory=set)
-    group_writable: bool = True
     chat_output: bool = False
 
 
@@ -134,11 +132,11 @@ def parse_parts(segments, group, bot=None):
                 unsupported = True
                 if group:
                     label = {
-                        "forward": "转发的消息",
-                        "json": "卡片",
-                        "xml": "卡片",
-                    }.get(str(segment.get("type")), "不支持的消息")
-                    parts.append(("placeholder", f"[{label}，暂不支持读取]"))
+                        "forward": FORWARD_LABEL,
+                        "json": CARD_LABEL,
+                        "xml": CARD_LABEL,
+                    }.get(str(segment.get("type")), UNSUPPORTED_LABEL)
+                    parts.append(("placeholder", UNSUPPORTED_INPUT.format(label=label)))
     return parts, images, reply, unsupported
 
 

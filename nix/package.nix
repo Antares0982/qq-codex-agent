@@ -22,18 +22,12 @@ let
   testEnv = pythonSet.mkVirtualEnv "qq-codex-agent-tests" workspace.deps.all;
 in
 pkgs.runCommand "qq-codex-agent" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-  mkdir -p "$out/bin" "$out/share/qq-codex-agent"
+  mkdir -p "$out/bin"
   makeWrapper ${env}/bin/qq-codex-agent "$out/bin/qq-codex-agent"
   makeWrapper ${env}/bin/codex-auth "$out/bin/codex-auth"
   makeWrapper ${env}/bin/python "$out/bin/qq-codex-check" \
     --add-flags ${source}/check_sandbox.py
   makeWrapper ${env}/bin/python "$out/bin/qq-codex-python"
-  cp ${source}/AGENTS.runtime.md "$out/share/qq-codex-agent/AGENTS.md"
-  cp ${source}/AGENTS.private.runtime.md "$out/share/qq-codex-agent/AGENTS.private.md"
-  cp ${source}/AGENTS.group.runtime.md "$out/share/qq-codex-agent/AGENTS.group.md"
-  for prompt in "$out/share/qq-codex-agent/"*.md; do
-    test -s "$prompt"
-  done
   "$out/bin/qq-codex-agent" --help >/dev/null
   "$out/bin/qq-codex-python" -I -c 'from qq_agent.stickers import load_stickers; from qq_agent.faces import FACES; load_stickers(); assert FACES["178"] == "斜眼笑"'
   ${testEnv}/bin/python -m pytest -v -p no:cacheprovider ${source}

@@ -142,7 +142,6 @@ async def main(sandbox=False):
             root / "token",
             root / "state",
             root / "work",
-            root / "AGENTS.md",
         )
         (settings.state_dir / "codex").mkdir(parents=True)
         settings.workspace_dir.mkdir()
@@ -176,7 +175,6 @@ if __name__ == "__main__":
             root / "token",
             root / "state",
             root / "work",
-            root / "AGENTS.md",
         )
         check_app_server_sandbox(
             settings,

@@ -4,12 +4,14 @@ from pathlib import PurePosixPath
 
 from image_assets import read_image
 
+from .prompts import JSON_DUPLICATE, STICKER_INSTRUCTIONS
+
 
 def unique_names(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"重复的表情名称：{key}")
+            raise ValueError(JSON_DUPLICATE.format(key=key))
         result[key] = value
     return result
 
@@ -44,17 +46,4 @@ def load_stickers():
 
 
 def sticker_instructions(stickers):
-    return (
-        "普通群聊任务的每条 assistant 消息（过程说明和最终回复）必须仅包含一个 JSON 对象，"
-        '格式为 {"response":"文本","sticker":"表情名称"}，可选 quote 为本群可见消息的 message_id 字符串或 null，不要代码围栏或其他字段。'
-        "response 必填，只能是文本或 null。有文本必须填写 sticker 表情名称，按语境和情绪选择。"
-        '不回复时使用 {"response":null}；仅表达表情意图时 response 为 null，sticker 为列出的任一名称。'
-        "表情名称不代表一定有图片，不要推断或依赖名称是否对应文件。应用自行匹配，有图片时先于文本发送，无图片时跳过；需要传达的内容应写入 response。"
-        "quote 仅用于文本首段；没有文本时用于实际发送的表情。response 无文本且省略 sticker 时不能带非空 quote，不能引用系统消息。普通图片仍用 qq_image.send_image。"
-        "QQ 内置表情在历史中显示为 [qqface:ID:名称]，例如 [qqface:178:斜眼笑]。"
-        "可在 response 中原样使用已知标记，与文字混排；应用会转换为真实 QQ 表情。"
-        "ID 和名称必须匹配，不要猜测；未知表情不能发送。/xyx、[斜眼笑] 等普通文字不会转换。"
-        "只有内置表情的 response 仍需 sticker 表情名称，但不能满足直接 @ 的非空文本义务。"
-        "不得输出原始 JSON 以外的 assistant 文字。应用发起的内部交接总结改用该轮指定的 summary schema，不发送到 QQ。\n可选表情名称："
-        + json.dumps(list(stickers), ensure_ascii=False)
-    )
+    return STICKER_INSTRUCTIONS + json.dumps(list(stickers), ensure_ascii=False)

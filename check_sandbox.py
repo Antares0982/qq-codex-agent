@@ -94,7 +94,6 @@ def check_thread_start(settings, directory):
 
 def main():
     settings = Settings.load("/etc/qq-codex-private/config.toml")
-    settings.check_prompts(required=True)
     prepare_home(settings)
     if settings.resources_dir is None:
         raise RuntimeError("Missing public resource directory")

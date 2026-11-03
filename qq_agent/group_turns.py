@@ -6,9 +6,24 @@ from openai_codex import ApprovalMode
 from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
 
-from .logging import LOG, log_text
 from .faces import parse_faces
+from .logging import LOG, log_text
 from .messages import ImageTurn
+from .prompts import (
+    REPLY_ALLOW_SILENCE,
+    REPLY_CORRECTION_PREFIX,
+    REPLY_CORRECTION_SUFFIX,
+    REPLY_FIELDS_ERROR,
+    REPLY_MISSING,
+    REPLY_QUOTE_ERROR,
+    REPLY_QUOTE_UNKNOWN,
+    REPLY_REQUIRE_TEXT,
+    REPLY_REQUIRED_ERROR,
+    REPLY_SILENT_QUOTE,
+    REPLY_STICKER_ERROR,
+    REPLY_STICKER_REQUIRED,
+    REPLY_TEXT_ERROR,
+)
 from .stickers import unique_names
 
 
@@ -19,27 +34,27 @@ def parse_reply(text, stickers, required=False):
         or "response" not in value
         or value.keys() - {"response", "sticker", "quote"}
     ):
-        raise ValueError("只允许 response、sticker 和 quote，response 必填")
+        raise ValueError(REPLY_FIELDS_ERROR)
     response = value["response"]
     if response is not None and not isinstance(response, str):
-        raise ValueError("response 必须是字符串或 null")
+        raise ValueError(REPLY_TEXT_ERROR)
     response = response.strip() if response else ""
     parts = parse_faces(response)
     if required and not any(kind == "text" and value.strip() for kind, value in parts):
-        raise ValueError("当前必须回复非空文本，不能沉默或仅发表情")
+        raise ValueError(REPLY_REQUIRED_ERROR)
     if response and "sticker" not in value:
-        raise ValueError("有文本时 sticker 必填")
+        raise ValueError(REPLY_STICKER_REQUIRED)
     name = value.get("sticker")
     if "sticker" in value and (not isinstance(name, str) or name not in stickers):
-        raise ValueError("sticker 必须是配置中的名称字符串")
+        raise ValueError(REPLY_STICKER_ERROR)
     sticker = stickers[name] if name is not None else None
     quote = value.get("quote")
     if quote is not None and (
         not isinstance(quote, str) or not 1 <= len(quote) <= 128 or not quote.strip()
     ):
-        raise ValueError("quote 必须是消息 ID 字符串或 null")
+        raise ValueError(REPLY_QUOTE_ERROR)
     if quote is not None and not response and name is None:
-        raise ValueError("沉默时不能指定 quote")
+        raise ValueError(REPLY_SILENT_QUOTE)
     return response, sticker, quote
 
 
@@ -91,14 +106,10 @@ class GroupTurn:
             return
         await self.runtime.inject(
             self.thread,
-            "上一条回复解析失败："
+            REPLY_CORRECTION_PREFIX
             + str(reason)
-            + "。请仅修正该回复，不重复已经成功发送的内容或工具操作。"
-            + (
-                "必须提供非空 response 文本。"
-                if self.required
-                else "可以按规则选择沉默。"
-            ),
+            + REPLY_CORRECTION_SUFFIX
+            + (REPLY_REQUIRE_TEXT if self.required else REPLY_ALLOW_SILENCE),
         )
 
     async def deliver(self, item):
@@ -122,7 +133,7 @@ class GroupTurn:
                 self.required,
             )
             if quote is not None and not self.groups.can_quote(self.message.key, quote):
-                raise ValueError("quote 必须引用本群可见历史中的消息，不能引用系统消息")
+                raise ValueError(REPLY_QUOTE_UNKNOWN)
         except (ValueError, TypeError, RecursionError) as error:
             await self.correct(error)
             return
@@ -213,7 +224,6 @@ class GroupTurn:
                 thread_id, folder, inputs, _ = session
                 self.context = ImageTurn(message, folder)
                 self.owner.contexts[message.key] = self.context
-                self.context.profiles = self.owner.profiles.recall_profiles(message)
                 options, model = await self.runtime.thread_options(message, folder)
                 self.thread = await self.runtime.prepare_thread(
                     message, thread_id, self.context, options
@@ -279,7 +289,7 @@ class GroupTurn:
                     if (
                         self.required or (correcting and not saw_reply)
                     ) and not self.repair:
-                        await self.correct("turn 结束但仍未提供有效回复")
+                        await self.correct(REPLY_MISSING)
                     if self.tripped:
                         break
                     if not self.repair:

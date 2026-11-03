@@ -2,12 +2,12 @@ import asyncio
 import base64
 import io
 import json
+from datetime import datetime
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import web
-from PIL import Image
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, TextInput
 from openai_codex.generated.v2_all import (
     CommandExecResponse,
@@ -17,12 +17,14 @@ from openai_codex.generated.v2_all import (
     ThreadStartResponse,
     TurnStatus,
 )
+from PIL import Image
 
+from qq_agent import runtime as runtime_module
 from qq_agent.config import GroupSettings, Settings
+from qq_agent.images import Images
 from qq_agent.logging import read_diagnostics
 from qq_agent.messages import ImageTurn, Message
-from qq_agent.images import Images
-from qq_agent.profiles import Profiles
+from qq_agent.profiles import Profiles, ProfileSummary
 from qq_agent.runtime import (
     GROUP_BASE_INSTRUCTIONS,
     HANDOFF_INSTRUCTIONS,
@@ -42,7 +44,6 @@ async def test_skill_permissions(tmp_path, target):
         tmp_path / "token",
         tmp_path / "state",
         tmp_path / "work",
-        tmp_path / "AGENTS.md",
     )
     db = open_database(settings)
     workspace = settings.workspace_dir
@@ -137,7 +138,7 @@ async def test_skill_permissions(tmp_path, target):
 @pytest.mark.parametrize(
     "mode", ["plain", "manual", "pre_turn", "mid_turn", "local", "upgrade"]
 )
-async def test_runtime_prompts(tmp_path, mode):
+async def test_runtime_prompts(tmp_path, mode, monkeypatch):
     original = io.BytesIO()
     Image.new("RGBA", (1000, 1000), (255, 0, 0, 128)).save(original, "PNG")
     requests = []
@@ -146,6 +147,7 @@ async def test_runtime_prompts(tmp_path, mode):
     tool_sent = False
     diagnose_failure = False
     handoff_response = False
+    profile_responses = []
 
     async def respond(request):
         nonlocal tool_sent
@@ -191,7 +193,7 @@ async def test_runtime_prompts(tmp_path, mode):
                 },
             },
         ]
-        if handoff_response and not compacting:
+        if (handoff_response or profile_responses) and not compacting:
             events.insert(
                 1,
                 {
@@ -204,7 +206,9 @@ async def test_runtime_prompts(tmp_path, mode):
                         "content": [
                             {
                                 "type": "output_text",
-                                "text": '{"summary":"HANDOFF_BACKGROUND"}',
+                                "text": profile_responses.pop(0)
+                                if profile_responses
+                                else '{"summary":"HANDOFF_BACKGROUND"}',
                             }
                         ],
                     },
@@ -254,13 +258,10 @@ async def test_runtime_prompts(tmp_path, mode):
         tmp_path / "token",
         tmp_path / "state",
         tmp_path / "work",
-        tmp_path / "AGENTS.md",
         agent_admin_qq="123456789",
-        group_agents_file=tmp_path / "group.md",
         model_auto_compact_token_limit=210000,
     )
-    group_template = tmp_path / "group.md"
-    group_template.write_text("GROUP_TEMPLATE_ALPHA")
+    monkeypatch.setattr(runtime_module, "GROUP_INSTRUCTIONS", "GROUP_TEMPLATE_ALPHA")
     db = open_database(settings)
     home = settings.state_dir / "codex"
     home.mkdir()
@@ -328,7 +329,7 @@ async def test_runtime_prompts(tmp_path, mode):
         "99",
         "1",
     )
-    profiles = Profiles(db, {}, AsyncMock(), NS(call=AsyncMock()))
+    profiles = Profiles(db, NS(call=AsyncMock()), settings)
     codex = AsyncCodex(config=config)
     try:
         async with asyncio.timeout(45):
@@ -343,14 +344,15 @@ async def test_runtime_prompts(tmp_path, mode):
             ):
                 if index == 1:
                     settings.agent_admin_qq = "987654321"
-                    settings.group_agents_file = group_template
-                    group_template.write_text("GROUP_TEMPLATE_BETA")
+                    monkeypatch.setattr(
+                        runtime_module, "GROUP_INSTRUCTIONS", "GROUP_TEMPLATE_BETA"
+                    )
                 if index == 2:
                     await runtime.transcripts.close()
                     await codex.close()
                     db.close()
                     db = open_database(settings)
-                    profiles = Profiles(db, {}, AsyncMock(), NS(call=AsyncMock()))
+                    profiles = Profiles(db, NS(call=AsyncMock()), settings)
                     codex = AsyncCodex(config=config)
                     assert (await codex.account()).account is None
                     await load_skills(codex)
@@ -362,21 +364,17 @@ async def test_runtime_prompts(tmp_path, mode):
                         "INSERT OR REPLACE INTO group_prompts VALUES ('10', ?, '1', 0)",
                         (prompt,),
                     )
-                    db.execute(
-                        "INSERT OR REPLACE INTO group_profiles VALUES ('10', ?, 0)",
-                        (f"GROUP_MEMORY_{min(index, 1)}" if prompt else "",),
-                    )
-                    db.execute("DELETE FROM member_profiles")
+                    db.execute("DELETE FROM group_profiles")
                     if prompt:
                         db.execute(
-                            "INSERT INTO member_profiles VALUES ('10', '1', 'Member', ?, 0)",
-                            (json.dumps({"兴趣": "MEMBER_MEMORY"}),),
+                            "INSERT INTO group_profiles VALUES ('10', ?, '2026-01-01')",
+                            (f"GROUP_MEMORY_{min(index, 1)}",),
                         )
                 options, model = await runtime.thread_options(message, workspace)
                 if mode == "upgrade" and index == 0:
                     options["developer_instructions"] = "LEGACY_APPLICATION_RULES"
                     settings.agent_admin_qq = None
-                    settings.group_agents_file = None
+                    monkeypatch.setattr(runtime_module, "GROUP_INSTRUCTIONS", "")
                     with db:
                         db.execute("DELETE FROM group_prompts WHERE group_id='10'")
                 context = ImageTurn(message, workspace)
@@ -523,19 +521,8 @@ async def test_runtime_prompts(tmp_path, mode):
                 "exec_command",
                 "web_search",
                 "mcp__qq_image",
-                "mcp__qq_member",
             } <= names
-            member_tools = next(
-                tool
-                for tool in requests[0]["tools"]
-                if tool.get("name") == "mcp__qq_member"
-            )
-            assert {
-                "list_profiles",
-                "replace_profile",
-                "get_group_profile",
-                "replace_group_profile",
-            } <= {tool["name"] for tool in member_tools["tools"]}
+            assert "mcp__qq_member" not in names
             update_counts = []
             image_tools = next(
                 tool
@@ -600,8 +587,8 @@ async def test_runtime_prompts(tmp_path, mode):
                 assert snapshot["群共同记录"] == (
                     "" if cleared else f"GROUP_MEMORY_{int('probe-1' in content)}"
                 )
-                assert bool(snapshot["成员记录"]) != cleared
-                assert ("MEMBER_MEMORY" in updates[-1]) != cleared
+                assert "成员记录" not in snapshot
+                assert "MEMBER_MEMORY" not in updates[-1]
             if mode == "plain":
                 assert update_counts == [1, 2, 2, 3, 3]
             if mode in {"pre_turn", "mid_turn"}:
@@ -704,6 +691,52 @@ async def test_runtime_prompts(tmp_path, mode):
                     assert "管理员 QQ 号为" not in instructions
                     assert "PROMPT_BETA" not in json.dumps(requests[-1]["input"])
                     await runtime.release_thread(thread.id)
+            if mode == "plain":
+                assert thread is not None
+                with db:
+                    db.execute("DELETE FROM group_profiles")
+                    db.execute(
+                        "INSERT INTO group_profiles VALUES ('10','old','1999-02-03')"
+                    )
+                profile_responses.extend(["{}", '{"valid":[1],"new":["a","b","c"]}'])
+                job = ProfileSummary(
+                    "group-10", datetime(2026, 1, 1, 5), datetime(2026, 1, 2, 5)
+                )
+                before = len(requests)
+                with patch.object(
+                    codex, "account", AsyncMock(return_value=NS(account=object()))
+                ):
+                    await runtime.summarize(job, thread.id, workspace, profiles)
+                assert len(requests) == before + 2
+                assert profiles.entries("10") == ["a", "b", "c", "old"]
+                for request in requests[before:]:
+                    assert (
+                        request["text"]["format"]["schema"]
+                        == runtime_module.PROFILE_SCHEMA
+                    )
+                    encoded_profile = json.dumps(request, ensure_ascii=False)
+                    assert "1999-02-03" not in encoded_profile
+                    assert "profile_max_entries" not in encoded_profile
+                    assert (
+                        "日期戳" not in encoded_profile
+                        and "淘汰" not in encoded_profile
+                    )
+                    assert '"name": "mcp__qq_member"' not in encoded_profile
+                assert "结果无效" in json.dumps(
+                    requests[-1]["input"], ensure_ascii=False
+                )
+                options, _ = await runtime.thread_options(message, workspace)
+                thread = await runtime.prepare_thread(
+                    message, thread.id, ImageTurn(message, workspace), options
+                )
+                await runtime.update_group(thread, message, profiles)
+                result = await thread.run([TextInput("ordinary-after-profile")])
+                assert result.status == TurnStatus.completed
+                assert (
+                    requests[-1].get("text", {}).get("format", {}).get("schema")
+                    != runtime_module.PROFILE_SCHEMA
+                )
+                await runtime.release_thread(thread.id)
             encoded = json.dumps(requests, ensure_ascii=False)
             for forbidden in (
                 "observation_interval_seconds",
@@ -841,9 +874,7 @@ async def test_group_correction(tmp_path, followup):
         tmp_path / "token",
         tmp_path / "state",
         tmp_path / "work",
-        tmp_path / "common.md",
     )
-    settings.agents_file.write_text("Follow the group protocol.")
     config = CodexConfig(
         cwd=str(tmp_path),
         env={"CODEX_HOME": str(home)},

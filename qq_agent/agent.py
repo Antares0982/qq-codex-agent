@@ -3,13 +3,16 @@ import contextlib
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from datetime import time as daytime
 
 from .cleanup import Cleanup
 from .commands import Commands
-from .inputs import Inputs
 from .groups import Groups
+from .inputs import Inputs
 from .logging import LOG, log_text
 from .messages import is_command, parse_message
+from .profiles import ProfileSummary
 from .replies import Replies
 from .runtime import Runtime
 from .storage import open_database
@@ -54,6 +57,7 @@ class Agent:
         self.scheduled = set()
         self.group_windows = {}
         self.group_timers = {}
+        self.profile_waiters = {}
         self.closing = False
         self.resetting = set()
         self.replies = Replies(bot)
@@ -90,7 +94,6 @@ class Agent:
         self.tools = ToolServer(
             self.turns.contexts,
             self.turns.images,
-            self.turns.profiles,
         )
         self.cleanup = Cleanup(
             settings, self.db, self.jobs, self.resetting, self.turns.contexts
@@ -183,9 +186,81 @@ class Agent:
 
     def start_control(self, message):
         if len(self.controls) < 8:
-            task = asyncio.create_task(self.commands.control(message))
+            task = asyncio.create_task(self.control(message))
             self.controls.add(task)
             task.add_done_callback(self.controls.discard)
+
+    async def control(self, message):
+        waiter = self.profile_waiters.get(message.key)
+        if waiter is not None and message.text != "/stop":
+            parts = message.text.split()
+            if message.text in {"/new", "/new blank", "/compact"} or (
+                len(parts) > 1 and parts[0] in {"/prompt", "/group-profile"}
+            ):
+                await waiter.wait()
+        await self.commands.control(message)
+
+    @staticmethod
+    def next_profile(now, settings):
+        end = datetime.combine(
+            now.date(), daytime.fromisoformat(settings.profile_summary_time)
+        )
+        return end if end > now else end + timedelta(days=1)
+
+    def enqueue_profile(self, group, end):
+        key = "group-" + group
+        if key in self.resetting or key in self.profile_waiters:
+            return False
+        with self.db:
+            inserted = self.db.execute(
+                "INSERT INTO group_profile_runs VALUES (?,?) ON CONFLICT(group_id) DO UPDATE SET day=excluded.day WHERE day<excluded.day",
+                (group, end.date().isoformat()),
+            ).rowcount
+        if inserted:
+            self.profile_waiters[key] = asyncio.Event()
+            self.queue.put_nowait(ProfileSummary(key, end - timedelta(days=1), end))
+        return True
+
+    async def schedule_profiles(self):
+        due = {
+            group: self.next_profile(datetime.now(), settings)
+            for group, settings in self.settings.groups.items()
+            if settings.profile_summary_enabled
+        }
+        while not self.closing:
+            now = datetime.now()
+            for group, end in due.items():
+                if now >= end and self.enqueue_profile(group, end):
+                    due[group] = self.next_profile(now, self.settings.groups[group])
+            delay = min(
+                ((end - now).total_seconds() for end in due.values()), default=30
+            )
+            await asyncio.sleep(max(0.1, min(30, delay)))
+
+    async def summarize_profile(self, message):
+        try:
+            row = self.db.execute(
+                "SELECT thread,folder FROM sessions WHERE key=? AND renew=0",
+                (message.key,),
+            ).fetchone()
+            if not row or not row[0]:
+                LOG.info(
+                    "Profile summary skipped chat=%s reason=no-thread", message.key
+                )
+                return
+            await self.runtime.summarize(
+                message,
+                row[0],
+                self.settings.workspace_dir / row[1],
+                self.turns.profiles,
+            )
+            LOG.info("Profile summary saved chat=%s", message.key)
+        except Exception as error:
+            LOG.error(
+                "Profile summary failed chat=%s error=%s", message.key, log_text(error)
+            )
+        finally:
+            self.mark(message, "completed")
 
     async def receive_group(self, key):
         queued = {message.identifier for message in self.incoming[key]}
@@ -261,8 +336,10 @@ class Agent:
                     message.direct and message.batch not in self.scheduled
                     for message in batches
                 )
-                busy = key in self.jobs or any(
-                    message.batch in self.scheduled for message in batches
+                busy = (
+                    key in self.jobs
+                    or key in self.profile_waiters
+                    or any(message.batch in self.scheduled for message in batches)
                 )
                 if busy:
                     LOG.debug(
@@ -340,6 +417,12 @@ class Agent:
         self.group_windows.clear()
 
     def mark(self, message, status):
+        if isinstance(message, ProfileSummary):
+            if status not in {"queued", "running"}:
+                waiter = self.profile_waiters.pop(message.key, None)
+                if waiter is not None:
+                    waiter.set()
+            return
         LOG.info(
             "Message status chat=%s message=%s status=%s",
             message.key,
@@ -359,7 +442,10 @@ class Agent:
                 message = self.pending[key].popleft()
                 self.mark(message, "running")
                 try:
-                    await self.turns.execute(message)
+                    if isinstance(message, ProfileSummary):
+                        await self.summarize_profile(message)
+                    else:
+                        await self.turns.execute(message)
                 except TimeoutError:
                     pass
         finally:

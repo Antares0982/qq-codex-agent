@@ -4,7 +4,7 @@
 
 ## 独立运行
 
-需要 Python 3.13、uv、Node.js、可用的本地 NapCat OneBot 11 服务及 Codex runtime 支持的沙箱环境。执行 `uv sync --frozen`，复制 [配置示例](../../config.example.toml)到不提交的本地配置文件，填写绝对目录、三份模板路径、token 文件及授权入口。独立登录时不设置 `auth_socket`。
+需要 Python 3.13、uv、Node.js、可用的本地 NapCat OneBot 11 服务及 Codex runtime 支持的沙箱环境。执行 `uv sync --frozen`，复制 [配置示例](../../config.example.toml)到不提交的本地配置文件，填写绝对目录、token 文件及授权入口。独立登录时不设置 `auth_socket`。
 
 ```sh
 uv run --frozen qq-codex-agent --config /absolute/path/config.toml --login
@@ -16,7 +16,7 @@ uv run --frozen qq-codex-agent --config /absolute/path/config.toml
 ## Nix 模块接入
 
 `package.nix` 使用调用方锁定的 `nixpkgs`、`uv2nix`、`pyproject-nix`、
-`pyproject-build-systems`，从本仓库的 `uv.lock` 打包应用及三份提示词。
+`pyproject-build-systems`，从本仓库的 `uv.lock` 打包应用及内置提示词模块。
 `module.nix` 负责配置生成、服务与登录 unit、运行依赖挂载和启动自检。
 源码 input 继续使用 `flake = false`，不需要另建 flake。
 
@@ -50,7 +50,7 @@ RPi 沿用 `secrets/qq-codex-allowlist.age` 文件名，但内容已升级为完
 
 设置 `configFile` 后，`allowlistFile`、`napcatUrl`、`groupPromptAllowMembers`、
 `agentAdminQQ`、`authSocket` 不再生成应用字段；也不再挂载单独白名单。
-提示词资源、`codexSettings`、token、共享认证和其他服务挂载仍由 Nix 管理。
+`codexSettings`、token、共享认证和其他服务挂载仍由 Nix 管理。
 完整配置内的目录和路径必须匹配现有挂载，填写新路径不会增加宿主访问权限。
 不设置 `configFile` 时保留原生成模式，此时必须设置 `allowlistFile`；
 生成配置也使用新的受保护路径，应用 CLI 默认路径仍保留供独立运行兼容使用。
@@ -106,9 +106,6 @@ state_dir = "/var/lib/qq-codex-agent"
 workspace_dir = "/var/lib/qq-codex-work"
 resources_dir = "/var/lib/qq-codex-resources"
 auth_socket = "/run/codex-auth/auth.sock"
-agents_file = "/etc/qq-codex-agent/AGENTS.md"
-private_agents_file = "/etc/qq-codex-agent/AGENTS.private.md"
-group_agents_file = "/etc/qq-codex-agent/AGENTS.group.md"
 queue_limit = 8
 task_timeout = 3600
 group_prompt_allow_members = false
@@ -137,7 +134,7 @@ conversation_gap_seconds = 300
 sudo nixos-rebuild switch --flake ./hosts/rpi5#rpi5
 ```
 
-第一次切换时创建专用用户和目录。三份默认提示词直接从应用包只读挂载，随应用升级和回滚，不再复制到宿主 `/etc`。
+第一次切换时创建专用用户和目录。应用提示词随 Python 包升级和回滚，不另挂载 Markdown。
 认证复用 tri-lug relay 的 `qqRelayEnv`：启动准备服务从中提取 `NAPCAT_WS_TOKEN`，
 写入仅服务用户可读的 `/run/qq-codex-auth/token`，再只读挂载到 agent 内。
 无需手工创建 token 文件，RabbitMQ 凭据不会传入 agent。
@@ -145,7 +142,7 @@ sudo nixos-rebuild switch --flake ./hosts/rpi5#rpi5
 独立运行时，`token_file` 仍须存在，但可以为空；非空时只放 token 本身。
 NapCat 的 forward WebSocket 使用 `ws://127.0.0.1:3001`，必须支持多客户端，不能停掉现有 relay。
 应用与依赖均由 Nix 管理，运行用户不可修改。应用的完整运行依赖加入私有根目录的只读挂载，
-默认不开放整个宿主 Nix store。当前 Pi 的宿主配置额外授权完整 store 和 Nix daemon，以支持 Nix 工具；该授权由 dotfile 维护。已有提示词副本不删除，但默认不再使用；登录状态保留。宿主 `/etc/localtime` 存在时只读挂载到服务私有根目录，使群历史采用系统时区。
+默认不开放整个宿主 Nix store。当前 Pi 的宿主配置额外授权完整 store 和 Nix daemon，以支持 Nix 工具；该授权由 dotfile 维护。已有提示词副本不删除，应用不再读取；登录状态保留。宿主 `/etc/localtime` 存在时只读挂载到服务私有根目录，使群历史采用系统时区。
 
 服务和登录 unit 均设置 `http_proxy`、`https_proxy` 为 `http://127.0.0.1:1081`，
 `no_proxy=127.0.0.1,localhost,::1`。这是环境变量代理，不是强制流量代理；本机 NapCat 连接直连。
@@ -196,8 +193,8 @@ nix build --impure --no-link --expr '
 '
 ```
 
-检查覆盖默认及自定义提示词挂载、只读辅助目录、独立公共资源路径、
-token 挂载和实际生成的 TOML。打包阶段检查三份模板存在且非空，并执行 Python 测试。
+检查覆盖内置提示词配置、只读辅助目录、独立公共资源路径、
+token 挂载和实际生成的 TOML。打包阶段执行完整 Python 测试。
 表情的安装环境校验见 [资源维护](resources.md#表情与压缩)。
 本机可用本地源码覆盖 input 求值完整 Pi 服务，不改锁文件：
 
@@ -246,3 +243,14 @@ RPi 的 `qq-codex-allowlist.age` 实为完整应用 TOML。使用 Nix 仓库的 
 升级条数保留版本前，将完整配置及独立白名单内每群的 `message_ttl_seconds` 删除，改为 `pending_message_limit = 100`，或省略以使用默认值。旧字段会阻止启动并提示迁移，不能把秒数直接当成条数。观察间隔和片段间隔继续使用秒，保留规则以 [群聊协议](../specs/groups.md) 为准。
 
 此升级无需改表、清空数据库或新建 thread，不恢复已淘汰、取消或已处理消息。旧版明确未提交的批次在重新调度时按新条数限制检查；结果未知的任务不重跑。更新真实配置和切换服务属于部署操作，不随源码修改自动执行。
+
+
+## 群记忆 v5 迁移
+
+先备份当前部署版本和数据库。应用升级自动生成 `state_dir/sessions.pre-profiles-v5.sqlite`，再删除个人 profile 表和旧群摘要、建立条目式记忆；备份已存在时不覆盖。原 thread、群设定、交接摘要、工作文件与认证均保留。旧上下文不改写，下次请求补入最新规则和空记忆。
+
+新增四个群配置均可省略以使用默认值，现有 age 文件无需为它们增加字段。旧模板字段若使用 `/etc/qq-codex-agent/AGENTS*.md` 三个历史默认路径，启动会提示弃用并忽略；定制模板路径必须迁移到源码。Nix 的三项模板覆盖选项已移除。
+
+切换前用 SQLite backup API 生成独立备份并执行 `PRAGMA integrity_check`，保存在仅管理员可访问的目录，不输出聊天内容。切换后确认服务 active、启动自检通过、schema 为 5、自动备份完整、旧个人表已删除和新的每群配置已取默认值。不要通过额外真实模型请求验证日总结。
+
+回退时停服，恢复迁移前数据库及对应旧应用版本，再启动；仅回滚系统不会恢复可写数据库。备份可能含个人记录，按私有聊天数据保护，不提交到 Git。

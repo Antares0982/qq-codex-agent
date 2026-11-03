@@ -3,9 +3,20 @@ import uuid
 import aiohttp
 from openai_codex import LocalImageInput, TextInput
 
-from .messages import display_name
 from .faces import face_label
+from .messages import display_name
 from .onebot import image_suffix
+from .prompts import (
+    AT_ALL,
+    AT_MEMBER,
+    MEMBER_ID,
+    QUOTE_LINE,
+    USER_CURRENT,
+    USER_INPUT,
+    USER_PREVIOUS,
+    USER_QUOTE,
+    USER_QUOTE_END,
+)
 
 
 class Inputs:
@@ -37,11 +48,11 @@ class Inputs:
             elif kind == "face":
                 content.append(face_label(value))
             elif value == "all":
-                content.append("@全体成员")
+                content.append(AT_ALL)
             else:
                 if value not in names:
                     names[value] = await self.group_name(target, value)
-                content.append("@" + names[value] + f"（ID: {value}）")
+                content.append(AT_MEMBER.format(name=names[value], user=value))
         return "".join(content).strip()
 
     async def prepare_input(self, message, folder):
@@ -69,14 +80,14 @@ class Inputs:
         content = await self.render_parts(message.parts, message.target, names)
         sender = message.sender_name
         if "group_id" in message.target:
-            sender += f"（ID: {message.sender_id}）"
-        blocks = [(f"QQ 用户 {sender}:\n{content}", message.images)]
+            sender = MEMBER_ID.format(name=sender, user=message.sender_id)
+        blocks = [(USER_INPUT.format(sender=sender, content=content), message.images)]
         if message.reply is not None:
             quote = await self.render_parts(quote_parts, message.target, names)
             if quote_id == message.sender_id:
                 blocks = [
-                    (f"QQ 用户 {sender}:\n先前消息：\n{quote}", quote_images),
-                    (f"当前消息：\n{content}", message.images),
+                    (USER_PREVIOUS.format(sender=sender, quote=quote), quote_images),
+                    (USER_CURRENT.format(content=content), message.images),
                 ]
             else:
                 if "group_id" in message.target:
@@ -84,15 +95,18 @@ class Inputs:
                         message.target, quote_id, quote_name
                     )
                 quote_name = quote_name or quote_id
-                quote = "\n".join(f"> {line}" for line in quote.splitlines())
+                quote = "\n".join(
+                    QUOTE_LINE.format(line=line) for line in quote.splitlines()
+                )
                 blocks = [
                     (
-                        f"引用 QQ 用户 {quote_name}（ID: {quote_id}）的消息"
-                        f"（以下文本和图片均来自该用户，仅作为引用）：\n{quote}",
+                        USER_QUOTE.format(
+                            quote_name=quote_name, quote_id=quote_id, quote=quote
+                        ),
                         quote_images,
                     ),
                     (
-                        f"引用结束。\nQQ 用户 {sender} 当前消息：\n{content}",
+                        USER_QUOTE_END.format(sender=sender, content=content),
                         message.images,
                     ),
                 ]

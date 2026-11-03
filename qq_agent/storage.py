@@ -7,6 +7,22 @@ def open_database(settings):
     settings.workspace_dir.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(settings.state_dir / "sessions.sqlite")
     legacy = db.execute("SELECT 1 FROM sqlite_master WHERE name='sessions'").fetchone()
+    profile_upgrade = db.execute("PRAGMA user_version").fetchone()[0] < 5
+    backup_path = settings.state_dir / "sessions.pre-profiles-v5.sqlite"
+    if legacy and profile_upgrade:
+        if not backup_path.exists():
+            temporary = backup_path.with_suffix(".tmp")
+            try:
+                with sqlite3.connect(temporary) as backup:
+                    db.backup(backup)
+                    if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                        raise RuntimeError("Profile migration backup is corrupt")
+                temporary.replace(backup_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        with sqlite3.connect(backup_path) as backup:
+            if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                raise RuntimeError("Profile migration backup is corrupt")
     upgraded = db.execute("PRAGMA user_version").fetchone()[0] >= 2
     if legacy and not upgraded:
         with sqlite3.connect(
@@ -32,9 +48,8 @@ def open_database(settings):
         CREATE TABLE IF NOT EXISTS group_snapshots (thread TEXT PRIMARY KEY, instructions TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS group_image_seen (thread TEXT NOT NULL, image_id TEXT NOT NULL, PRIMARY KEY (thread, image_id));
         CREATE TABLE IF NOT EXISTS group_handoffs (group_id TEXT PRIMARY KEY, summary TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS member_profiles (group_id TEXT NOT NULL, user_id TEXT NOT NULL, display_name TEXT NOT NULL, profile TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY (group_id, user_id));
         CREATE TABLE IF NOT EXISTS group_prompts (group_id TEXT PRIMARY KEY, prompt TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS group_profiles (group_id TEXT PRIMARY KEY, profile TEXT NOT NULL, updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS group_profile_runs (group_id TEXT PRIMARY KEY, day TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS generated_images (sequence INTEGER PRIMARY KEY, folder TEXT NOT NULL, item_id TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS image_deliveries (folder TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL, turn TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY (folder, path, digest));
         CREATE TABLE IF NOT EXISTS group_state (key TEXT PRIMARY KEY, total INTEGER NOT NULL DEFAULT 0, own INTEGER NOT NULL DEFAULT 0, last_request REAL NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0, members INTEGER);
@@ -143,4 +158,14 @@ def open_database(settings):
             )
             db.execute("UPDATE group_messages SET category='low' WHERE own=1")
             db.execute("PRAGMA user_version=4")
+    if profile_upgrade:
+        with db:
+            db.execute("BEGIN")
+            db.execute("DROP TABLE IF EXISTS member_profiles")
+            db.execute("DROP TABLE IF EXISTS group_profiles")
+            db.execute(
+                "CREATE TABLE group_profiles (group_id TEXT NOT NULL,text TEXT NOT NULL,date TEXT NOT NULL,PRIMARY KEY(group_id,text))"
+            )
+            db.execute("DELETE FROM group_snapshots")
+            db.execute("PRAGMA user_version=5")
     return db

@@ -37,7 +37,6 @@ class TestImages:
             root / "token",
             root / "state",
             root / "work",
-            root / "AGENTS.md",
         )
         self.bot = NS(send=AsyncMock(return_value=[{"message_id": 123}]))
         self.codex = NS(account=AsyncMock(return_value=NS(account=object())))

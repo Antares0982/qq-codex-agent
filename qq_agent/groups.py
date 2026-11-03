@@ -8,13 +8,20 @@ from datetime import datetime
 from openai_codex import TextInput
 
 from image_assets import save_image
-from .logging import LOG, log_text
-from .faces import face_label
-from .messages import Message, is_command, media_key, parse_message
 
+from .faces import face_label
+from .logging import LOG, log_text
+from .messages import Message, is_command, media_key, parse_message
+from .prompts import (
+    ALL_MEMBERS,
+    GROUP_INPUT,
+    HISTORY_AT,
+    QUOTE_PENDING,
+    QUOTE_UNAVAILABLE,
+    SYSTEM_PLACEHOLDER,
+)
 
 HISTORY_SECONDS = 14 * 86400
-SYSTEM_PLACEHOLDER = "<redacted system message>"
 
 
 class Groups:
@@ -71,7 +78,7 @@ class Groups:
                 "message_id": message.reply,
                 "time": None,
                 "time_source": "unknown",
-                "content": ["[引用消息尚未读取]"],
+                "content": [QUOTE_PENDING],
             }
         return body
 
@@ -176,11 +183,11 @@ class Groups:
             if isinstance(part, dict) and "at" in part:
                 user = part["at"]
                 name = (
-                    "全体成员"
+                    ALL_MEMBERS
                     if user == "all"
                     else await self.inputs.group_name(target, user)
                 )
-                body["content"][index] = f"@({user}){name}"
+                body["content"][index] = HISTORY_AT.format(user=user, name=name)
         return body
 
     async def prepare(self, message):
@@ -250,7 +257,7 @@ class Groups:
                     "message_id": message.reply,
                     "time": None,
                     "time_source": "unknown",
-                    "content": ["[引用消息不可读取]"],
+                    "content": [QUOTE_UNAVAILABLE],
                 }
         with self.db:
             self.db.execute(
@@ -581,7 +588,7 @@ class Groups:
                     "UPDATE group_batches SET payload=? WHERE id=?",
                     (payload, message.batch),
                 )
-        return [TextInput("群聊消息记录：\n" + payload)]
+        return [TextInput(GROUP_INPUT + payload)]
 
     def status(self, message, status):
         with self.db:

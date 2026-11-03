@@ -6,7 +6,11 @@
 
 群历史、候选积压和输入快照由 `groups` 管理，每群定时任务、合并窗口及忙碌调度由 `Agent` 管理，JSON 解析、纠错与 turn 生命周期由 `group_turns` 管理。批次状态为 pending/submitting/submitted/终态。消息发送回执和 bot 自身事件按群及消息 ID 去重。
 
-`member_profiles` 按 `(group_id, user_id)` 保存固定成员字段，`group_profiles` 保存群共同记录，`group_prompts` 保存群设定、修改者及时间。查询其他成员身份后再次校验活动任务和删除状态，防止异步查询期间发生的 forget 被旧任务写回。
+`group_profiles` 按 `(group_id, text)` 保存条目和本地日期；`group_profile_runs` 按群保存已触发周期的日期，避免重复提交。`group_prompts` 继续保存手工设定。schema v5 升级前备份旧数据库，清空旧个人及群记忆，保留会话和交接摘要。
+
+`Agent.schedule_profiles` 用本地墙钟计算下一次未来时刻，最多每 30 秒重新检查。到期将 `ProfileSummary` 放入现有按聊天串行的队列；普通群调度看到等待中的总结即暂缓新批次。总结占用同群 job，其他群独立。会话和记忆修改命令等待总结，`/stop` 仍可取消；重启不恢复未完成总结。
+
+`Runtime.summarize` 共用交接总结的事件收集、超时、中断及订阅释放逻辑。群记忆总结固定旧条目快照及编号，以独立 output schema 请求，失败最多两次 developer 纠错；成功后由 `Profiles` 一次事务刷新和裁剪。纠错明确限定当前内部总结，不删除普通 developer 快照缓存；仅日期更新不会导致重插。
 
 `group_handoffs` 保存每群摘要，与 `sessions.renew` 在同一事务提交。新 thread 创建或快照注入失败不会消费待交接状态。总结通过旧 thread 发起，使用当前模型和 medium，不注册 QQ 活动工具上下文；要求不调用工具，但不改变 runtime 工具权限。结构化摘要格式由应用校验。
 
@@ -15,6 +19,10 @@
 上下文估算来自最近一次 token usage，按 thread 持久保存；恢复时可接收更新，缺失时最多等待两秒。自动压缩配置按完整有效上下文计算，不修改模型真实窗口。
 
 ## 提示词注入
+
+所有由应用构造、进入 system/developer/user 消息的自然语言常量和插值模板统一定义在 `qq_agent/prompts.py`，不论长短。调用模块 import 常量，仅负责数据读取、格式化与组装；包括短前缀、引用包装、图片占位和注入模型的校验错误。禁止新增 `*.runtime.md` 或在业务模块内写入消息文案。
+
+动态用户文本、协议字段、工具专属输出、日志和只发送到 QQ 的应用回复不属于此模板规则。原生工作区 AGENTS.md、SKILL.md 仍由 runtime 加载，不搬入应用模块。模板修改随代码部署；不提供路径覆盖或热重载。
 
 群新 thread 的 `base_instructions` 写入 Responses 的 system `instructions`；bot QQ 号和昵称由代码独立注入，不依赖 `{nickname}` 占位符。恢复、总结和压缩不覆盖已保存的 system。
 

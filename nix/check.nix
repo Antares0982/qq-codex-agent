@@ -21,9 +21,6 @@ let
   config = evaluate { };
   custom = evaluate {
     services.qq-codex-agent = {
-      agentsFile = "/custom/common.md";
-      privateAgentsFile = "/custom/private.md";
-      groupAgentsFile = "/custom/group.md";
       groupPromptAllowMembers = true;
       agentAdminQQ = "123456789";
     };
@@ -39,11 +36,6 @@ let
   mounts = config.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
   customMounts = custom.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
   externalMounts = external.systemd.services.qq-codex-agent.serviceConfig.BindReadOnlyPaths;
-  promptNames = [
-    "AGENTS.md"
-    "AGENTS.private.md"
-    "AGENTS.group.md"
-  ];
   configMount = builtins.head (
     builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-private/config.toml" path) mounts
   );
@@ -84,15 +76,6 @@ assert builtins.any (
 assert builtins.any (
   entry: !entry.assertion && entry.message == "qq-codex-agent configFile must be absolute."
 ) relative.assertions;
-assert builtins.all (
-  name:
-  builtins.elem "${pkgs.emptyDirectory}/share/qq-codex-agent/${name}:/etc/qq-codex-agent/${name}" mounts
-) promptNames;
-assert builtins.all (path: builtins.elem path customMounts) [
-  "/custom/common.md:/etc/qq-codex-agent/AGENTS.md"
-  "/custom/private.md:/etc/qq-codex-agent/AGENTS.private.md"
-  "/custom/group.md:/etc/qq-codex-agent/AGENTS.group.md"
-];
 assert builtins.elem "/run/codex-auth" mounts;
 assert builtins.all (paths: builtins.elem "-/etc/localtime:/etc/localtime" paths) [
   mounts
@@ -116,12 +99,7 @@ pkgs.runCommand "qq-codex-deployment-check"
     from pathlib import Path
 
     config = tomllib.loads(Path(sys.argv[1]).read_text())
-    for key, name in (
-        ("agents_file", "AGENTS.md"),
-        ("private_agents_file", "AGENTS.private.md"),
-        ("group_agents_file", "AGENTS.group.md"),
-    ):
-        assert config[key] == f"/etc/qq-codex-agent/{name}"
+    assert not {"agents_file", "private_agents_file", "group_agents_file"} & config.keys()
     assert config["auth_socket"] == "/run/codex-auth/auth.sock"
     assert config["group_prompt_allow_members"] is False
     assert "agent_admin_qq" not in config

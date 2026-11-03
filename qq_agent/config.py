@@ -1,5 +1,7 @@
+import logging
 import tomllib
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -18,6 +20,10 @@ class GroupSettings:
     observation_interval_seconds: int = 60
     pending_message_limit: int = 100
     conversation_gap_seconds: int = 300
+    profile_max_entries: int = 50
+    profile_max_chars: int = 40
+    profile_summary_time: str = "05:00"
+    profile_summary_enabled: bool = True
 
     def __post_init__(self):
         values = (
@@ -31,6 +37,16 @@ class GroupSettings:
             )
         if values[0] > values[2]:
             raise ValueError("Group intervals must satisfy observation <= gap")
+        for value in (self.profile_max_entries, self.profile_max_chars):
+            if type(value) is not int or value <= 0:
+                raise ValueError("Profile limits must be positive integers")
+        if type(self.profile_summary_enabled) is not bool:
+            raise ValueError("profile_summary_enabled must be boolean")
+        value = self.profile_summary_time
+        if not isinstance(value, str) or len(value) != 5:
+            raise ValueError("profile_summary_time must be HH:MM")
+        if time.fromisoformat(value).strftime("%H:%M") != value:
+            raise ValueError("profile_summary_time must be HH:MM")
 
 
 @dataclass
@@ -41,9 +57,6 @@ class Settings:
     token_file: Path
     state_dir: Path
     workspace_dir: Path
-    agents_file: Path
-    private_agents_file: Path | None = None
-    group_agents_file: Path | None = None
     queue_limit: int = 8
     task_timeout: float = 3600
     model: str | None = None
@@ -54,19 +67,21 @@ class Settings:
     model_auto_compact_token_limit: int = 258000
     group_image_limit: int = 5
 
-    def check_prompts(self, required=False):
-        for key in ("agents_file", "private_agents_file", "group_agents_file"):
-            path = getattr(self, key)
-            if path is None:
-                if required:
-                    raise ValueError(f"Missing {key}")
-                continue
-            if not path.read_text().strip():
-                raise ValueError(f"Empty prompt: {path}")
-
     @classmethod
     def load(cls, path):
         raw = tomllib.loads(Path(path).read_text())
+        for key, name in (
+            ("agents_file", "AGENTS.md"),
+            ("private_agents_file", "AGENTS.private.md"),
+            ("group_agents_file", "AGENTS.group.md"),
+        ):
+            if key not in raw:
+                continue
+            if raw.pop(key) != f"/etc/qq-codex-agent/{name}":
+                raise ValueError("Migrate custom prompts to qq_agent/prompts.py")
+            logging.getLogger(__name__).warning(
+                "Deprecated %s ignored; prompts are built in", key
+            )
         if raw.keys() & {"allowed_users", "allowed_groups"}:
             raise ValueError(
                 "Migrate allowed_users/allowed_groups to private_users/groups"
@@ -105,16 +120,18 @@ class Settings:
                 "observation_interval_seconds",
                 "pending_message_limit",
                 "conversation_gap_seconds",
+                "profile_max_entries",
+                "profile_max_chars",
+                "profile_summary_time",
+                "profile_summary_enabled",
             }:
                 raise ValueError("Unknown group settings; users is no longer supported")
             raw["groups"][group] = GroupSettings(**entry)
-        for key in ("token_file", "state_dir", "workspace_dir", "agents_file"):
+        for key in ("token_file", "state_dir", "workspace_dir"):
             raw[key] = Path(raw[key])
             if not raw[key].is_absolute():
                 raise ValueError(f"{key} must be absolute")
         for key in (
-            "private_agents_file",
-            "group_agents_file",
             "auth_socket",
             "resources_dir",
         ):

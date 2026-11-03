@@ -6,8 +6,8 @@ from openai_codex import ApprovalMode
 from openai_codex.errors import JsonRpcError
 from openai_codex.generated.v2_all import ReasoningEffort, TurnStatus
 
-from .images import Images
 from .group_turns import GroupTurn
+from .images import Images
 from .logging import LOG, log_text
 from .messages import ImageTurn
 from .profiles import Profiles
@@ -40,7 +40,7 @@ class Turns:
         self.mark = mark
         self.groups = groups
         self.contexts = {}
-        self.profiles = Profiles(db, self.contexts, replies.safe_send, replies.bot)
+        self.profiles = Profiles(db, replies.bot, settings)
         self.images = Images(db, replies.bot, self.contexts)
 
     async def execute(self, message):
@@ -83,8 +83,6 @@ class Turns:
                 options, model = await self.runtime.thread_options(message, folder)
                 context = ImageTurn(message, folder)
                 self.contexts[message.key] = context
-                if "group_id" in message.target:
-                    context.profiles = self.profiles.recall_profiles(message)
                 thread = await self.runtime.prepare_thread(
                     message, thread_id, context, options
                 )

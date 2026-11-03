@@ -17,13 +17,11 @@ HELP = """直接发送文字或图片，可提问、执行代码或请求生成�
 /new 群聊先总结再开启新会话；私聊开启空白会话，保留工作文件等
 /new blank 仅群聊：不总结，清除交接摘要并开启空白会话
 /compact 压缩当前会话上下文，执行任务时请稍后重试
-/profile 在当前群公开查看本人聊天偏好
-/profile forget 删除本人当前群偏好，后续仍可自动学习
 /prompt 查看当前群设定
 /prompt set <内容> 替换群设定，最多 4000 字符，新建会话生效
 /prompt clear 恢复默认群设定，新建会话生效
-/group-profile 查看本群共同偏好
-/group-profile forget 清除本群共同偏好，后续仍可自动学习
+/group-profile 查看本群记忆
+/group-profile forget 清除本群记忆，后续仍可自动学习
 群设定修改和群记录清除默认仅授权群主、管理员可用，管理员可配置开放给全部授权成员。
 删除记录不清除旧聊天历史及 journal；/new 保留群设定和记录。
 推理强度固定为 medium。模型选择在重启后保留。
@@ -159,7 +157,7 @@ class Commands:
                 ).fetchone()
                 text = row[0] if row else "暂无自定义群设定。"
             else:
-                text = self.profiles.group_profile(group) or "暂无群共同偏好。"
+                text = self.profiles.group_profile(group) or "暂无群记忆。"
             await self.safe_send(message, text)
             return
         if prompt and len(parts) == 3 and parts[1] == "set":
@@ -213,14 +211,11 @@ class Commands:
                     )
             else:
                 self.db.execute("DELETE FROM group_profiles WHERE group_id=?", (group,))
-                context = self.profiles.contexts.get(message.key)
-                if context:
-                    context.group_writable = False
         await self.safe_send(
             message,
             "保存成功"
             if prompt
-            else "已删除本群共同偏好。旧聊天历史和 journal 仍保留，后续独立轮次可能重新形成偏好。",
+            else "已删除本群记忆。旧聊天历史和 journal 仍保留，后续内部总结可能重新形成记忆。",
         )
 
     async def select_model(self, message):
@@ -287,9 +282,6 @@ class Commands:
                     return
                 self.mark(message, "queued")
                 self.queue.put_nowait(message)
-                return
-            if message.text.split(maxsplit=1)[:1] == ["/profile"]:
-                await self.profiles.profile_control(message)
                 return
             if message.text == "/help":
                 await self.safe_send(message, HELP)

@@ -7,9 +7,10 @@
 - `private_users` 为 QQ 号数组，仅允许其中用户私聊；`groups` 中存在的群允许全员参与，未配置群不处理。两个入口分别由空名单和空群配置禁用。
 - QQ 号接受正整数或 ASCII 数字字符串，规范化为十进制字符串；不接受 bool、零和负数。规范化后重复的群号无效。
 - 每群配置 `observation_interval_seconds`、`pending_message_limit`、`conversation_gap_seconds` 必须为正整数，默认分别为 60 秒、100 条、300 秒；时间间隔满足 `observation_interval_seconds <= conversation_gap_seconds`。不接受 bool、未知字段、旧 `groups.users`、`message_ttl_seconds` 或旧节奏字段 `request_interval_minutes`、`request_message_count`、`participation_ratio`；旧字段明确提示迁移。节奏行为见 [群聊协议](groups.md)。
+- 每群 `profile_max_entries`、`profile_max_chars` 为正整数，默认 50、40；不接受 bool。`profile_summary_time` 为本地时区的 `HH:MM`，默认 `"05:00"`；`profile_summary_enabled` 为 bool，默认 true。省略时使用默认值；关闭只停止自动总结，不清除已有记忆。总结、纠错及淘汰语义见 [群记忆](memory-prompts.md)。
 - 不接受旧 `allowed_users`、`allowed_groups`。可选 `allowlist_file` 必须为绝对路径，其文件仅接受 `private_users` 和 `groups`，替换主配置中的这两项；不能将完整应用配置作为白名单文件。
 - `napcat_url` 必须为不含查询参数、用户名的回环 `ws://` 地址。`token_file` 必须存在，内容可为空；非空时用于连接认证。
-- `token_file`、`state_dir`、`workspace_dir`、`agents_file` 及可选私聊/群聊模板、认证 socket、资源目录均使用绝对路径。配置中提供的模板须可读且非空；Nix 服务要求三份模板均有效。
+- `token_file`、`state_dir`、`workspace_dir` 及可选认证 socket、资源目录均使用绝对路径。应用提示词内置，不提供文件覆盖；旧 `agents_file`、`private_agents_file`、`group_agents_file` 仅接受历史默认 `/etc/qq-codex-agent/AGENTS.md`、`AGENTS.private.md`、`AGENTS.group.md`，发出弃用提示并忽略。自定义旧路径拒绝启动并要求迁移。
 - `queue_limit` 和 `task_timeout` 必须为正整数，默认分别为 8 条和 3600 秒。模型可由主配置指定，也可按会话选择。
 - `model_auto_compact_token_limit` 为自动压缩阈值，必须为正整数，默认 258000 tokens；不接受 bool、零、负数或小数。全局适用于私聊和群聊，重启服务后用于新建及恢复的会话；压缩行为见 [会话与命令](sessions.md)。
 - `group_image_limit` 为群消息每批成功自动附图预算，默认 5，必须为正整数，不接受 bool、零、负数或小数。适用于群聊每批首次输入，不改变私聊图片限制；去重和超额行为见 [群聊协议](groups.md#图片和提醒)。
@@ -19,7 +20,7 @@
 
 ## 安全边界
 
-群回复与成员记录对群成员公开。同群共享上下文，各私聊及不同群独立；工作区用于组织会话，不提供授权用户之间的强多租户隔离。仅应授权信任的用户。
+群回复与群记忆对群成员公开。同群共享上下文，各私聊及不同群独立；工作区用于组织会话，不提供授权用户之间的强多租户隔离。仅应授权信任的用户。
 
 工具可操作专用工作区，但不得读取私有服务状态、NapCat token 或共享认证。工作区中的 AGENTS.md 和技能不能改变应用授权与宿主访问范围。群设定和记忆不能作为新的工具授权。
 
