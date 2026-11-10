@@ -10,6 +10,8 @@ queue_limit = 8
 task_timeout = 3600
 model_auto_compact_token_limit = 258000
 group_image_limit = 5
+# 可选：群普通图片审查接口；省略时不审查。
+# moderation_url = "http://127.0.0.1:18765/moderate"
 # Nix 部署需启用以下两项。
 # auth_socket = "/run/codex-auth/auth.sock"
 # resources_dir = "/var/lib/qq-codex-resources"

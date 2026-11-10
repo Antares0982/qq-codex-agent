@@ -58,11 +58,22 @@ def open_database(settings):
         CREATE TABLE IF NOT EXISTS group_batches (id TEXT PRIMARY KEY, key TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL, created REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS received_images (id TEXT PRIMARY KEY, key TEXT NOT NULL, source TEXT, folder TEXT, path TEXT, created REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS system_messages (id TEXT PRIMARY KEY, key TEXT NOT NULL, own INTEGER NOT NULL, cutoff INTEGER NOT NULL, created REAL NOT NULL, event_time REAL);
+        CREATE TABLE IF NOT EXISTS moderation_results (url TEXT NOT NULL, digest TEXT NOT NULL, flagged INTEGER NOT NULL, PRIMARY KEY (url,digest));
+        CREATE TABLE IF NOT EXISTS moderation_images (url TEXT NOT NULL, id TEXT NOT NULL, digest TEXT, blocked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (url,id));
+        CREATE INDEX IF NOT EXISTS moderation_digest ON moderation_images(url,digest);
+        CREATE TABLE IF NOT EXISTS moderation_messages (id TEXT PRIMARY KEY, url TEXT NOT NULL, flagged INTEGER NOT NULL);
         UPDATE group_batches SET status='unknown' WHERE status='submitting';
         UPDATE group_batches SET status='interrupted' WHERE status='submitted';
         UPDATE group_messages SET consumed=1 WHERE batch IN (SELECT id FROM group_batches WHERE status IN ('unknown','interrupted'));
         UPDATE messages SET status='interrupted' WHERE status IN ('queued', 'running');
     """)
+    if "kind" not in {
+        row[1] for row in db.execute("PRAGMA table_info(received_images)")
+    }:
+        with db:
+            db.execute(
+                "ALTER TABLE received_images ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'"
+            )
     if "renew" not in {row[1] for row in db.execute("PRAGMA table_info(sessions)")}:
         with db:
             db.execute(

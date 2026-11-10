@@ -66,6 +66,7 @@ class Settings:
     agent_admin_qq: str | None = None
     model_auto_compact_token_limit: int = 258000
     group_image_limit: int = 5
+    moderation_url: str | None = None
 
     @classmethod
     def load(cls, path):
@@ -142,6 +143,26 @@ class Settings:
         if "agent_admin_qq" in raw:
             raw["agent_admin_qq"] = qq_id(raw["agent_admin_qq"])
         settings = cls(**raw)
+        if settings.moderation_url is not None:
+            if not isinstance(settings.moderation_url, str):
+                raise ValueError("moderation_url must be an HTTP(S) endpoint")
+            endpoint = urlsplit(settings.moderation_url)
+            if (
+                endpoint.scheme not in {"http", "https"}
+                or not endpoint.hostname
+                or endpoint.username is not None
+                or endpoint.password is not None
+                or endpoint.query
+                or endpoint.fragment
+                or any(
+                    character.isspace() or ord(character) < 32 or ord(character) == 127
+                    for character in settings.moderation_url
+                )
+            ):
+                raise ValueError(
+                    "moderation_url must be an HTTP(S) endpoint without credentials"
+                )
+            endpoint.port
         if type(settings.group_prompt_allow_members) is not bool:
             raise ValueError("group_prompt_allow_members must be boolean")
         url = urlsplit(settings.napcat_url)

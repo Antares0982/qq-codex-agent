@@ -113,7 +113,11 @@ class Agent:
                 message.key,
                 message.identifier,
                 message.sender_id,
-                log_text(message.text),
+                log_text(
+                    "[pending moderation]"
+                    if self.settings.moderation_url and message.images
+                    else message.text
+                ),
                 len(message.images),
                 message.reply,
             )
@@ -410,7 +414,10 @@ class Agent:
 
     async def close_timers(self):
         self.closing = True
-        timers = list(self.group_timers.values())
+        timers = [
+            *self.group_timers.values(),
+            *self.groups.moderation.requests.values(),
+        ]
         for timer in timers:
             timer.cancel()
         await asyncio.gather(*timers, return_exceptions=True)

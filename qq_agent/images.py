@@ -20,6 +20,7 @@ from .prompts import (
     IMAGE_OMITTED,
     IMAGE_REPEATED,
     IMAGE_REVIEW,
+    IMAGE_UNAVAILABLE,
 )
 
 
@@ -40,10 +41,11 @@ def image_preview(data):
 
 
 class Images:
-    def __init__(self, db, bot, contexts):
+    def __init__(self, db, bot, contexts, groups=None):
         self.db = db
         self.bot = bot
         self.contexts = contexts
+        self.groups = groups
 
     async def view_image(self, context, request):
         if (
@@ -69,6 +71,12 @@ class Images:
             if not row:
                 raise ValueError("图片索引不存在或不属于当前群。")
             source, folder, path, created = row
+            if (
+                self.groups
+                and self.groups.moderation.url
+                and self.groups.moderation.kind(image_id) == "image"
+            ):
+                return await self.read_moderated(context, image_id, token, folder, path)
             if path:
                 if folder != context.folder.name:
                     raise ValueError("图片不属于当前工作区。")
@@ -98,6 +106,45 @@ class Images:
                 "first_frame": animated,
                 "image": preview,
             }
+
+    async def read_moderated(self, context, image_id, token, folder, path):
+        groups = self.groups
+        assert groups is not None
+        if folder and folder != context.folder.name:
+            raise ValueError(IMAGE_UNAVAILABLE)
+        if not await groups.review_image(context.message, image_id):
+            raise ValueError(IMAGE_UNAVAILABLE)
+        try:
+            data, preview, animated = await groups.moderation.load(image_id)
+            allowed = await groups.moderation.check(image_id, preview, data)
+        except (ValueError, OSError, RuntimeError, TimeoutError, aiohttp.ClientError):
+            await groups.review_image(context.message, image_id, failed=True)
+            raise ValueError(IMAGE_UNAVAILABLE) from None
+        if not allowed:
+            await groups.review_image(context.message, image_id)
+            raise ValueError(IMAGE_UNAVAILABLE)
+        if (
+            self.contexts.get(context.message.key) is not context
+            or token != context.token
+        ):
+            raise ValueError(IMAGE_UNAVAILABLE)
+        if groups.moderation.blocked(image_id):
+            groups.moderation.purge(image_id)
+            raise ValueError(IMAGE_UNAVAILABLE)
+        if not path:
+            path = save_image(context.folder, data)
+            with self.db:
+                self.db.execute(
+                    "UPDATE received_images SET folder=?,path=? WHERE id=?",
+                    (context.folder.name, path, image_id),
+                )
+        return {
+            "ok": True,
+            "path": path,
+            "image_id": image_id,
+            "first_frame": animated,
+            "image": preview,
+        }
 
     async def attach_images(self, context, text, seen, limit):
         inputs: list[TextInput | ImageInput] = [TextInput(text)]

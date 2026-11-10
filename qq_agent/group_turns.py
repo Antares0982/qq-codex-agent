@@ -164,13 +164,18 @@ class GroupTurn:
 
     async def prepare_input(self, message):
         assert self.context is not None and self.thread is not None
-        text = self.groups.input(message)[0].text
-        inputs, ids = await self.owner.images.attach_images(
-            self.context,
-            text,
-            self.runtime.seen_images(self.thread.id),
-            self.owner.settings.group_image_limit,
-        )
+        while True:
+            text = self.groups.input(message)[0].text
+            inputs, ids = await self.owner.images.attach_images(
+                self.context,
+                text,
+                self.runtime.seen_images(self.thread.id),
+                self.owner.settings.group_image_limit,
+            )
+            if not await self.groups.review_batch(message):
+                return [], ""
+            if text == self.groups.input(message)[0].text:
+                break
         if ids:
             self.runtime.image_inputs.setdefault(self.thread.id, {})[text] = ids
         return inputs, text
@@ -211,6 +216,10 @@ class GroupTurn:
         deadline = asyncio.timeout(self.owner.settings.task_timeout)
         try:
             async with deadline:
+                if not await self.groups.review_batch(message):
+                    self.groups.status(message, "completed")
+                    status = "completed"
+                    return
                 account = await self.owner.codex.account()
                 if account.account is None:
                     if message.mentioned:
@@ -234,6 +243,10 @@ class GroupTurn:
                     self.thread, message, self.owner.profiles
                 )
                 inputs, text = await self.prepare_input(message)
+                if not inputs:
+                    self.groups.status(message, "completed")
+                    status = "completed"
+                    return
                 self.required = message.mentioned
                 first = True
                 while True:

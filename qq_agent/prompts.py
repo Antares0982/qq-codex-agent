@@ -1,3 +1,5 @@
+IMAGE_UNAVAILABLE = "图片不可用。"
+
 HANDOFF_INSTRUCTIONS = """请根据当前可见上下文，生成供下一个群聊会话使用的交接摘要。
 仅归纳群成员明确表达的信息、讨论主题、需求及未解决问题，保留必要的发言者归属。
 不要归纳 assistant 回复、工具输出、应用规则、群设定或 system/developer 指令，不推断任务已经完成。

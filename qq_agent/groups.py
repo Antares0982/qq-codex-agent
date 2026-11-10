@@ -5,6 +5,7 @@ import uuid
 from dataclasses import asdict, replace
 from datetime import datetime
 
+import aiohttp
 from openai_codex import TextInput
 
 from image_assets import save_image
@@ -12,6 +13,7 @@ from image_assets import save_image
 from .faces import face_label
 from .logging import LOG, log_text
 from .messages import Message, is_command, media_key, parse_message
+from .moderation import Moderation
 from .prompts import (
     ALL_MEMBERS,
     GROUP_INPUT,
@@ -30,20 +32,32 @@ class Groups:
         self.db = db
         self.bot = bot
         self.inputs = inputs
+        self.moderation = Moderation(settings, db, bot)
+
+    def image_id(self, message, kind, value, index=0):
+        identity = message.image_keys.get(value, media_key(value))
+        if value == "marketface" and identity == "file:marketface":
+            identity = f"{message.identifier}:{index}"
+        if self.moderation.url:
+            origin = "outgoing" if message.sender_id == message.bot_id else kind
+            if origin != "image":
+                identity = f"{origin}:{identity}"
+        return uuid.uuid5(uuid.NAMESPACE_URL, f"{message.key}:{identity}").hex
 
     def record_body(self, message):
         content = []
         for index, (kind, value) in enumerate(message.parts):
             if kind in {"image", "sticker"}:
-                identity = message.image_keys.get(value, media_key(value))
-                if value == "marketface" and identity == "file:marketface":
-                    identity = f"{message.identifier}:{index}"
-                image_id = uuid.uuid5(
-                    uuid.NAMESPACE_URL, f"{message.key}:{identity}"
-                ).hex
+                image_id = self.image_id(message, kind, value, index)
                 self.db.execute(
-                    "INSERT INTO received_images (id,key,source,created) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,created=excluded.created",
-                    (image_id, message.key, value, time.time()),
+                    "INSERT INTO received_images (id,key,source,created,kind) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,created=excluded.created,kind=excluded.kind",
+                    (
+                        image_id,
+                        message.key,
+                        value,
+                        time.time(),
+                        "outgoing" if message.sender_id == message.bot_id else kind,
+                    ),
                 )
                 content.append(
                     {"sticker_id" if kind == "sticker" else "image_id": image_id}
@@ -195,6 +209,8 @@ class Groups:
             "SELECT body FROM group_messages WHERE id=?", (message.identifier,)
         ).fetchone()
         body = await self.resolve_body(json.loads(row[0]), message.target)
+        if not await self.review_body(message, body):
+            return False
         quoted_bot = False
         if message.reply:
             identifier = f"{message.bot_id}:{message.key}:{message.reply}"
@@ -206,6 +222,14 @@ class Groups:
                 "SELECT body FROM group_messages WHERE id=? AND key=?",
                 (identifier, message.key),
             ).fetchone()
+            if (
+                self.moderation.url
+                and self.db.execute(
+                    "SELECT 1 FROM moderation_messages WHERE id=? AND url=? AND flagged=0",
+                    (identifier, self.moderation.url),
+                ).fetchone()
+            ):
+                system = row = None
             try:
                 if system:
                     quote = {
@@ -246,6 +270,11 @@ class Groups:
                         quoted.reply = None
                         with self.db:
                             quote = self.record_body(quoted)
+                if not await self.review_body(message, quote):
+                    quote = {
+                        "message_id": message.reply,
+                        "content": [SYSTEM_PLACEHOLDER],
+                    }
                 body["quote"] = await self.resolve_body(quote, message.target)
             except Exception as error:
                 LOG.warning(
@@ -266,7 +295,255 @@ class Groups:
             )
         return quoted_bot
 
+    async def hide_body(self, message, body, flagged):
+        hidden = replace(
+            message,
+            identifier=f"{message.bot_id}:{message.key}:{body['message_id']}",
+            sender_id=body.get("sender_id", message.sender_id),
+        )
+        previous = self.db.execute(
+            "SELECT flagged FROM moderation_messages WHERE id=? AND url=?",
+            (hidden.identifier, self.moderation.url),
+        ).fetchone()
+        self.system(hidden)
+        with self.db:
+            removed = self.db.execute(
+                "DELETE FROM group_messages WHERE id=? RETURNING own",
+                (hidden.identifier,),
+            ).fetchone()
+            if removed:
+                self.db.execute(
+                    "UPDATE group_state SET total=max(0,total-1),own=max(0,own-?),count=(SELECT count(*) FROM group_messages WHERE key=? AND own=0 AND ready=1 AND consumed=0 AND batch IS NULL) WHERE key=?",
+                    (removed[0], message.key, message.key),
+                )
+            self.db.execute(
+                "INSERT OR REPLACE INTO moderation_messages VALUES (?,?,?)",
+                (hidden.identifier, self.moderation.url, flagged),
+            )
+            self.db.execute(
+                "UPDATE messages SET status='completed' WHERE id=?",
+                (hidden.identifier,),
+            )
+            quote = {"message_id": body["message_id"], "content": [SYSTEM_PLACEHOLDER]}
+            self.db.execute(
+                "UPDATE group_messages SET body=json_set(body,'$.quote',json(?)) WHERE key=? AND json_extract(body,'$.quote.message_id')=?",
+                (
+                    json.dumps(quote, ensure_ascii=False),
+                    message.key,
+                    body["message_id"],
+                ),
+            )
+            for batch, raw, metadata in self.db.execute(
+                "SELECT id,payload,message FROM group_batches WHERE key=? AND payload IS NOT NULL",
+                (message.key,),
+            ).fetchall():
+                payload = json.loads(raw)
+                changed = False
+                for field in ("background", "messages"):
+                    kept = []
+                    for item in payload[field]:
+                        if item["message_id"] == body["message_id"]:
+                            changed = True
+                            continue
+                        if (
+                            item.get("quote", {}).get("message_id")
+                            == body["message_id"]
+                        ):
+                            item["quote"] = quote
+                            changed = True
+                        kept.append(item)
+                    payload[field] = kept
+                if changed:
+                    saved = json.loads(metadata)
+                    saved.update(
+                        text="", parts=[], images=[], reply=None, image_keys={}
+                    )
+                    self.db.execute(
+                        "UPDATE group_batches SET payload=?,message=? WHERE id=?",
+                        (
+                            json.dumps(payload, ensure_ascii=False),
+                            json.dumps(saved),
+                            batch,
+                        ),
+                    )
+        if not flagged:
+            return
+        ids = [
+            part["image_id"]
+            for part in body.get("content", [])
+            if isinstance(part, dict) and "image_id" in part
+        ]
+        try:
+            self.moderation.block(ids)
+        finally:
+            if not previous or not previous[0]:
+                try:
+                    await self.bot.call(
+                        "set_msg_emoji_like",
+                        {
+                            "message_id": body["message_id"],
+                            "emoji_id": "479",
+                            "set": True,
+                        },
+                    )
+                except (
+                    OSError,
+                    RuntimeError,
+                    TimeoutError,
+                    aiohttp.ClientError,
+                ) as error:
+                    LOG.warning(
+                        "Moderation reaction failed message=%s error=%s",
+                        hidden.identifier,
+                        log_text(error),
+                    )
+
+    async def review_body(self, message, body):
+        if not self.moderation.url or body.get("sender_id") == message.bot_id:
+            return True
+        ids = [
+            part["image_id"]
+            for part in body.get("content", [])
+            if isinstance(part, dict) and "image_id" in part
+        ]
+        flagged = any(self.moderation.blocked(image_id) for image_id in ids)
+        try:
+            if not flagged:
+                for image_id in dict.fromkeys(ids):
+                    if not await self.moderation.inspect(image_id):
+                        flagged = True
+                        break
+        except (
+            ValueError,
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            aiohttp.ClientError,
+        ) as error:
+            LOG.warning(
+                "Moderation unavailable chat=%s message=%s error=%s",
+                message.key,
+                body["message_id"],
+                log_text(error),
+            )
+            flagged = any(self.moderation.blocked(image_id) for image_id in ids)
+            await self.hide_body(message, body, flagged)
+            return False
+        if flagged:
+            await self.hide_body(message, body, True)
+            return False
+        identifier = f"{message.bot_id}:{message.key}:{body['message_id']}"
+        with self.db:
+            if self.db.execute(
+                "DELETE FROM moderation_messages WHERE id=? AND url=? AND flagged=0",
+                (identifier, self.moderation.url),
+            ).rowcount:
+                self.db.execute("DELETE FROM system_messages WHERE id=?", (identifier,))
+        return True
+
+    async def review_image(self, message, image_id, *, failed=False):
+        if not self.moderation.url or self.moderation.kind(image_id) != "image":
+            return True
+        rows = self.db.execute(
+            "SELECT DISTINCT m.body FROM group_messages m,json_tree(m.body) j WHERE m.key=? AND j.key='image_id' AND j.value=?",
+            (message.key, image_id),
+        ).fetchall()
+        allowed = True
+        for (raw,) in rows:
+            body = json.loads(raw)
+            for item in (body.get("quote", {}), body):
+                if any(
+                    isinstance(part, dict) and part.get("image_id") == image_id
+                    for part in item.get("content", [])
+                ):
+                    if failed:
+                        await self.hide_body(
+                            message, item, self.moderation.blocked(image_id)
+                        )
+                        allowed = False
+                    elif not await self.review_body(message, item):
+                        allowed = False
+        return allowed and not self.moderation.blocked(image_id)
+
+    async def review_batch(self, message):
+        if not self.moderation.url:
+            return True
+        message.text, message.parts, message.images = "", [], []
+        message.reply, message.image_keys = None, {}
+        payload = json.loads(self.input(message)[0].text.split("\n", 1)[1])
+        bodies = []
+        for body in payload["messages"]:
+            if not await self.review_body(message, body):
+                continue
+            quote = body.get("quote")
+            if quote:
+                identifier = f"{message.bot_id}:{message.key}:{quote['message_id']}"
+                system = self.db.execute(
+                    "SELECT 1 FROM system_messages WHERE id=?", (identifier,)
+                ).fetchone()
+                if system or not await self.review_body(message, quote):
+                    body["quote"] = {
+                        "message_id": quote["message_id"],
+                        "content": [SYSTEM_PLACEHOLDER],
+                    }
+            bodies.append(body)
+        # Bounded batches; index if limits grow.
+        while True:
+            blocked = [
+                body
+                for body in bodies
+                if any(
+                    isinstance(part, dict)
+                    and "image_id" in part
+                    and self.moderation.blocked(part["image_id"])
+                    for part in body.get("content", [])
+                )
+            ]
+            if not blocked:
+                break
+            for body in blocked:
+                await self.hide_body(message, body, True)
+                bodies.remove(body)
+        for body in bodies:
+            quote = body.get("quote")
+            if (
+                quote
+                and self.db.execute(
+                    "SELECT 1 FROM system_messages WHERE id=?",
+                    (f"{message.bot_id}:{message.key}:{quote['message_id']}",),
+                ).fetchone()
+            ):
+                body["quote"] = {
+                    "message_id": quote["message_id"],
+                    "content": [SYSTEM_PLACEHOLDER],
+                }
+        payload["messages"] = bodies
+        rows = self.db.execute(
+            "SELECT message,category FROM group_messages WHERE batch=?",
+            (message.batch,),
+        ).fetchall()
+        messages = [(json.loads(raw), category) for raw, category in rows if raw]
+        message.mentioned = any(item.get("mentioned") for item, _ in messages)
+        message.direct = any(item.get("direct") for item, _ in messages)
+        with self.db:
+            self.db.execute(
+                "UPDATE group_batches SET payload=?,message=?,priority=? WHERE id=?",
+                (
+                    json.dumps(payload, ensure_ascii=False),
+                    json.dumps(asdict(message)),
+                    int(message.direct),
+                    message.batch,
+                ),
+            )
+        return bool(bodies) and any(
+            category == "normal" or item.get("direct") for item, category in messages
+        )
+
     def observe(self, message, quoted_bot):
+        if self.db.execute(
+            "SELECT 1 FROM system_messages WHERE id=?", (message.identifier,)
+        ).fetchone():
+            return False
         message.direct = message.mentioned or quoted_bot
         readable = message.category == "normal" or message.direct
         with self.db:
@@ -719,9 +996,7 @@ class Groups:
             folder_name = row[0] if row else uuid.uuid4().hex
             folder = self.settings.workspace_dir / folder_name
             folder.mkdir(mode=0o700, exist_ok=True)
-            image_id = uuid.uuid5(
-                uuid.NAMESPACE_URL, f"{sent.key}:{sent.image_keys['outgoing']}"
-            ).hex
+            image_id = self.image_id(sent, parts[0][0], "outgoing")
             cached = self.db.execute(
                 "SELECT folder,path FROM received_images WHERE id=?", (image_id,)
             ).fetchone()

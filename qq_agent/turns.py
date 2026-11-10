@@ -41,7 +41,7 @@ class Turns:
         self.groups = groups
         self.contexts = {}
         self.profiles = Profiles(db, replies.bot, settings)
-        self.images = Images(db, replies.bot, self.contexts)
+        self.images = Images(db, replies.bot, self.contexts, groups)
 
     async def execute(self, message):
         if "group_id" in message.target and (
@@ -51,7 +51,8 @@ class Turns:
                 if not self.groups.record(message):
                     return
                 quoted = await self.groups.prepare(message)
-                self.groups.observe(message, quoted)
+                if not self.groups.observe(message, quoted):
+                    return
                 message = self.groups.freeze(message)
             await GroupTurn(self, message).run()
             return
