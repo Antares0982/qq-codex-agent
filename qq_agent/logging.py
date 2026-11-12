@@ -31,7 +31,7 @@ def read_diagnostics(path, cursor):
                 "post_compression_bytes",
                 "compression_duration_ms",
             )
-            kind = "compression"
+            kind = "http_request_compression"
         elif "Request completed method=POST" in body and re.search(
             r"url=https?://[^\s]+/responses\s", body
         ):

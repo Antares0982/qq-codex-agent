@@ -1847,7 +1847,8 @@ class TestAgent:
             self.agent.receive(event(text="测试消息"))
             await self.execute(self.agent.queue.get_nowait())
         output = caplog.text
-        assert "测试消息" in output
+        assert "测试消息" not in output
+        assert "Received chat=" not in output
         assert "HTTP 400 Bad Request" in output
         assert "thread=test-thread" in output
         assert "turn=turn1" in output
@@ -1912,7 +1913,7 @@ class TestAgent:
                 "request_id": "req_probe",
             },
             {
-                "event": "compression",
+                "event": "http_request_compression",
                 "log_id": 3,
                 "timestamp": 124,
                 "pre_compression_bytes": 45000000,

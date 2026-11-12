@@ -1,8 +1,9 @@
 # 运维与排障
 
 在 Pi 查看 `sudo journalctl -u qq-codex-agent -n 100 --no-pager`。
-INFO 日志包含授权消息的发送者、正文、图片数量、引用消息 ID、回复正文、图片交付路径和大小，以及 thread/turn、工具状态、压缩结果和任务耗时。错误事件及终态错误直接进入 journal，超时与主动取消分别标注；不记录工具的图片 Base64 或认证头。常见 token、API key、密码字段会脱敏，文本换行转义；任意自然语言秘密无法保证自动识别。journal 含私聊与群聊内容，仅向受信任管理员开放，按宿主 journald 策略保留。
-每轮开始记录所选模型（未指定时为 `default`）、推理强度和请求前上下文 token 估算，结束记录 turn ID。后台每 5 秒只读增量提取锁定 runtime 的 `codex/logs_2.sqlite`，将 Responses 请求的压缩前后字节数、压缩耗时、HTTP 状态码及可用的 request/thread/turn/model 标识写入 `Codex request diagnostic`；时间戳为原始日志的 Unix 秒，可用于比较成功与失败请求。仅输出白名单字段，不复制请求正文、URL 或响应头；启动时跳过已有记录，数据库不可用时警告并继续聊天。该提取器依赖 runtime 日志格式，升级时由本地模拟端点测试验证；未压缩请求没有压缩大小记录。
+不记录收到的 QQ 消息正文及 `Received` 事件。INFO 日志包含回复正文、图片交付路径和大小，以及 thread/turn、工具状态、压缩结果和任务耗时。错误事件及终态错误直接进入 journal，超时与主动取消分别标注；不记录工具的图片 Base64 或认证头。常见 token、API key、密码字段会脱敏，文本换行转义；任意自然语言秘密无法保证自动识别。journal 含私聊与群聊回复内容，仅向受信任管理员开放，按宿主 journald 策略保留。
+每轮开始记录所选模型（未指定时为 `default`）、推理强度和请求前上下文 token 估算，结束记录 turn ID。后台每 5 秒只读增量提取锁定 runtime 的 `codex/logs_2.sqlite`，将 Responses 请求的压缩前后字节数、压缩耗时、HTTP 状态码及可用的 request/thread/turn/model 标识写入 `Codex request diagnostic`；`event=http_request_compression` 表示 HTTP 请求体压缩，不是上下文压缩，`event=response` 表示 HTTP 响应。时间戳为原始日志的 Unix 秒，可用于比较成功与失败请求。仅输出白名单字段，不复制请求正文、URL 或响应头；启动时跳过已有记录，数据库不可用时警告并继续聊天。该提取器依赖 runtime 日志格式，升级时由本地模拟端点测试验证；未压缩请求没有压缩大小记录。
+图片 moderation 返回 `flagged=true` 时记录 WARNING `Moderation flagged`，包含审查预览的 SHA-256 摘要和命中类别；正常结果与缓存复用不记录判定日志，接口失败仍记录警告。
 启动前检查失败会阻止服务运行，优先查看 traceback；不要通过删除沙箱检查或放宽目录权限绕过错误。
 Codex 0.159.2 的多个文件级 deny-read 会触发 bubblewrap 文件描述符复用错误。
 部署改用整个目录隔离，技能与插件 cache 放在 `/var/lib/qq-codex-resources`；

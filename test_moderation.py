@@ -12,6 +12,7 @@ from PIL import Image
 from image_assets import save_image
 from qq_agent.config import Settings
 from qq_agent.images import image_preview
+from qq_agent.logging import LOG
 from qq_agent.messages import ImageTurn, parse_message
 from qq_agent.moderation import Moderation
 from qq_agent.storage import open_database
@@ -97,7 +98,8 @@ def indexed(env, value):
     return message, ids
 
 
-async def test_short_circuit(moderated):
+async def test_short_circuit(moderated, caplog):
+    caplog.set_level("INFO", logger=LOG.name)
     env = moderated
     data = {
         name: picture(color) for name, color in zip("abc", ("green", "red", "blue"))
@@ -140,9 +142,18 @@ async def test_short_circuit(moderated):
     quote = payload["messages"][0]["quote"]
     assert set(quote) == {"message_id", "content"}
     assert not env.agent.groups.can_quote(message.key, "1")
+    digest = env.agent.db.execute(
+        "SELECT digest FROM moderation_results WHERE flagged=1"
+    ).fetchone()[0]
+    assert [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Moderation flagged ")
+    ] == [f"Moderation flagged digest={digest} categories=sexual"]
 
 
-async def test_previews_and_cache(moderated):
+async def test_previews_and_cache(moderated, caplog):
+    caplog.set_level("INFO", logger=LOG.name)
     env = moderated
     data = picture("purple", (1500, 1000))
     env.bot.image.return_value = data
@@ -167,6 +178,9 @@ async def test_previews_and_cache(moderated):
         assert len(env.requests) == 2
     finally:
         db.close()
+    assert "Moderation flagged" not in caplog.text
+    assert "Received chat=" not in caplog.text
+    assert "caption" not in caplog.text
 
 
 @pytest.mark.parametrize(

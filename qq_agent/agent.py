@@ -108,19 +108,6 @@ class Agent:
                 return
             if message.sender_id == message.bot_id:
                 return
-            LOG.info(
-                "Received chat=%s message=%s sender=%s text=%s images=%d reply=%s",
-                message.key,
-                message.identifier,
-                message.sender_id,
-                log_text(
-                    "[pending moderation]"
-                    if self.settings.moderation_url and message.images
-                    else message.text
-                ),
-                len(message.images),
-                message.reply,
-            )
             self.incoming.setdefault(message.key, deque()).append(message)
             if message.key not in self.receivers:
                 self.receivers[message.key] = asyncio.create_task(
@@ -134,15 +121,6 @@ class Agent:
             ).rowcount
         if not inserted:
             return
-        LOG.info(
-            "Received chat=%s message=%s sender=%s text=%s images=%d reply=%s",
-            message.key,
-            message.identifier,
-            message.sender_id,
-            log_text(message.text),
-            len(message.images),
-            message.reply,
-        )
         if self.is_command(message):
             self.start_control(message)
             return

@@ -10,6 +10,7 @@ import aiohttp
 from image_assets import read_image, relative_image_path, workspace_directory
 
 from .images import image_preview
+from .logging import LOG
 
 
 class Moderation:
@@ -165,6 +166,12 @@ class Moderation:
         ):
             raise ValueError("Invalid moderation result")
         flagged = result["flagged"]
+        if flagged:
+            LOG.warning(
+                "Moderation flagged digest=%s categories=%s",
+                digest,
+                ",".join(sorted(key for key, value in categories.items() if value)),
+            )
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO moderation_results VALUES (?,?,?)",
