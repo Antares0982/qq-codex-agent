@@ -152,9 +152,16 @@ async def test_short_circuit(moderated, caplog):
     ] == [f"Moderation flagged digest={digest} categories=sexual"]
 
 
-async def test_previews_and_cache(moderated, caplog):
+@pytest.mark.parametrize("violence", [False, True])
+async def test_previews_and_cache(moderated, caplog, violence):
     caplog.set_level("INFO", logger=LOG.name)
     env = moderated
+    env.response = json.dumps(
+        {
+            "flagged": violence,
+            "categories": {"sexual": False, "self-harm": False, "violence": violence},
+        }
+    ).encode()
     data = picture("purple", (1500, 1000))
     env.bot.image.return_value = data
     await execute(env, incoming("a", "b"))
@@ -178,9 +185,36 @@ async def test_previews_and_cache(moderated, caplog):
         assert len(env.requests) == 2
     finally:
         db.close()
-    assert "Moderation flagged" not in caplog.text
+    assert ("Moderation flagged" in caplog.text) == violence
     assert "Received chat=" not in caplog.text
     assert "caption" not in caplog.text
+
+
+@pytest.mark.parametrize("category", ["sexual", "self-harm"])
+@pytest.mark.parametrize("violence", [False, True])
+async def test_blocking_categories(moderated, category, violence):
+    env = moderated
+    env.response = json.dumps(
+        {
+            "flagged": True,
+            "categories": {
+                "sexual": category == "sexual",
+                "self-harm": category == "self-harm",
+                "violence": violence,
+            },
+        }
+    ).encode()
+    await receive(env, incoming("a", "b"))
+    assert len(env.requests) == 1
+    assert env.agent.queue.empty()
+    assert not env.agent.db.execute("SELECT * FROM group_messages").fetchall()
+    assert env.agent.db.execute(
+        "SELECT flagged FROM moderation_results"
+    ).fetchall() == [(1,)]
+    assert env.agent.db.execute("SELECT blocked FROM moderation_images").fetchall() == [
+        (1,),
+        (1,),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -193,6 +227,10 @@ async def test_previews_and_cache(moderated, caplog):
         (
             200,
             b'{"flagged":false,"categories":{"sexual":true,"self-harm":false,"violence":false}}',
+        ),
+        (
+            200,
+            b'{"flagged":false,"categories":{"sexual":false,"self-harm":false,"violence":true}}',
         ),
     ],
 )

@@ -165,8 +165,8 @@ class Moderation:
             or result["flagged"] != any(categories.values())
         ):
             raise ValueError("Invalid moderation result")
-        flagged = result["flagged"]
-        if flagged:
+        flagged = categories["sexual"] or categories["self-harm"]
+        if result["flagged"]:
             LOG.warning(
                 "Moderation flagged digest=%s categories=%s",
                 digest,
