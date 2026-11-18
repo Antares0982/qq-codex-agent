@@ -1,3 +1,4 @@
+self:
 {
   config,
   lib,
@@ -8,6 +9,7 @@ let
   cfg = config.services.qq-codex-agent;
   user = "qq-codex-agent";
   state = "/var/lib/qq-codex-agent";
+  arg0 = "${state}/codex/tmp/arg0-linux";
   work = "/var/lib/qq-codex-work";
   resources = "/var/lib/qq-codex-resources";
   home = "${work}/.home";
@@ -105,7 +107,7 @@ let
     UMask = "0077";
     BindReadOnlyPaths = [
       "${configFile}:/etc/qq-codex-private/config.toml"
-      "${pkgs.emptyDirectory}:${state}/codex/tmp/arg0"
+      "${pkgs.emptyDirectory}:${arg0}"
       "${codexConfig}:${state}/codex/config.toml"
       "${requirements}:/etc/codex/requirements.toml"
       "${pkgs.bash}/bin/bash:/bin/sh"
@@ -154,7 +156,10 @@ in
 {
   options.services.qq-codex-agent = {
     enable = lib.mkEnableOption "personal QQ Codex agent";
-    package = lib.mkOption { type = lib.types.package; };
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+    };
     configFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -220,7 +225,7 @@ in
       "d /var/lib/qq-codex-root 0755 root root -"
       "d ${state} 0700 ${user} ${user} -"
       "d ${state}/codex 0700 ${user} ${user} -"
-      "d ${state}/codex/tmp/arg0 0700 ${user} ${user} -"
+      "d ${arg0} 0700 ${user} ${user} -"
       "d ${resources} 0700 ${user} ${user} -"
       "d /etc/qq-codex-private 0750 root ${user} -"
       "d ${work} 0700 ${user} ${user} -"

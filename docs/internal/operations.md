@@ -7,7 +7,7 @@
 启动前检查失败会阻止服务运行，优先查看 traceback；不要通过删除沙箱检查或放宽目录权限绕过错误。
 Codex 0.159.2 的多个文件级 deny-read 会触发 bubblewrap 文件描述符复用错误。
 部署改用整个目录隔离，技能与插件 cache 放在 `/var/lib/qq-codex-resources`；
-`CODEX_HOME/tmp/arg0` 只读，让官方 runtime 使用自身可执行文件回退入口。
+Codex 0.170.0 使用 `CODEX_HOME/tmp/arg0-linux` 创建辅助程序。升级后若报 `all managed deny_read restrictions`，核对错误里的实际路径与服务的只读空目录挂载。
 PATH aliases 的只读警告是预期现象；必须以实际 thread、沙箱和资源读取自检为准。
 不要开放私有状态或关闭沙箱。详情见 [部署文档](deployment.md)。
 遇到 `Unknown allowlist fields`，确认完整配置已通过新模块的 `configFile` 接入而非旧白名单入口，并核对实际运行的源码版本；重启服务不会更新 flake 锁定的旧代码。

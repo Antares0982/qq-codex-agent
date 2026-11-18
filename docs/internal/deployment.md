@@ -15,21 +15,26 @@ uv run --frozen qq-codex-agent --config /absolute/path/config.toml
 
 ## Nix 模块接入
 
-`package.nix` 使用调用方锁定的 `nixpkgs`、`uv2nix`、`pyproject-nix`、
-`pyproject-build-systems`，从本仓库的 `uv.lock` 打包应用及内置提示词模块。
-`module.nix` 负责配置生成、服务与登录 unit、运行依赖挂载和启动自检。
-源码 input 继续使用 `flake = false`，不需要另建 flake。
+本仓库的 flake 为 x86_64-linux 和 aarch64-linux 提供 `packages.<system>.default`。
+应用 flake 锁定 Nix 构建依赖，`uv.lock` 锁定 Python 依赖和 Codex runtime。
+`nixosModules.default` 默认选择宿主架构的包，并负责服务、配置、挂载和启动自检。
 
-调用方提供源码 input 和包：
+在宿主 flake 中声明 input：
+
+```nix
+inputs.qq-codex-agent = {
+  url = "github:Antares0982/qq-codex-agent";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+在宿主模块中启用服务：
 
 ```nix
 {
-  imports = [ (inputs.qq-codex-agent + "/nix/module.nix") ];
+  imports = [ inputs.qq-codex-agent.nixosModules.default ];
   services.qq-codex-agent = {
     enable = true;
-    package = import (inputs.qq-codex-agent + "/nix/package.nix") {
-      inherit inputs system;
-    };
     configFile = "/run/agenix/qqCodexAllowlist";
     tokenFile = "/run/qq-codex-auth/token";
   };
@@ -57,7 +62,7 @@ RPi 沿用 `secrets/qq-codex-allowlist.age` 文件名，但内容已升级为完
 旧生成模式中，`groupPromptAllowMembers` 对应 `group_prompt_allow_members`（默认 false），`agentAdminQQ` 对应 `agent_admin_qq`（默认 null 时省略），`authSocket` 默认 `/run/codex-auth/auth.sock`。完整配置模式直接在 TOML 中填写对应字段。
 
 迁移时通过 `agenix -e` 在原密文上补齐字段，保留原白名单和已有管理员配置，
-不修改加密接收者。先发布本仓库的模块与应用，再更新 RPi 的源码 input 和部署接线；
+不修改加密接收者。先发布本仓库的模块与应用，再更新 RPi 的 flake input 和部署接线；
 不可只迁移密文便部署旧版模块。共享登录凭据和 NapCat token 不迁入该配置。
 模块不依赖 agenix；宿主负责秘密文件更新时的重启触发和准备服务的依赖关系。
 当前 Pi 的 dotfile 还负责代理、GitHub 凭据、NapCat 启动顺序、禁用 WebSocket
@@ -70,7 +75,7 @@ socket 目录 `/run/codex-auth` 整体禁止工具读取。只使用目录规则
 skill 路径会指向资源目录，工具可读但不可写。工作区中的自建技能仍可按工作区权限使用。
 首次启动搬迁已有资源，目标冲突时停止，不覆盖。备份状态时同时备份这个资源目录。
 
-`CODEX_HOME/tmp/arg0` 只读挂载为空目录，让官方 runtime 使用自身可执行文件作为沙箱
+`CODEX_HOME/tmp/arg0-linux` 只读挂载为空目录，让锁定的 Linux runtime 使用自身可执行文件作为沙箱
 入口，避免必读辅助路径与整个私有状态目录的拒读规则冲突。启动时 PATH aliases 的
 只读目录警告是这个布局的预期现象；不可据此开放私有目录。启动检查实测 thread 创建、
 CLI/app-server 沙箱、只读资源、私有状态拒读和认证 socket 连接拒绝。
@@ -78,10 +83,8 @@ CLI/app-server 沙箱、只读资源、私有状态拒读和认证 socket 连接
 
 ## RPi 部署
 
-服务模块和打包逻辑由本仓库的 `nix/module.nix`、`nix/package.nix` 维护。
-Nix 仓库的 `rpi/qq-codex-agent.nix` 只负责 agenix、代理、NapCat 启动顺序和宿主访问授权；`systemMap.nix` 从同一个源码 input 导入模块及包。
-树莓派 flake 将本仓库作为 `qq-codex-agent` 源码 input（`flake = false`），
-用现有 uv2nix 根据 `uv.lock` 构建应用、Python 依赖及配套 Codex runtime。
+树莓派 flake 导入本仓库的 NixOS 模块，共享认证服务从同一 flake 的默认包运行 `codex-auth`。
+Nix 仓库负责 agenix、代理、NapCat 启动顺序、宿主访问授权和 Pi 专属自检。
 服务与登录程序直接运行 Nix store 中的包，Pi 无需 clone 本仓库或创建虚拟环境。
 只在树莓派构建和切换。在配置中启用：
 
@@ -183,32 +186,22 @@ sudo systemctl start codex-auth qq-codex-agent antares-agent
 
 ## 检查与发布
 
-运行 [开发检查](development.md)中的 Python 测试、runtime 自检和必需的本机 Nix 应用包构建。下述模块检查不能替代应用包构建。使用 dotfile 已锁定的
-nixpkgs 执行本机架构的部署检查：
-
-```sh
-nix build --impure --no-link --expr '
-  let host = builtins.getFlake "/home/antares/Documents/GitHub/Nix/hosts/rpi5";
-  in import ./nix/check.nix { nixpkgs = host.inputs.nixpkgs; }
-'
-```
-
-检查覆盖内置提示词配置、只读辅助目录、独立公共资源路径、
-token 挂载和实际生成的 TOML。打包阶段执行完整 Python 测试。
+运行[开发检查](development.md)中的 Python 测试、runtime 自检、本机 Nix 应用构建和 `nix flake check`。
+部署模块检查覆盖默认包与包覆盖、只读辅助目录、独立公共资源路径、token 挂载和实际生成的 TOML。
 表情的安装环境校验见 [资源维护](resources.md#表情与压缩)。
 本机可用本地源码覆盖 input 求值完整 Pi 服务，不改锁文件：
 
 ```sh
 nix eval --no-write-lock-file \
-  --override-input qq-codex-agent "path:$PWD" \
+  --override-input qq-codex-agent "git+file://$PWD" \
   /home/antares/Documents/GitHub/Nix/hosts/rpi5#nixosConfigurations.rpi5.config.systemd.services.qq-codex-agent.serviceConfig \
   --json
 ```
 
-首次发布顺序：先推送包含 `nix/` 的应用版本，再在 dotfile 中更新
+首次发布顺序：先推送包含 `flake.nix` 和 `flake.lock` 的应用版本，再在 dotfile 中更新
 `qq-codex-agent` input，连同 dotfile 重构提交和锁文件一起部署。
 旧的 input 不包含新模块，不能只部署 dotfile 修改。
-不要将测试用的本地 `path:` 覆盖写进正式锁文件。
+正式锁文件应指向已发布的 GitHub 提交。
 
 ```sh
 nix flake update qq-codex-agent --flake ./hosts/rpi5

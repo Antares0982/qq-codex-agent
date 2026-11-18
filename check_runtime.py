@@ -63,7 +63,11 @@ async def check_skills(codex, root, workspace):
     print("Builtin and workspace skills discovered independently.")
 
 
-def check_permissions(root, settings):
+def check_permissions(root):
+    # Codex skips aliases under /tmp.
+    guest = Path("/var/lib/qq-codex-smoke")
+    empty = root / "empty"
+    empty.mkdir()
     private = root / "private"
     private.mkdir()
     config = private / "config.toml"
@@ -73,13 +77,12 @@ def check_permissions(root, settings):
         'allowed_approval_policies = ["on-request"]\n'
         'allowed_approvals_reviewers = ["auto_review"]\n'
         'allowed_sandbox_modes = ["workspace-write", "read-only"]\n'
-        f'[permissions.filesystem]\ndeny_read = ["{settings.state_dir}", "{private}"]\n'
+        f'[permissions.filesystem]\ndeny_read = ["{guest}/state", "{guest}/private"]\n'
     )
-    canary = settings.state_dir / "canary"
-    canary.write_text("test fixture")
+    (root / "state/canary").write_text("test fixture")
     env = os.environ.copy()
-    env["CODEX_HOME"] = str(settings.state_dir / "codex")
-    command = [
+    env["CODEX_HOME"] = str(guest / "state/codex")
+    sandbox = [
         "bwrap",
         "--die-with-parent",
         "--ro-bind",
@@ -98,10 +101,19 @@ def check_permissions(root, settings):
         "--ro-bind",
         str(requirements),
         "/etc/codex/requirements.toml",
+        "--tmpfs",
+        "/var/lib",
         "--bind",
         str(root),
-        str(root),
+        str(guest),
+        "--ro-bind",
+        str(empty),
+        str(guest / "state/codex/tmp/arg0-linux"),
+        "--chdir",
+        str(guest / "work"),
         "--",
+    ]
+    command = [
         str(bundled_codex_path()),
         "-c",
         'sandbox_mode="workspace-write"',
@@ -115,20 +127,17 @@ def check_permissions(root, settings):
         "-ec",
         'test ! -r "$1"; test ! -r "$2"; printf ok > probe; test "$(cat probe)" = ok',
         "check",
-        str(canary),
-        str(config),
+        str(guest / "state/canary"),
+        str(guest / "private/config.toml"),
     ]
-    subprocess.run(command, cwd=settings.workspace_dir, env=env, check=True, timeout=30)
-    # Reuse the same mount restrictions for the app-server path, without a model call.
-    runtime_command = command[: command.index("--") + 1] + [
+    subprocess.run(sandbox + command, env=env, check=True, timeout=30)
+    runtime_command = [
         sys.executable,
         str(Path(__file__).resolve()),
         "--app-server-probe",
-        str(root),
+        str(guest),
     ]
-    subprocess.run(
-        runtime_command, cwd=settings.workspace_dir, env=env, check=True, timeout=30
-    )
+    subprocess.run(sandbox + runtime_command, env=env, check=True, timeout=30)
     print("Managed deny-read and nested workspace sandbox passed.")
 
 
@@ -158,7 +167,7 @@ async def main(sandbox=False):
             assert result.status.value == "unsubscribed"
             print("Pinned runtime initialized; isolated account is logged out.")
         if sandbox:
-            check_permissions(root, settings)
+            check_permissions(root)
 
 
 if __name__ == "__main__":

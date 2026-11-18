@@ -12,27 +12,20 @@ uv run --frozen python check_runtime.py
 uv run --frozen python check_runtime.py --sandbox
 ```
 
-还必须在本机运行 Nix 应用包构建，覆盖真实打包环境中的完整 pytest；仅运行 `uv` 测试或 `nix/check.nix` 不能替代。使用部署仓库锁定的依赖，但架构取 `builtins.currentSystem`，不得在本机构建异架构的 Pi 系统。以下部署仓库路径按实际位置调整：
+从本仓库根目录构建本机架构的应用包并检查部署模块。应用构建使用 `flake.lock` 与 `uv.lock`，在真实打包环境中执行完整 pytest。
 
 ```sh
-nix build --impure --no-link --expr '
-  let
-    host = builtins.getFlake "/home/antares/Documents/GitHub/Nix/hosts/rpi5";
-    source = builtins.fetchGit { url = toString ./.; };
-  in import (source + "/nix/package.nix") {
-    inputs = host.inputs;
-    system = builtins.currentSystem;
-  }
-'
+nix build --no-link
+nix flake check
 ```
 
-从本仓库根目录执行；本地 `fetchGit` 包含已跟踪文件的未提交修改，新增文件须先纳入 Git 跟踪。不要直接将含 `build/`、`.venv/` 等旧产物的工作目录作为源码，否则 setuptools 可能复用旧文件。
+本地 Git flake 包含已跟踪文件的未提交修改，新增文件须先纳入 Git 跟踪。Pi 系统只在 Pi 上构建和切换。
 `test_skill_permissions` 必须将 `CodexConfig.cwd` 设为测试工作区：锁定 runtime 的 `command/exec` 使用 app-server 启动目录解释 `sandboxPolicy`，请求中的 `cwd` 只设置命令目录。测试需实际验证工作区及 `.agents/skills/` 可写，而 `.agents`、`.git`、`.codex` 不可写。
 
 Pyright 必须达到 0 errors，覆盖业务代码、测试和自检脚本；不得通过忽略错误或排除源码绕过检查。
 
 `check_runtime.py` 使用临时、未登录的 Codex 状态目录，只验证启动和认证状态接口，不读取个人登录缓存，也不请求模型。
-`--sandbox` 额外使用 Linux bubblewrap 验证 managed deny-read 及嵌套沙箱，需要 PATH 中有 bwrap；同时检查 CLI `sandbox` 和 app-server `command/exec` 的受限执行路径，均不调用模型。
+`--sandbox` 需要 PATH 中有 bwrap。它把临时状态挂到命名空间内的 `/var/lib`，复现服务的只读辅助目录，并通过 CLI `sandbox` 和 app-server `command/exec` 验证私有目录拒读和工作区可写。直接从 `/tmp` 启动会让 Codex 跳过创建 PATH aliases，掩盖辅助目录变更。
 测试模拟 OneBot、模型事件和图片响应。`test_runtime.py` 另用锁定 runtime、临时未登录状态目录及本地模拟 Responses 端点检查实际请求的历史结构、工具和图片，覆盖新建/恢复/重启、相同快照去重、跨重启去重、远程手动及自动压缩、本地手动压缩后重新注入，以及旧群 thread 升级后的快照注入，不调用真实模型。实机 `check_sandbox.py` 由服务启动前执行，失败将阻止 agent 启动。
 
 Codex 执行沙箱可能禁止测试所需的本地 Unix socket，导致 `test_member_socket`、`test_image_tool` 报 `PermissionError: [Errno 1] Operation not permitted`；跨线程异步测试也可能停在等待状态。遇到这些症状，应通过执行工具的提权审批在沙箱外重跑 pytest，或在本机终端运行上述命令，不要跳过测试或修改应用沙箱策略。若 uv 默认缓存目录只读，可设置 `UV_CACHE_DIR=/tmp/qq-pytest-uv`。

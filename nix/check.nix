@@ -1,16 +1,19 @@
-{ nixpkgs }:
+{
+  self,
+  nixpkgs,
+  system,
+}:
 let
-  pkgs = import nixpkgs { system = builtins.currentSystem; };
+  pkgs = nixpkgs.legacyPackages.${system};
   evaluate =
     extra:
-    (import (nixpkgs + "/nixos/lib/eval-config.nix") {
-      system = builtins.currentSystem;
+    (nixpkgs.lib.nixosSystem {
+      inherit system;
       modules = [
-        ./module.nix
+        self.nixosModules.default
         {
           services.qq-codex-agent = {
             enable = true;
-            package = pkgs.emptyDirectory;
             allowlistFile = "/run/test-allowlist";
             tokenFile = "/run/test-token";
           };
@@ -27,6 +30,7 @@ let
   };
   external = evaluate {
     services.qq-codex-agent = {
+      package = pkgs.emptyDirectory;
       configFile = "/run/agenix/full-config";
       allowlistFile = pkgs.lib.mkForce null;
     };
@@ -52,6 +56,7 @@ let
   );
   requirementsFile = builtins.head (pkgs.lib.splitString ":" requirementsMount);
 in
+assert config.services.qq-codex-agent.package == self.packages.${system}.default;
 assert !config.services.qq-codex-agent.groupPromptAllowMembers;
 assert custom.services.qq-codex-agent.groupPromptAllowMembers;
 assert config.services.qq-codex-agent.agentAdminQQ == null;
@@ -83,7 +88,7 @@ assert builtins.all (paths: builtins.elem "-/etc/localtime:/etc/localtime" paths
 ];
 assert builtins.elem "codex-auth.service" config.systemd.services.qq-codex-agent.requires;
 assert !(builtins.elem "/nix/store" mounts);
-assert builtins.elem "${pkgs.emptyDirectory}:/var/lib/qq-codex-agent/codex/tmp/arg0" mounts;
+assert builtins.elem "${pkgs.emptyDirectory}:/var/lib/qq-codex-agent/codex/tmp/arg0-linux" mounts;
 assert builtins.elem "/run/test-token:/etc/qq-codex-private/napcat-token" mounts;
 assert !(builtins.any (rule: pkgs.lib.hasPrefix "C " rule) config.systemd.tmpfiles.rules);
 pkgs.runCommand "qq-codex-deployment-check"
