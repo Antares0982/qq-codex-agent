@@ -689,16 +689,12 @@ class Groups:
                 (key,),
             )
 
-    def timing(self, message):
+    def arrival(self, message):
         row = self.db.execute(
-            "SELECT created,consumed FROM group_messages WHERE id=?",
+            "SELECT created FROM group_messages WHERE id=? AND consumed=0",
             (message.identifier,),
         ).fetchone()
-        previous = self.db.execute(
-            "SELECT created,json_extract(message,'$.sender_id') FROM group_messages WHERE key=? AND own=0 AND ready=1 AND message IS NOT NULL AND sequence<(SELECT sequence FROM group_messages WHERE id=?) ORDER BY sequence DESC LIMIT 1",
-            (message.key, message.identifier),
-        ).fetchone()
-        return row, previous
+        return row[0] if row else None
 
     def eligible(self, message):
         self.expire(message.key)

@@ -24,23 +24,8 @@ THREAD_IDLE = 2 * 60 * 60
 
 @dataclass
 class GroupWindow:
-    first: float
     deadline: float
-    urgent: float | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def observe(self, message, arrival, previous, now):
-        if message.direct:
-            self.urgent = min(self.urgent or arrival + 1, arrival + 1)
-        if self.deadline > now:
-            if previous:
-                wait = 2 if previous[1] == message.sender_id else 0.5
-            else:
-                wait = 2
-            self.deadline = min(arrival + wait, self.first + 8)
-        if self.urgent is not None:
-            self.deadline = min(self.deadline, self.urgent)
-        self.changed.set()
 
 
 class Agent:
@@ -281,25 +266,18 @@ class Agent:
                 self.flush_group(key)
 
     def observe_group(self, message):
-        row, previous = self.groups.timing(message)
-        if not row or row[1]:
-            return
-        now = asyncio.get_running_loop().time()
-        arrival = now - max(0, time.time() - row[0])
         window = self.group_windows.get(message.key)
+        if window is not None and not message.direct:
+            return
+        received = self.groups.arrival(message)
+        if received is None:
+            return
+        arrival = asyncio.get_running_loop().time() - max(0, time.time() - received)
+        deadline = arrival + (1 if message.direct else 15)
         if window is None:
-            wait = 5 if previous and row[0] - previous[0] <= 30 else 2
-            if message.images and not message.text:
-                wait = max(wait, 4)
-            deadline = arrival + wait
-            if message.direct:
-                deadline = min(deadline, arrival + 1)
-            window = GroupWindow(
-                arrival, deadline, arrival + 1 if message.direct else None
-            )
-            self.group_windows[message.key] = window
+            self.group_windows[message.key] = GroupWindow(deadline)
         else:
-            window.observe(message, arrival, previous, now)
+            window.deadline = min(window.deadline, deadline)
 
     async def schedule_group(self, key):
         try:
@@ -343,7 +321,7 @@ class Agent:
                         delay,
                     )
                     if window is None:
-                        window = GroupWindow(now, now)
+                        window = GroupWindow(now)
                         self.group_windows[key] = window
                     try:
                         await asyncio.wait_for(window.changed.wait(), delay)

@@ -720,26 +720,88 @@ async def test_start_rejection(group_agent):
     assert not env.deliveries
 
 
-def test_debounce_deadlines():
-    from qq_agent.agent import GroupWindow
+@pytest.mark.parametrize(
+    "count,visible,expected",
+    [
+        (1, True, [(15, 1)]),
+        (30, True, [(15, 2), (75, 10), (135, 17), (195, 25), (255, 30)]),
+        (
+            None,
+            False,
+            [
+                (15, 2),
+                (75, 10),
+                (135, 17),
+                (255, 32),
+                (495, 62),
+                (795, 100),
+                (1095, 137),
+            ],
+        ),
+    ],
+)
+async def test_observation_cadence(group_agent, count, visible, expected):
+    agent = group_agent.agent
+    loop = asyncio.get_running_loop()
+    observed = []
+    next_id = 1
+    now = 10000
+    with (
+        patch.object(loop, "time", lambda: now),
+        patch("qq_agent.groups.time.time", lambda: now),
+    ):
+        for second in range(expected[-1][0] + 61):
+            now = 10000 + second
+            if second % 8 == 0 and (count is None or next_id <= count):
+                incoming = event(group=10, identifier=next_id, mention=False)
+                await receive(group_agent, incoming, dispatch=False)
+                next_id += 1
+            # Run callbacks due at this tick.
+            tick = loop.create_future()
+            loop.call_at(now, tick.set_result, None)
+            await tick
+            await asyncio.sleep(0)
+            if not agent.queue.empty():
+                batch = agent.queue.get_nowait()
+                payload = json.loads(
+                    agent.groups.input(batch)[0].text.split("\n", 1)[1]
+                )
+                ids = [int(row["message_id"]) for row in payload["messages"]]
+                first = observed[-1][1] + 1 if observed else 1
+                assert ids == list(range(first, ids[-1] + 1))
+                observed.append((second, ids[-1]))
+                agent.groups.status(batch, "submitted")
+                agent.groups.status(batch, "completed")
+                agent.groups.result(batch, "completed", visible)
+                agent.mark(batch, "completed")
+    assert observed == expected
 
-    message = NS(direct=False, sender_id="1")
-    window = GroupWindow(0, 5)
-    window.observe(message, 1, (0, "1"), 1)
-    assert window.deadline == 3
-    window.observe(message, 2, (1, "2"), 2)
-    assert window.deadline == 2.5
-    window = GroupWindow(0, 5)
-    for arrival in (1, 2, 3, 4, 5, 6, 7):
-        window.observe(message, arrival, (arrival - 1, "1"), arrival)
-    assert window.deadline == 8
-    window.observe(message, 9, (7, "1"), 9)
-    assert window.deadline == 8
-    window = GroupWindow(0, 5)
-    message.direct = True
-    window.observe(message, 1, (0, "1"), 1)
-    window.observe(message, 1.5, (1, "1"), 1.5)
-    assert window.deadline == 2
+
+@pytest.mark.parametrize("mention", [True, False], ids=["mention", "quote"])
+async def test_direct_deadline(group_agent, mention):
+    env = group_agent
+    loop = asyncio.get_running_loop()
+    now = 10000
+    with (
+        patch.object(loop, "time", lambda: now),
+        patch("qq_agent.groups.time.time", lambda: now),
+    ):
+        await receive(env, event(group=10, user=99, identifier=90, mention=False))
+        for index, user in enumerate((1, 1, 2)):
+            incoming = event(group=10, user=user, identifier=index + 1, mention=False)
+            if index == 0:
+                incoming["message"] = [{"type": "image", "data": {"file": "photo"}}]
+            await receive(env, incoming, dispatch=False)
+            assert env.agent.group_windows["group-10"].deadline == 10015
+            now += 1
+        direct = event(
+            group=10, identifier=4, mention=mention, reply=None if mention else "90"
+        )
+        await receive(env, direct, dispatch=False)
+        assert env.agent.group_windows["group-10"].deadline == 10004
+        now += 0.5
+        await receive(env, event(group=10, identifier=5), dispatch=False)
+        assert env.agent.group_windows["group-10"].deadline == 10004
 
 
 async def test_idle_boundary(group_agent):
@@ -997,7 +1059,7 @@ async def test_slow_preparation(group_agent):
     with patch("qq_agent.groups.time.time", return_value=10000):
         message = parse_message(event(group=10, mention=False), env.agent.settings)
         env.agent.groups.record(message)
-    with patch("qq_agent.groups.time.time", return_value=10010):
+    with patch("qq_agent.groups.time.time", return_value=10016):
         quoted = await env.agent.groups.prepare(message)
         env.agent.groups.observe(message, quoted)
         env.agent.observe_group(message)
