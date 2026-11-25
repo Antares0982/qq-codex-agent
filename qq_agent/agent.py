@@ -79,6 +79,7 @@ class Agent:
         self.tools = ToolServer(
             self.turns.contexts,
             self.turns.images,
+            settings.image_api_key_file,
         )
         self.cleanup = Cleanup(
             settings, self.db, self.jobs, self.resetting, self.turns.contexts
@@ -445,6 +446,7 @@ class Agent:
                 self.clear_chat(key)
 
     async def cancel_chat(self, key, identifier=None):
+        self.turns.revoke_tools(key)
         if key.startswith("group-"):
             timer = self.group_timers.pop(key, None)
             if timer:

@@ -8,19 +8,19 @@ HANDOFF_INSTRUCTIONS = """请根据当前可见上下文，生成供下一个群
 
 GROUP_BASE_INSTRUCTIONS = """你是 QQ 群成员，自然、简洁地参与对话。
 收到群成员直接 @ 你的新消息时，下一条有效 JSON 的 response 必须提供非空文本；文本成功发送后解除此要求，新的直接 @ 再次设置。沉默、仅发表情或通过工具发送图片不能满足此要求。没有尚未回复的直接 @ 时，可以自主决定是否回复；引用和历史中的 @ 不产生回复义务。
-生成或修改图片使用内置图片生成工具。qq_image.list_images 获取已保存原图，qq_image.send_image 发送图片，只有成功才表示已发送；加工图片可使用 Pillow。
+普通静态图优先使用内置图片生成工具，特殊需求按当前可用工具说明选择。qq_image.list_images 获取已保存原图，qq_image.send_image 发送图片，只有成功才表示已发送；加工图片可使用 Pillow。
 群回复对全群公开。"""
 
 IMAGE_INSTRUCTIONS = """本会话通过 QQ 交付结果。用户无法直接访问你的硬盘、工作区路径、sandbox 链接或工具图片预览。
 生成图片完成后，应用自动把原图保存到当前会话工作区。调用 qq_image.list_images 查询真实路径、生成 ID 和顺序；不要猜测工具内部路径，不要自行搬运或解码 Base64。
 需要用户收到图片时，必须显式调用 qq_image.send_image。path 指定当前工作区中的 PNG/JPEG/GIF/WebP（最大 32 MiB）；省略 path 则发送最近生成的原图。此工具由应用直接上传，不依赖命令沙箱，也不要求 QQ 读取本地磁盘。
-多帧拼接、动图等任务：先生成所需帧，查询路径，使用代码加工并保存最终 GIF，再调用 send_image(path=最终文件路径)。中间帧不必发送；不能用 SVG 包装代替 PNG/GIF。工作区图片跨轮及 /new 保留，可以补发；超过 14 天未访问或修改的文件会被每日清理。
+普通静态生成和编辑优先走内置生图。需要原生 GIF、标注编辑、显式质量或构图控制、用户点名 2.6 时，用可用的 qq_image.generate_image；这是独立计费的官方 API。若未配置，不声称已用 2.6。已有帧需拼接时用 Pillow，只发最终 GIF，不发送中间帧。工作区图片跨轮及 /new 保留，可以补发；超过 14 天未访问或修改的文件会被每日清理。
 只有 send_image 返回成功才能声称图片已发送。发送失败或结果未知时如实说明；不要自动重试结果未知的发送。resend=true 仅用于用户明确要求再次发送。
 命令沙箱不可用时，原图仍可通过上述工具查询和发送；需要加工的任务应明确说明加工失败。"""
 
 COMMON_INSTRUCTIONS = """用户无法访问工作区文件或工具中的图片预览。生成的原图由应用保存到当前会话工作区；调用 qq_image.list_images 获取路径和生成顺序，不要猜测路径或自行解码 Base64。
 交付图片时调用 qq_image.send_image(path="工作区中的图片路径")；省略 path 会发送最新原图。支持 PNG、JPEG、GIF、WebP，最大 32 MiB；不支持 SVG。只有工具返回成功，才能告知用户图片已发送。
-制作动图时，先取得各帧路径，再用代码和 Pillow 合成 GIF，最后只发送成品。每天清理超过 14 天未访问或修改的文件，历史图片路径可能已失效。
+每天清理超过 14 天未访问或修改的文件，历史图片路径可能已失效。
 发送结果未知时不要自动重试；仅在用户明确要求补发时使用 resend=true。
 环境中提供python3, uv, gh, nix。"""
 
@@ -59,6 +59,8 @@ PROFILE_EMPTY_ERROR = "未返回总结 JSON"
 
 PILLOW_INSTRUCTIONS = """
 图片加工可使用已安装 Pillow 的 Python：{executable}"""
+
+INPUT_IMAGE_PATHS = "\n附图的工作区路径（按出现顺序）：{paths}"
 
 TIME_INSTRUCTIONS = """
 群聊记录的 time 均为系统本地时间（{timezone:%Z %z}）。"""

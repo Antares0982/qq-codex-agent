@@ -38,7 +38,7 @@
 
 ## 图片与清理
 
-生成图片从 Codex 结构化事件提取 base64，在应用内解码并原子写入工作区 `artifacts/`，图片索引及交付记录持久保存。提醒图片通过 `pics` 包资源加载。
+内置生图从 Codex 事件取图；可选付费生图经活动轮次的 Unix socket 交给宿主，向 OpenAI Images API 发送 JSON 或 multipart。两者共用原子保存、原图索引和显式交付路径。提醒图片通过 `pics` 包资源加载。
 
 群图片自动附图由 `GroupTurn.prepare_input` 在 thread 和活动上下文建立后组装，每批首次 turn 使用；冻结 JSON 保持不变，后接文字标签和 SDK `ImageInput`。`Images.read_received` 共用工具下载、鉴权、缓存及首帧预览逻辑，自动附图不经过 MCP 调用。预览由 `qq_agent.compression` 压缩；解码、缩放及编码在线程中运行，返回后重新校验活动任务。图片输入使用实际输出 MIME，预览失败不回退为发送超大原图。
 

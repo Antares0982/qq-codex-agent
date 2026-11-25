@@ -1083,12 +1083,20 @@ class TestAgent:
         assert thread.turn.call_args.kwargs["effort"] == ReasoningEffort.medium
         turn.interrupt.assert_not_called()
 
-    async def test_chat_tools(self):
+    @pytest.mark.parametrize("paid", (False, True))
+    async def test_chat_tools(self, paid):
+        if paid:
+            self.settings.image_api_key_file = self.root / "key"
         self.bot.call = AsyncMock(return_value={})
         self.setup_turn([turn_done()])
         for incoming in (event(), event(group=10)):
             await self.execute(parse_message(incoming, self.settings))
             options = self.codex.thread_start.call_args.kwargs
+            server = options["config"]["mcp_servers"]["qq_image"]
+            assert ("--generate" in server["args"]) == paid
+            if paid:
+                assert server["tool_timeout_sec"] > image_tool.GENERATION_TIMEOUT
+                assert len(server["args"][-1]) == 32
             assert (
                 "--group" in options["config"]["mcp_servers"]["qq_image"]["args"]
             ) == bool(incoming.get("group_id"))

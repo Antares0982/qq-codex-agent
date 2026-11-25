@@ -136,6 +136,7 @@ class Turns:
                     await asyncio.gather(reminder, return_exceptions=True)
                 await self.finish_message(message, status, has_text, notices)
         except (asyncio.CancelledError, TimeoutError) as error:
+            self.revoke_tools(message.key)
             if reminder:
                 reminder.cancel()
             await self.report_interruption(message, context, error, started)
@@ -367,6 +368,12 @@ class Turns:
             intermediate=message.key in self.resetting,
         )
 
+    def revoke_tools(self, key):
+        context = self.contexts.pop(key, None)
+        if context:
+            for task in context.tasks:
+                task.cancel()
+
     async def cleanup_context(self, message, context, submitted, notices):
         row = self.db.execute(
             "SELECT status FROM messages WHERE id=?", (message.identifier,)
@@ -374,15 +381,12 @@ class Turns:
         for extra in submitted:
             self.mark(extra, row[0] if row else "interrupted")
         if context:
-            self.contexts.pop(message.key, None)
+            self.revoke_tools(message.key)
         for notice in notices:
             notice.cancel()
         await asyncio.gather(*notices, return_exceptions=True)
         if context:
-            tasks = list(context.tasks)
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*context.tasks, return_exceptions=True)
 
     async def steer_messages(self, turn, context, finished, submitted, deadline):
         key = context.message.key

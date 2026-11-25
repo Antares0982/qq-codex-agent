@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 
 import aiohttp
 from openai_codex import LocalImageInput, TextInput
@@ -9,6 +10,7 @@ from .onebot import image_suffix
 from .prompts import (
     AT_ALL,
     AT_MEMBER,
+    INPUT_IMAGE_PATHS,
     MEMBER_ID,
     QUOTE_LINE,
     USER_CURRENT,
@@ -112,10 +114,15 @@ class Inputs:
                 ]
         inputs: list[TextInput | LocalImageInput] = []
         for text, images in blocks:
-            inputs.append(TextInput(text))
+            attachments = []
             for image in images:
                 data = await self.bot.image(image)
                 path = folder / (uuid.uuid4().hex + image_suffix(data))
                 path.write_bytes(data)
-                inputs.append(LocalImageInput(str(path)))
+                attachments.append(LocalImageInput(str(path)))
+            if attachments:
+                text += INPUT_IMAGE_PATHS.format(
+                    paths=", ".join(Path(item.path).name for item in attachments)
+                )
+            inputs.extend([TextInput(text), *attachments])
         return inputs

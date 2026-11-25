@@ -309,6 +309,7 @@ class GroupTurn:
                         status = "completed"
                         break
         except (asyncio.CancelledError, TimeoutError) as error:
+            self.owner.revoke_tools(message.key)
             status = "interrupted"
             if (
                 self.required or self.visible

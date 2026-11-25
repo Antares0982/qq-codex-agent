@@ -83,6 +83,8 @@ CLI/app-server 沙箱、只读资源、私有状态拒读和认证 socket 连接
 
 ## RPi 部署
 
+启用付费生图时设置 `services.qq-codex-agent.imageApiKeyFile = config.age.secrets.openaiPersonalApiKey.path;`。使用运行时路径字符串，文件仅服务用户可读。模块将文件只读挂载到 `/etc/qq-codex-private/image-api-key`，启动自检验证宿主可读而命令沙箱不可读。无需修改现有加密 TOML 或设置 `OPENAI_API_KEY`。宿主 Images API 客户端沿用服务的 HTTPS 代理及 `no_proxy`；不更改 NapCat 或 Codex 网络配置。
+
 树莓派 flake 导入本仓库的 NixOS 模块，共享认证服务从同一 flake 的默认包运行 `codex-auth`。
 Nix 仓库负责 agenix、代理、NapCat 启动顺序、宿主访问授权和 Pi 专属自检。
 服务与登录程序直接运行 Nix store 中的包，Pi 无需 clone 本仓库或创建虚拟环境。

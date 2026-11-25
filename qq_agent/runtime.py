@@ -511,8 +511,12 @@ class Runtime:
 
     async def prepare_thread(self, message, thread_id, context, options):
         folder = context.folder
-        if "group_id" in message.target:
-            options["config"]["mcp_servers"]["qq_image"]["args"].append(context.token)
+        server = options["config"]["mcp_servers"]["qq_image"]
+        if self.settings.image_api_key_file:
+            server["args"].append("--generate")
+            server["tool_timeout_sec"] = image_tool.GENERATION_TIMEOUT + 20
+        if "group_id" in message.target or self.settings.image_api_key_file:
+            server["args"].append(context.token)
         if thread_id:
             return await self.codex.thread_resume(thread_id, **options)
         if "group_id" in message.target:

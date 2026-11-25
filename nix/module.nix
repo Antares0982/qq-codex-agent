@@ -171,6 +171,11 @@ in
       description = "External allowlist used only when configFile is unset.";
     };
     tokenFile = lib.mkOption { type = lib.types.str; };
+    imageApiKeyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.externalPath;
+      default = null;
+      description = "Runtime OpenAI key file readable by the service; enables the paid QQ image tool.";
+    };
     groupPromptAllowMembers = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -244,16 +249,25 @@ in
       partOf = [ "codex-auth.service" ];
       restartTriggers = [ runtimeMounts ];
       wants = [ "network-online.target" ];
-      inherit environment;
+      environment =
+        environment
+        // lib.optionalAttrs (cfg.imageApiKeyFile != null) {
+          QQ_IMAGE_API_KEY_FILE = "/etc/qq-codex-private/image-api-key";
+        };
       serviceConfig = serviceConfig // {
         ExecStartPre = [
           "${app}/bin/qq-codex-check"
         ];
         ExecStart = "${app}/bin/qq-codex-agent --config /etc/qq-codex-private/config.toml";
-        BindReadOnlyPaths = serviceConfig.BindReadOnlyPaths ++ [
-          "${cfg.tokenFile}:/etc/qq-codex-private/napcat-token"
-          "/run/codex-auth"
-        ];
+        BindReadOnlyPaths =
+          serviceConfig.BindReadOnlyPaths
+          ++ [
+            "${cfg.tokenFile}:/etc/qq-codex-private/napcat-token"
+            "/run/codex-auth"
+          ]
+          ++ lib.optional (
+            cfg.imageApiKeyFile != null
+          ) "${cfg.imageApiKeyFile}:/etc/qq-codex-private/image-api-key";
         Restart = "on-failure";
         RestartSec = "10s";
       };

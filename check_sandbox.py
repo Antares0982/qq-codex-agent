@@ -95,6 +95,10 @@ def check_thread_start(settings, directory):
 def main():
     settings = Settings.load("/etc/qq-codex-private/config.toml")
     prepare_home(settings)
+    if settings.image_api_key_file and not os.access(
+        settings.image_api_key_file, os.R_OK
+    ):
+        raise RuntimeError("Image API key file is unreadable")
     if settings.resources_dir is None:
         raise RuntimeError("Missing public resource directory")
     state = Path("/var/lib/qq-codex-agent")
@@ -147,6 +151,7 @@ def main():
                     "test ! -r /var/lib/qq-codex-agent/codex/auth.json; "
                     "test ! -r /etc/qq-codex-private/napcat-token; "
                     "test ! -r /etc/qq-codex-private/config.toml; "
+                    "test ! -r /etc/qq-codex-private/image-api-key; "
                     "test ! -r /run/codex-auth/auth.sock; "
                     'printf ok > probe; test "$(cat probe)" = ok'
                 ),
@@ -174,6 +179,7 @@ def main():
                 plugin_canary.name,
                 state / "codex/auth.json",
                 settings.token_file,
+                *([settings.image_api_key_file] if settings.image_api_key_file else []),
                 "/etc/qq-codex-private/config.toml",
                 "/etc/qq-codex-private/allowlist.toml",
             ],

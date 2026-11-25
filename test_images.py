@@ -12,6 +12,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from openai_codex.generated.v2_all import ImageGenerationThreadItem
 from PIL import Image
 from PIL.GifImagePlugin import GifImageFile
@@ -19,7 +21,7 @@ from PIL.GifImagePlugin import GifImageFile
 import compress_stickers
 import image_assets
 import image_tool
-from qq_agent import cleanup, compression, replies, stickers
+from qq_agent import cleanup, compression, image_api, replies, stickers
 from qq_agent.agent import Agent
 from qq_agent.config import GroupSettings, Settings
 from qq_agent.messages import ImageTurn, parse_message
@@ -87,6 +89,137 @@ class TestImages:
             == path
         )
 
+    @pytest.mark.parametrize("group", [False, True])
+    async def test_paid_generation(self, group, monkeypatch):
+        if group:
+            self.group_context()
+        source = self.save()
+        with Image.open(io.BytesIO(PNG)) as picture:
+            overlay = io.BytesIO()
+            Image.new("RGBA", picture.size).save(overlay, format="PNG")
+        markup = self.save(overlay.getvalue())
+        animation = io.BytesIO()
+        frames = [Image.new("RGB", (8, 8), color) for color in ("red", "blue")]
+        frames[0].save(
+            animation,
+            "GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=200,
+            loop=0,
+        )
+        requests = []
+
+        async def handler(request):
+            assert request.headers["Authorization"] == "Bearer fake-test-key"
+            assert request.path == "/v1/images/" + ("edits" if group else "generations")
+            if group:
+                payload = await request.post()
+                assert payload["image"].file.read() == PNG
+                assert payload["markup"].file.read() == overlay.getvalue()
+            else:
+                payload = await request.json()
+            assert payload["model"] == (
+                "gpt-image-2.6-sunburst" if group else "gpt-image-2.6-flare"
+            )
+            assert (
+                int(payload["frame_count"]) == 2 and payload["output_format"] == "gif"
+            )
+            requests.append(payload["prompt"])
+            return web.json_response(
+                {
+                    "data": [
+                        {"b64_json": base64.b64encode(animation.getvalue()).decode()}
+                    ]
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/{path:.*}", handler)
+        async with TestServer(app) as upstream:
+            proxy = str(upstream.make_url("/")).rstrip("/")
+            monkeypatch.setenv("http_proxy", proxy if group else "http://127.0.0.1:1")
+            monkeypatch.setenv("no_proxy", "" if group else "127.0.0.1")
+            monkeypatch.delenv("NO_PROXY", raising=False)
+            monkeypatch.setattr(
+                image_api,
+                "ENDPOINT",
+                ("http://images.invalid" if group else proxy) + "/v1/images",
+            )
+            key_file = self.root / "key"
+            key_file.write_text("fake-test-key\n")
+            self.agent.tools.key_file = key_file
+            server = await asyncio.start_unix_server(
+                self.agent.tools.send_image, path=self.root / "image.sock"
+            )
+            options = {"prompt": "loop", "output_format": "gif", "frame_count": 2}
+            if group:
+                options.update(
+                    images=[source], markup=markup, model="gpt-image-2.6-sunburst"
+                )
+            async with server:
+
+                async def call(token):
+                    return await asyncio.to_thread(
+                        image_tool.call,
+                        str(self.root / "image.sock"),
+                        self.folder.name,
+                        "generate_image",
+                        options,
+                        token,
+                    )
+
+                assert (await call("expired"))["isError"]
+                result = (await call(self.context.token))["structuredContent"]
+        assert requests == ["loop"]
+        assert (
+            self.agent.turns.images.list_images(self.context)["images"][-1][
+                "generation_id"
+            ]
+            == result["generation_id"]
+        )
+        assert (self.folder / result["path"]).read_bytes() == animation.getvalue()
+        self.bot.send.assert_not_called()
+        await self.agent.turns.images.deliver_image(
+            self.context, {"action": "send_image", "path": result["path"]}
+        )
+        self.bot.send.assert_awaited_once_with(self.message, image=animation.getvalue())
+
+    async def test_generation_boundaries(self, monkeypatch):
+        generate = self.agent.turns.images.generate_image
+        request = {
+            "action": "generate_image",
+            "token": self.context.token,
+            "prompt": "draw",
+        }
+        with pytest.raises(ValueError):
+            await generate(self.context, request.copy(), None)
+        source = self.save()
+        (self.folder / "link.png").symlink_to(self.folder / source)
+        for invalid in (
+            {"images": ["../key"]},
+            {"images": ["link.png"]},
+            {"images": ["https://example.org/image.png"]},
+            {"markup": source},
+            {"output_format": "svg"},
+            {"frame_count": 3},
+            {"images": [source], "markup": source},
+        ):
+            with pytest.raises(ValueError):
+                await generate(self.context, request | invalid, self.root / "key")
+
+        async def late(*args):
+            self.agent.turns.contexts.clear()
+            return PNG
+
+        upstream = AsyncMock(side_effect=late)
+        monkeypatch.setattr("qq_agent.images.request_image", upstream)
+        with pytest.raises(ValueError):
+            await generate(self.context, request.copy(), self.root / "key")
+        upstream.assert_awaited_once()
+        assert len(self.agent.turns.images.list_images(self.context)["images"]) == 1
+        self.bot.send.assert_not_called()
+
     async def test_concurrent_send_is_deduplicated(self):
         self.save()
         first, second = await asyncio.gather(
@@ -99,6 +232,54 @@ class TestImages:
         )
         assert first["ok"] and second["already_sent"]
         self.bot.send.assert_awaited_once()
+
+    async def test_generation_timeout(self, monkeypatch):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def delayed(request):
+            calls.append(await request.json())
+            started.set()
+            await release.wait()
+            return web.json_response({})
+
+        app = web.Application()
+        app.router.add_post("/generations", delayed)
+        async with TestServer(app) as upstream:
+            monkeypatch.setattr(
+                image_api, "ENDPOINT", str(upstream.make_url("/")).rstrip("/")
+            )
+            monkeypatch.setattr(image_api, "GENERATION_TIMEOUT", 0.5)
+            monkeypatch.setenv("no_proxy", "127.0.0.1")
+            key_file = self.root / "key"
+            key_file.write_text("fake-key")
+            options = {
+                "action": "generate_image",
+                "token": self.context.token,
+                "prompt": "draw",
+            }
+            try:
+                with pytest.raises(ValueError, match="结果未知"):
+                    await self.agent.turns.images.generate_image(
+                        self.context, options.copy(), key_file
+                    )
+                assert len(calls) == 1
+                started.clear()
+                task = asyncio.create_task(
+                    self.agent.turns.images.generate_image(
+                        self.context, options.copy(), key_file
+                    )
+                )
+                self.context.tasks.add(task)
+                await asyncio.wait_for(started.wait(), 5)
+                await self.agent.cancel_chat(self.message.key)
+                await asyncio.gather(task, return_exceptions=True)
+                assert task.cancelled()
+            finally:
+                release.set()
+        assert not self.agent.turns.images.list_images(self.context)["images"]
+        self.bot.send.assert_not_called()
 
     async def test_unknown_delivery_survives_restart(self):
         self.save()

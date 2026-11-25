@@ -91,8 +91,14 @@ def read_image(folder, value):
     return path.as_posix(), data
 
 
-def save_image(folder, data):
+def save_image(folder, data, expected=None):
     suffix = image_format(data)
+    if expected is not None and expected != suffix:
+        raise ValueError("返回的图片格式与请求不符。")
+    if expected == ".gif":
+        with Image.open(io.BytesIO(data)) as picture:
+            if not getattr(picture, "is_animated", False):
+                raise ValueError("未返回多帧 GIF。")
     filename = uuid.uuid4().hex + suffix
     with workspace_directory(folder) as root:
         try:

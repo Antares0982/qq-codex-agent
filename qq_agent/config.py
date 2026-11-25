@@ -1,4 +1,5 @@
 import logging
+import os
 import tomllib
 from dataclasses import dataclass
 from datetime import time
@@ -67,6 +68,7 @@ class Settings:
     model_auto_compact_token_limit: int = 258000
     group_image_limit: int = 5
     moderation_url: str | None = None
+    image_api_key_file: Path | None = None
 
     @classmethod
     def load(cls, path):
@@ -132,9 +134,12 @@ class Settings:
             raw[key] = Path(raw[key])
             if not raw[key].is_absolute():
                 raise ValueError(f"{key} must be absolute")
+        if "QQ_IMAGE_API_KEY_FILE" in os.environ:
+            raw["image_api_key_file"] = os.environ["QQ_IMAGE_API_KEY_FILE"]
         for key in (
             "auth_socket",
             "resources_dir",
+            "image_api_key_file",
         ):
             if key in raw:
                 raw[key] = Path(raw[key])

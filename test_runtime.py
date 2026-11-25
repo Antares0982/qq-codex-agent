@@ -258,6 +258,7 @@ async def test_runtime_context(tmp_path, mode, monkeypatch):
         tmp_path / "work",
         agent_admin_qq="123456789",
         model_auto_compact_token_limit=210000,
+        image_api_key_file=tmp_path / "fake-key" if mode == "plain" else None,
     )
     monkeypatch.setattr(runtime_module, "GROUP_INSTRUCTIONS", "GROUP_TEMPLATE_ALPHA")
     db = open_database(settings)
@@ -526,7 +527,9 @@ async def test_runtime_context(tmp_path, mode, monkeypatch):
                 for tool in requests[0]["tools"]
                 if tool.get("name") == "mcp__qq_image"
             )
-            assert "view_image" in {tool["name"] for tool in image_tools["tools"]}
+            image_names = {tool["name"] for tool in image_tools["tools"]}
+            assert "view_image" in image_names
+            assert ("generate_image" in image_names) == (mode == "plain")
             if mode in {"pre_turn", "mid_turn"}:
                 metadata = json.loads(
                     compactions[0]["client_metadata"]["x-codex-turn-metadata"]

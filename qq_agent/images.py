@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import time
+import uuid
 
 import aiohttp
 from openai_codex import ImageInput, TextInput
@@ -12,6 +13,7 @@ from PIL import Image
 from image_assets import OUTPUT_LIMIT, read_image, save_image
 
 from .compression import compress_bytes
+from .image_api import image_request, request_image
 from .logging import LOG, log_text
 from .prompts import (
     IMAGE_FAILED,
@@ -318,9 +320,43 @@ class Images:
         data = base64.b64decode(item.result, validate=True)
         if not data or len(data) > OUTPUT_LIMIT:
             raise ValueError("Invalid generated image")
-        path = save_image(folder, data)
+        return self.index_image(folder, item.id, data)
+
+    def index_image(self, folder, identifier, data, expected=None):
+        path = save_image(folder, data, expected)
         with self.db:
             self.db.execute(
                 "INSERT INTO generated_images (folder, item_id, path, size) VALUES (?, ?, ?, ?)",
-                (folder.name, item.id, path, len(data)),
+                (folder.name, identifier, path, len(data)),
             )
+        return {
+            "ok": True,
+            "generation_id": identifier,
+            "path": path,
+            "size": len(data),
+        }
+
+    async def generate_image(self, context, request, key_file):
+        token = request.pop("token", None)
+        request.pop("action")
+
+        def check_turn():
+            if (
+                not key_file
+                or self.contexts.get(context.message.key) is not context
+                or token != context.token
+            ):
+                raise ValueError("生图工具未配置或不属于当前任务。")
+
+        check_turn()
+        endpoint, body = await asyncio.to_thread(image_request, context.folder, request)
+        check_turn()
+        data = await request_image(key_file, endpoint, body)
+        check_turn()
+        expected = request.get("output_format", "png")
+        return self.index_image(
+            context.folder,
+            uuid.uuid4().hex,
+            data,
+            ".jpg" if expected == "jpeg" else "." + expected,
+        )

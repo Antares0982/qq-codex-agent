@@ -31,6 +31,7 @@ let
   external = evaluate {
     services.qq-codex-agent = {
       package = pkgs.emptyDirectory;
+      imageApiKeyFile = "/run/agenix/test-image-key";
       configFile = "/run/agenix/full-config";
       allowlistFile = pkgs.lib.mkForce null;
     };
@@ -62,6 +63,9 @@ assert custom.services.qq-codex-agent.groupPromptAllowMembers;
 assert config.services.qq-codex-agent.agentAdminQQ == null;
 assert custom.services.qq-codex-agent.agentAdminQQ == "123456789";
 assert config.services.qq-codex-agent.configFile == null;
+assert !(config.systemd.services.qq-codex-agent.environment ? QQ_IMAGE_API_KEY_FILE);
+assert builtins.elem "/run/agenix/test-image-key:/etc/qq-codex-private/image-api-key"
+  externalMounts;
 assert builtins.elem "/run/test-allowlist:/etc/qq-codex-private/allowlist.toml" mounts;
 assert
   builtins.filter (path: pkgs.lib.hasSuffix ":/etc/qq-codex-private/config.toml" path) externalMounts

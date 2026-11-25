@@ -1,5 +1,9 @@
 # 图片与文件
 
+配置后，群聊和私聊均可使用 `qq_image.generate_image`。普通静态生图和编辑优先用 Codex 内置工具；用户指定 2.6、需要原生动图、标注编辑或显式控制构图和质量时才走独立计费的 OpenAI API。默认 Flare，可选 Sunburst。原生 GIF 支持 2–16 帧（默认 9）、每帧 20–2000 ms（默认 200）。`complexity` 控制构图规划，`quality` 控制渲染质量；[官方 Images API](https://developers.openai.com/api/docs/guides/image-generation) 也支持 SVG，但 QQ 工具不提供该格式。
+
+编辑最多传 5 张当前工作区的静态 PNG/JPEG/WebP，标注层须为与首图显示尺寸相同且含透明像素的 PNG，上传总大小不超过 32 MiB。群消息图片先经 `view_image` 获取可用路径。生成成功返回原图路径和 ID，不自动发送。失败、超时或取消不自动重试；取消后不会保存迟到结果，但不能撤销已发请求或保证不计费。
+
 - 仅支持文本和图片。生成图片保存到会话工作区 `artifacts/`，不会自动发送。`qq_image.list_images` 返回最近 100 张原图的生成 ID、顺序及相对路径；`qq_image.send_image(path=...)` 发送工作区中的 PNG/JPEG/GIF/WebP（最大 32 MiB），省略路径发送最新原图。拒绝跨工作区路径、符号链接及特殊文件。
 
 - 图片文件和原图索引跨轮、重启及 `/new` 后保留。可用随应用安装的 Pillow 加工多帧并发送最终 GIF；中间帧无须发送。成功发送不删除源文件，同轮重复调用去重；发送结果未知时不自动重试，仅在用户明确要求时使用 `resend=true`。

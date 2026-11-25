@@ -7,9 +7,10 @@ import aiohttp
 
 
 class ToolServer:
-    def __init__(self, contexts, images):
+    def __init__(self, contexts, images, key_file=None):
         self.contexts = contexts
         self.images = images
+        self.key_file = key_file
 
     async def send_image(self, reader, writer):
         contexts = {context.folder.name: context for context in self.contexts.values()}
@@ -33,6 +34,10 @@ class ToolServer:
                     response = self.images.list_images(context)
                 elif request.get("action") == "view_image":
                     response = await self.images.view_image(context, request)
+                elif request.get("action") == "generate_image":
+                    response = await self.images.generate_image(
+                        context, request, self.key_file
+                    )
                 elif (
                     isinstance(request, dict) and request.get("action") == "send_image"
                 ):

@@ -2,6 +2,53 @@ import json
 import socket
 import sys
 
+GENERATION_TIMEOUT = 600
+MODELS = ["gpt-image-2.6-flare", "gpt-image-2.6-sunburst"]
+FORMATS = ["png", "jpeg", "webp", "gif"]
+QUALITIES = ["auto", "low", "medium", "high", "xhigh", "max"]
+COMPLEXITIES = ["low", "medium", "high"]
+GENERATION_TOOL = {
+    "name": "generate_image",
+    "description": "用付费 OpenAI GPT-Image 2.6 生成或编辑一张图。普通静态图优先 Codex 内置生图；本工具可直接生成循环 GIF（描述动作和循环方式）、用透明 PNG 标注引导编辑，或分别控制构图规划 complexity 和渲染质量 quality。用户点名 2.6 时也用本工具。Flare 默认，精细编辑可选 Sunburst。参考图用当前工作区真实路径；群图先用 view_image。官方支持 SVG，但本工具不开放。返回原图路径，不会发到 QQ；请调用 send_image。失败或结果未知不要自动重试。",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "minLength": 1},
+            "model": {"type": "string", "enum": MODELS, "default": MODELS[0]},
+            "images": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {"type": "string"},
+                "description": "按顺序提供 PNG/JPEG/WebP 静态参考图；不传则从文本生成。",
+            },
+            "markup": {
+                "type": "string",
+                "description": "与首张参考图显示尺寸一致、含透明像素的 PNG 标注层路径。",
+            },
+            "output_format": {"type": "string", "enum": FORMATS, "default": "png"},
+            "size": {
+                "type": "string",
+                "description": "auto 或 WIDTHxHEIGHT，宽高均为 16 的倍数。",
+            },
+            "quality": {"type": "string", "enum": QUALITIES},
+            "complexity": {"type": "string", "enum": COMPLEXITIES},
+            "frame_count": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 16,
+                "description": "仅 GIF，默认 9 帧。",
+            },
+            "frame_duration_ms": {
+                "type": "integer",
+                "minimum": 20,
+                "maximum": 2000,
+                "description": "仅 GIF，默认每帧 200 毫秒。",
+            },
+        },
+        "required": ["prompt"],
+        "additionalProperties": False,
+    },
+}
 
 GROUP_TOOLS = [
     {
@@ -52,7 +99,7 @@ TOOLS = [
 def call(path, session, action, arguments, token=None):
     with socket.socket(socket.AF_UNIX) as client:
         # The host waits up to 30 seconds for NapCat's acknowledgement.
-        client.settimeout(40)
+        client.settimeout(GENERATION_TIMEOUT + 10 if action == "generate_image" else 40)
         client.connect(path)
         client.sendall(
             (
@@ -62,7 +109,8 @@ def call(path, session, action, arguments, token=None):
                         "session": session,
                         **arguments,
                         **({"token": token} if token is not None else {}),
-                    }
+                    },
+                    ensure_ascii=False,
                 )
                 + "\n"
             ).encode()
@@ -87,9 +135,15 @@ def call(path, session, action, arguments, token=None):
 def main():
     path = sys.argv[1]
     session = sys.argv[2] if len(sys.argv) > 2 else None
-    group = len(sys.argv) == 5 and sys.argv[3] == "--group"
-    token = sys.argv[4] if group else None
-    tools = TOOLS + (GROUP_TOOLS if group else [])
+    flags = sys.argv[3:]
+    generation = "--generate" in flags
+    group = "--group" in flags
+    token = flags[-1] if flags else None
+    tools = (
+        TOOLS
+        + (GROUP_TOOLS if group and token != "--group" else [])
+        + ([GENERATION_TOOL] if generation else [])
+    )
     for line in sys.stdin:
         request = {}
         try:
@@ -112,17 +166,11 @@ def main():
                 params = request["params"]
                 name = params.get("name")
                 arguments = params.get("arguments", {})
-                allowed = (
-                    {"path", "resend"}
-                    if name == "send_image"
-                    else {"image_id"}
-                    if name == "view_image"
-                    else set()
-                )
+                tool = next((tool for tool in tools if tool["name"] == name), None)
                 if (
-                    name not in {tool["name"] for tool in tools}
+                    tool is None
                     or not isinstance(arguments, dict)
-                    or arguments.keys() - allowed
+                    or arguments.keys() - tool["inputSchema"]["properties"].keys()
                     or (
                         name == "view_image"
                         and not isinstance(arguments.get("image_id"), str)
@@ -135,14 +183,18 @@ def main():
                         session,
                         name,
                         arguments,
-                        **({"token": token} if name == "view_image" else {}),
+                        **(
+                            {"token": token}
+                            if name in ("view_image", "generate_image")
+                            else {}
+                        ),
                     )
                 except (OSError, ValueError):
                     result = {
                         "content": [
                             {
                                 "type": "text",
-                                "text": "图片工具连接失败或响应超时；发送结果可能未知，不要自动重试或声称已发送。",
+                                "text": "图片工具连接失败或响应超时；生成或发送结果未知，不要自动重试或声称已发送。",
                             }
                         ],
                         "isError": True,
